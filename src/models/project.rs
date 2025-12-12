@@ -1,0 +1,224 @@
+use std::{
+    fmt::Display,
+    fs::{self, File},
+    path::{Path, PathBuf},
+};
+
+use anyhow::{bail, Context};
+use pubgrub::{resolve, SemanticVersion};
+use serde::{Deserialize, Serialize};
+use tracing::{info, instrument, trace};
+
+use crate::{
+    config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
+    git_client::{client::GitClient, models::GitDependency},
+    models::{
+        directories::ProjectDirectory, lock_file::LockFile, project_manifest::ProjectManifest,
+    },
+    resolver::online_provider::RootProvider,
+};
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum ArchitectureEnum {}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum AssetFormatEnum {}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum ServerAbiVersionEnum {}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum ProjectTypeEnum {
+    Quark,
+    ServerExtension,
+}
+
+impl Display for ProjectTypeEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+/// The Project struct is used to manage files of a project, such as
+/// adding a dependency, creating a lockfile or packaging up for release.
+pub struct Project {
+    project_manifest: ProjectManifest,
+    lock_file: LockFile,
+    path: PathBuf,
+}
+
+impl Project {
+    #[instrument(skip(project_manifest))]
+    pub fn create(path: &Path, project_manifest: ProjectManifest) -> anyhow::Result<Self> {
+        project_manifest.write(&path.join(MAGNET_PROJECT_FILE))?;
+        let project = Self {
+            project_manifest,
+            lock_file: LockFile::create_empty(path.join(MAGNET_LOCK_FILE))?,
+            path: path.into(),
+        };
+        project.generate_project_directories()?;
+        info!("Created project");
+        Ok(project)
+    }
+
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            project_manifest: ProjectManifest::open(&path.join(MAGNET_PROJECT_FILE))?,
+            lock_file: LockFile::open(&path.join(MAGNET_LOCK_FILE))?,
+            path: path.to_path_buf(),
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub fn generate_project_directories(&self) -> anyhow::Result<()> {
+        for directory in [
+            ProjectDirectory::Assets,
+            ProjectDirectory::Classes,
+            ProjectDirectory::Dist,
+            ProjectDirectory::Examples,
+            ProjectDirectory::HelpSource,
+            ProjectDirectory::Platform,
+            ProjectDirectory::Tests,
+        ] {
+            let directory_name = directory.directory_name();
+            let path = self.path.join(directory_name);
+            fs::create_dir_all(&path).context("Could not create folder {?:folder}")?;
+            trace!(?directory_name, "Created project folder");
+        }
+        Ok(())
+    }
+
+    fn dist_path(&self) -> PathBuf {
+        self.path.join("dist")
+    }
+
+    pub fn add_dependency(
+        &mut self,
+        provider: GitClient,
+        dependency: GitDependency,
+    ) -> anyhow::Result<()> {
+        self.project_manifest.dependencies.push(dependency);
+
+        let root_provider = RootProvider {
+            git_provider: provider,
+            dependencies: self.project_manifest.dependencies.clone(),
+        };
+
+        match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
+            Ok(tree) => {
+                info!("Successfully resolved the tree! {:?}", tree);
+                self.lock_file = LockFile::from_tree(&tree)?;
+                self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
+                self.project_manifest
+                    .write(&self.path.join(MAGNET_PROJECT_FILE))?;
+            }
+            Err(err) => {
+                bail!("Failed to add dependency: {:?}", err);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// collects all files of the project and puts them into a .tar.gz
+    /// file which can be distributed.
+    /// Every Quark that gets uploaded to the package index gets packaged
+    /// this way.
+    /// It will be saved under with the upload identifier format in the project directory
+    /// under `/dist`.
+    #[instrument(skip(self))]
+    pub fn create_package(&self) -> anyhow::Result<PathBuf> {
+        // create tar file outside of directory and move it later back in to avoid recursive problems
+        // while scanning the project directory
+        let temp_tar = tempfile::NamedTempFile::new()?;
+        let temp_tar_path = temp_tar.path();
+        trace!(?temp_tar_path, "Create temporary tar file");
+
+        let tar_file = File::create(temp_tar_path)?;
+        let encoder = flate2::write::GzEncoder::new(&tar_file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+
+        Self::fill_archive(&mut tar, &self.path, &self.path)?;
+
+        tar.into_inner()?.finish()?;
+
+        let release_path = self.release_package_path();
+        temp_tar
+            .persist(&release_path)
+            .context("Could not write package file to {release_path:?}")?;
+        info!("Written package file to {:?}", release_path);
+
+        Ok(release_path)
+    }
+
+    fn release_package_path(&self) -> PathBuf {
+        self.dist_path().join(format!(
+            "{}_{}.tar.gz",
+            self.project_manifest.name,
+            self.project_manifest.version.to_string().replace(".", "-")
+        ))
+    }
+
+    /// Walks a the project directory recursively and adds the files accordingly
+    fn fill_archive(
+        tar: &mut tar::Builder<flate2::write::GzEncoder<&File>>,
+        base: &Path,
+        current: &Path,
+    ) -> Result<(), anyhow::Error> {
+        for entry in fs::read_dir(current).unwrap() {
+            let entry = entry?;
+            let path = entry.path();
+
+            if exclude_path(base, current) {
+                continue;
+            }
+            if path.is_dir() {
+                Self::fill_archive(tar, base, &path)?;
+            } else if path.is_file() {
+                let relative_path: PathBuf = path.strip_prefix(base)?.into();
+                trace!(?relative_path, "Include file");
+                tar.append_path_with_name(path, relative_path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+static PROJECT_EXCLUDE_PATHS: &[&str] = &[
+    "build",
+    ".git",
+    ".vscode",
+    ".DS_Store",
+    ProjectDirectory::Assets.directory_name(),
+    ProjectDirectory::Dist.directory_name(),
+    ProjectDirectory::Platform.directory_name(),
+];
+
+/// determines if a given path within the project directory gets ignored or not
+/// returns `true` if the given path should be rejected
+fn exclude_path(_base: &Path, current: &Path) -> bool {
+    let file_name = current.file_name().unwrap().to_str().unwrap();
+    PROJECT_EXCLUDE_PATHS.iter().any(|name| name == &file_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use super::*;
+
+    #[test]
+    fn test_exclude_path() {
+        let path = env::current_dir().unwrap();
+
+        for reject in ["dist", "platform", ".git"] {
+            assert!(exclude_path(&path, &path.join(reject)));
+            assert!(exclude_path(&path, &path.join("sub_idr").join(reject)));
+        }
+
+        for non_reject in ["foo.scd", "classes"] {
+            assert!(!exclude_path(&path, &path.join(non_reject)));
+            assert!(!exclude_path(&path, &path.join("sub_idr").join(non_reject)));
+        }
+    }
+}
