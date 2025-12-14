@@ -1,0 +1,207 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MagnetManifestV1",
+  "type": "object",
+  "properties": {
+    "magnet": {
+      "type": "number",
+      "description": "Magnet version"
+    },
+    "name": {
+      "type": "string",
+      "description": "Name of the project"
+    },
+    "version": {
+      "type": "string",
+      "description": "Version of this package",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Dependencies of the project",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "slug of the dependency"
+          },
+          "legacyQuark": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Used for the legacy quarks package management system"
+          },
+          "git": {
+            "type": "object",
+            "description": "specify git source of the package. Magnet package will not be queried.",
+            "properties": {
+              "ref": {
+                "type": "string",
+                "description": "Pin a commit ID to be used"
+              },
+              "url": {
+                "type": "string",
+                "description": "address to git repository"
+              },
+              "tag": {
+                "type": "string",
+                "description": "Git tag to be checked out"
+              },
+              "branch": {
+                "type": "string",
+                "description": "branch to be checked out"
+              }
+            }
+          },
+          "path": {
+            "type": "string",
+            "description": "Use this for local packages. If a local dependency is present it can not be published."
+          },
+          "index": {
+            "type": "string",
+            "description": "Use a custom package index."
+          },
+          "version": {
+            "type": "string",
+            "description": "restricting requested version via semantic versioning"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "Path to artifacts of the build process, used for bundling",
+      "properties": {},
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "quark",
+              "lepton",
+              "gluon"
+            ],
+            "type": "string",
+            "description": "Can be either Quark, Gluon or Lepton."
+          },
+          "globalPaths": {
+            "type": "array",
+            "description": "Paths to included for every plattform - include glob wildcards"
+          },
+          "platformPaths": {
+            "type": "object",
+            "description": "Platform dependent - i.e. binary files of your build output",
+            "properties": {
+              "platform": {
+                "enum": [
+                  "windows",
+                  "linux",
+                  "macos"
+                ],
+                "type": "string",
+                "description": "platform tag to match - one of macos, linux or windows"
+              },
+              "paths": {
+                "type": "array",
+                "description": "platform dependent files to include into the package"
+              }
+            },
+            "required": [
+              "platform",
+              "paths"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      }
+    },
+    "entrypoints": {
+      "type": "array",
+      "description": "Entrypoints for script executions",
+      "properties": {},
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "name of the entrypoint - can be used to run via magnet run"
+          },
+          "command": {
+            "type": "string",
+            "description": "command or script be executed"
+          },
+          "kind": {
+            "enum": [
+              "system",
+              "sclang"
+            ],
+            "type": "string",
+            "description": "kind of entrypoint"
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ]
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Metadata for this package",
+      "properties": {
+        "authors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "Authors and maintainers of the package"
+        },
+        "license": {
+          "type": "string",
+          "description": "License used for this project"
+        },
+        "tags": {
+          "type": "array",
+          "description": "Tags used for indexing"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of the project"
+        },
+        "repository": {
+          "type": "string",
+          "description": "URL of the git repository - mandatory when publishing to the index"
+        },
+        "readme": {
+          "type": "string",
+          "description": "Reamde file to be displayed on the server index - defaults to `README.md`"
+        }
+      }
+    },
+    "minSclangVersion": {
+      "type": "string",
+      "description": "The minimum necessary sclang version to run this package - defaults to 3.10.0 if not set",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+    }
+  },
+  "required": [
+    "version",
+    "name",
+    "magnet"
+  ]
+}
