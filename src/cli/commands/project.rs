@@ -10,9 +10,10 @@ use magnet::{
     git_client::models::GitDependency,
     models::{
         project::{Project, ProjectTypeEnum},
-        project_manifest::ProjectManifest,
+        project_manifest::MagnetManifestV1,
     },
 };
+use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{trace, warn};
 
@@ -46,7 +47,7 @@ impl MagnetSubCommand for ProjectInitArgs {
         }
 
         let valid_project_name = |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
-            match ProjectManifest::is_valid_name(input) {
+            match MagnetManifestV1::is_valid_name(input) {
                 true => Ok(Validation::Valid),
                 false => Ok(Validation::Invalid(
                     "Project name can only consist of alphanumeric characters and -_".into(),
@@ -80,7 +81,13 @@ impl MagnetSubCommand for ProjectInitArgs {
             fs::create_dir_all(&project_path).context("Could not create project directory")?;
         }
 
-        let project_manifest = ProjectManifest::new(project_name, None, None, None, None);
+        let project_manifest = MagnetManifestV1::new(
+            project_name,
+            None,
+            None,
+            SemanticVersion::new(0, 1, 0),
+            None,
+        )?;
 
         Project::create(&project_path, project_manifest)?;
 

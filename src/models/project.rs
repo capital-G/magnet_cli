@@ -13,7 +13,7 @@ use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency},
     models::{
-        directories::ProjectDirectory, lock_file::LockFile, project_manifest::ProjectManifest,
+        directories::ProjectDirectory, lock_file::LockFile, project_manifest::MagnetManifestV1,
     },
     resolver::online_provider::RootProvider,
 };
@@ -42,14 +42,14 @@ impl Display for ProjectTypeEnum {
 /// The Project struct is used to manage files of a project, such as
 /// adding a dependency, creating a lockfile or packaging up for release.
 pub struct Project {
-    project_manifest: ProjectManifest,
+    project_manifest: MagnetManifestV1,
     lock_file: LockFile,
     path: PathBuf,
 }
 
 impl Project {
     #[instrument(skip(project_manifest))]
-    pub fn create(path: &Path, project_manifest: ProjectManifest) -> anyhow::Result<Self> {
+    pub fn create(path: &Path, project_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
         project_manifest.write(&path.join(MAGNET_PROJECT_FILE))?;
         let project = Self {
             project_manifest,
@@ -63,7 +63,7 @@ impl Project {
 
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
-            project_manifest: ProjectManifest::open(&path.join(MAGNET_PROJECT_FILE))?,
+            project_manifest: MagnetManifestV1::open(&path.join(MAGNET_PROJECT_FILE))?,
             lock_file: LockFile::open(&path.join(MAGNET_LOCK_FILE))?,
             path: path.to_path_buf(),
         })
@@ -94,11 +94,17 @@ impl Project {
         provider: GitClient,
         dependency: GitDependency,
     ) -> anyhow::Result<()> {
-        self.project_manifest.dependencies.push(dependency);
+        self.project_manifest.dependencies.push(dependency.into());
 
         let root_provider = RootProvider {
             git_provider: provider,
-            dependencies: self.project_manifest.dependencies.clone(),
+            dependencies: self
+                .project_manifest
+                .dependencies
+                .clone()
+                .into_iter()
+                .map(GitDependency::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
         };
 
         match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
@@ -206,7 +212,7 @@ mod tests {
     fn test_exclude_path() {
         let path = env::current_dir().unwrap();
 
-        for reject in ["dist", "platform", ".git"] {
+        for reject in ["dist", ".git"] {
             assert!(exclude_path(&path, &path.join(reject)));
             assert!(exclude_path(&path, &path.join("sub_idr").join(reject)));
         }

@@ -2,63 +2,56 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::Path,
+    str::FromStr,
 };
 
 use anyhow::Context;
 use pubgrub::SemanticVersion;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use tracing::{error, instrument, trace};
-use url::Url;
 
-use crate::git_client::models::{
-    deserialize_semantic_version, serialize_semantic_version, GitDependency,
-};
+include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
 
-/// Translates to the `magnet.yaml` file which acts as meta-information
-/// storage of the project. If the project is not a library, there should also
-/// be a lock file included.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ProjectManifest {
-    magnet_format: u32,
-    pub name: String, // verify slug?
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    summary: Option<String>,
-    // project_type: ProjectTypeEnum,
-    #[serde(
-        deserialize_with = "deserialize_semantic_version",
-        serialize_with = "serialize_semantic_version"
-    )]
-    pub version: SemanticVersion,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    license: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    url: Option<Url>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    repo: Option<Url>,
-    pub dependencies: Vec<GitDependency>,
-}
-
-impl ProjectManifest {
+impl MagnetManifestV1 {
     pub fn new(
         name: String,
-        // project_type: ProjectTypeEnum,
-        summary: Option<String>,
+        description: Option<String>,
         license: Option<String>,
-        url: Option<Url>,
-        repo: Option<Url>,
-    ) -> Self {
-        ProjectManifest {
-            magnet_format: 1,
-            name,
-            // project_type,
-            dependencies: vec![],
-            version: SemanticVersion::new(0, 1, 0),
+        version: SemanticVersion,
+        min_sclang_version: Option<SemanticVersion>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            Self::is_valid_name(&name),
+            format!("{} is not a valid project name!", name)
+        );
+
+        let min_sclang_version = match min_sclang_version {
+            Some(version) => Some(MagnetManifestV1MinSclangVersion::from_str(
+                &version.to_string(),
+            )?),
+            None => None,
+        };
+        let version = MagnetManifestV1Version::from_str(&version.to_string())?;
+
+        let metadata = MagnetManifestV1Metadata {
+            authors: vec![],
+            description,
             license,
-            url,
-            repo,
-            summary,
-        }
+            readme: None,
+            repository: None,
+            tags: vec![],
+        };
+
+        Ok(MagnetManifestV1 {
+            artifacts: vec![],
+            dependencies: vec![],
+            entrypoints: vec![],
+            magnet: 1.0,
+            metadata: Some(metadata),
+            min_sclang_version,
+            name,
+            version,
+        })
     }
 
     pub fn is_valid_name(name: &str) -> bool {
@@ -98,11 +91,11 @@ mod tests {
     #[test]
     fn test_project_name() {
         for name in ["foobar", "hello42", "hello-foo", "hello_bar"] {
-            assert!(ProjectManifest::is_valid_name(name))
+            assert!(MagnetManifestV1::is_valid_name(name))
         }
 
         for name in ["foo@bar", "42hello", "_hello"] {
-            assert!(!ProjectManifest::is_valid_name(name))
+            assert!(!MagnetManifestV1::is_valid_name(name))
         }
     }
 }

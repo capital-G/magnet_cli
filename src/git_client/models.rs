@@ -2,7 +2,10 @@ use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::models::project::{ArchitectureEnum, AssetFormatEnum, ServerAbiVersionEnum};
+use crate::models::{
+    project::{ArchitectureEnum, AssetFormatEnum, ServerAbiVersionEnum},
+    project_manifest::MagnetManifestV1DependenciesItem,
+};
 
 // This contains the structure of the json files stored in git
 
@@ -95,4 +98,28 @@ where
     S: Serializer,
 {
     serializer.serialize_str(&version.to_string())
+}
+
+impl TryFrom<MagnetManifestV1DependenciesItem> for GitDependency {
+    type Error = anyhow::Error;
+
+    fn try_from(value: MagnetManifestV1DependenciesItem) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: value.name,
+            constraint: VersionReq::parse(value.version.unwrap_or("999.0.0".to_string()).as_str())?,
+        })
+    }
+}
+
+impl From<GitDependency> for MagnetManifestV1DependenciesItem {
+    fn from(value: GitDependency) -> Self {
+        MagnetManifestV1DependenciesItem {
+            git: None,
+            index: None,
+            legacy_quark: None,
+            name: value.name,
+            path: None,
+            version: Some(value.constraint.to_string()),
+        }
+    }
 }
