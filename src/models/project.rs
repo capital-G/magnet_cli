@@ -72,13 +72,10 @@ impl Project {
     #[instrument(skip(self))]
     pub fn generate_project_directories(&self) -> anyhow::Result<()> {
         for directory in [
-            ProjectDirectory::Assets,
             ProjectDirectory::Classes,
-            ProjectDirectory::Dist,
-            ProjectDirectory::Examples,
-            ProjectDirectory::HelpSource,
-            ProjectDirectory::Platform,
             ProjectDirectory::Tests,
+            ProjectDirectory::Docs,
+            ProjectDirectory::External,
         ] {
             let directory_name = directory.directory_name();
             let path = self.path.join(directory_name);
@@ -189,9 +186,7 @@ static PROJECT_EXCLUDE_PATHS: &[&str] = &[
     ".git",
     ".vscode",
     ".DS_Store",
-    ProjectDirectory::Assets.directory_name(),
     ProjectDirectory::Dist.directory_name(),
-    ProjectDirectory::Platform.directory_name(),
 ];
 
 /// determines if a given path within the project directory gets ignored or not
