@@ -1,5 +1,5 @@
 use std::{
-    fmt::Display,
+    fmt::{write, Display},
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -35,7 +35,11 @@ pub enum ProjectTypeEnum {
 
 impl Display for ProjectTypeEnum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        let name = match self {
+            ProjectTypeEnum::Quark => "Quark",
+            ProjectTypeEnum::ServerExtension => "Lepton",
+        };
+        write!(f, "{}", name)
     }
 }
 

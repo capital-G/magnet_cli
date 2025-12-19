@@ -19,6 +19,7 @@ impl MagnetManifestV1 {
         license: Option<String>,
         version: SemanticVersion,
         min_sclang_version: Option<SemanticVersion>,
+        project_kind: MagnetManifestV1ArtifactsItemKind,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             Self::is_valid_name(&name),
@@ -43,7 +44,11 @@ impl MagnetManifestV1 {
         };
 
         Ok(MagnetManifestV1 {
-            artifacts: vec![],
+            artifacts: vec![MagnetManifestV1ArtifactsItem {
+                global_paths: vec![],
+                kind: project_kind,
+                platform_paths: None,
+            }],
             dependencies: vec![],
             entrypoints: vec![],
             magnet: 1.0,

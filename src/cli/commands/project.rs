@@ -10,7 +10,7 @@ use magnet::{
     git_client::models::GitDependency,
     models::{
         project::{Project, ProjectTypeEnum},
-        project_manifest::MagnetManifestV1,
+        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
     },
 };
 use pubgrub::SemanticVersion;
@@ -46,23 +46,28 @@ impl MagnetSubCommand for ProjectInitArgs {
             }
         }
 
-        let valid_project_name = |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
-            match MagnetManifestV1::is_valid_name(input) {
-                true => Ok(Validation::Valid),
-                false => Ok(Validation::Invalid(
-                    "Project name can only consist of alphanumeric characters and -_".into(),
-                )),
-            }
-        };
-
         let project_name = Text::new("Name of the project:")
             .with_validator(validator::ValueRequiredValidator::default())
-            .with_validator(valid_project_name)
+            .with_validator(
+                |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
+                    match MagnetManifestV1::is_valid_name(input) {
+                        true => Ok(Validation::Valid),
+                        false => Ok(Validation::Invalid(
+                            "Project name can only consist of alphanumeric characters and -_"
+                                .into(),
+                        )),
+                    }
+                },
+            )
             .prompt()?;
 
-        let project_type = Select::new(
-            "Project type:",
-            vec![ProjectTypeEnum::Quark, ProjectTypeEnum::ServerExtension],
+        let project_kind = Select::new(
+            "Project king:",
+            vec![
+                MagnetManifestV1ArtifactsItemKind::Quark,
+                MagnetManifestV1ArtifactsItemKind::Gluon,
+                MagnetManifestV1ArtifactsItemKind::Lepton,
+            ],
         )
         .prompt()?;
 
@@ -87,6 +92,7 @@ impl MagnetSubCommand for ProjectInitArgs {
             None,
             SemanticVersion::new(0, 1, 0),
             None,
+            project_kind,
         )?;
 
         Project::create(&project_path, project_manifest)?;
