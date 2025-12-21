@@ -94,3 +94,9 @@ pub struct Bundle<P: MagnetPackage> {
     pub abi: P::Abi,
     pub platform: P::Platform,
 }
+
+#[derive(Debug, Clone)]
+pub enum BundleType {
+    SourceBundle,
+    ArtifactBundle(MagnetManifestV1ArtifactsItemKind),
+}
