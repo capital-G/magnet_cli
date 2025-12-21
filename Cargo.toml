@@ -34,6 +34,7 @@ tar = "0.4.44"
 tempfile = "3.22.0"
 indicatif = { version = "0.18.0", features = ["tokio"] }
 regress = "0.10.5"
+walkdir = "2.5.0"
 
 [build-dependencies]
 typify = "0.5.0"
