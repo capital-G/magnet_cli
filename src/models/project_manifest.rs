@@ -12,6 +12,14 @@ use tracing::{error, instrument, trace};
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
 
+impl TryFrom<MagnetManifestV1Version> for SemanticVersion {
+    type Error = <SemanticVersion as FromStr>::Err;
+
+    fn try_from(value: MagnetManifestV1Version) -> Result<Self, Self::Error> {
+        SemanticVersion::from_str(&value)
+    }
+}
+
 impl MagnetManifestV1 {
     pub fn new(
         name: String,

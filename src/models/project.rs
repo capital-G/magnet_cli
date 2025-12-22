@@ -13,8 +13,10 @@ use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency},
     models::{
-        directories::ProjectDirectory, lock_file::LockFile, project_manifest::MagnetManifestV1,
+        directories::ProjectDirectory, lock_file::LockFile, package::SourceBundle, project,
+        project_manifest::MagnetManifestV1,
     },
+    packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
     resolver::online_provider::RootProvider,
 };
 
@@ -81,16 +83,15 @@ impl Project {
             ProjectDirectory::Docs,
             ProjectDirectory::External,
         ] {
-            let directory_name = directory.directory_name();
-            let path = self.path.join(directory_name);
+            trace!(?directory, "Create project folder");
+            let path = self.path.join(String::from(directory));
             fs::create_dir_all(&path).context("Could not create folder {?:folder}")?;
-            trace!(?directory_name, "Created project folder");
         }
         Ok(())
     }
 
-    fn dist_path(&self) -> PathBuf {
-        self.path.join("dist")
+    fn project_dir(&self, directory: ProjectDirectory) -> PathBuf {
+        self.path.join(String::from(directory))
     }
 
     pub fn add_dependency(
@@ -137,6 +138,9 @@ impl Project {
     pub fn create_package(&self) -> anyhow::Result<PathBuf> {
         // create tar file outside of directory and move it later back in to avoid recursive problems
         // while scanning the project directory
+
+        self.create_source_package()?;
+
         let temp_tar = tempfile::NamedTempFile::new()?;
         let temp_tar_path = temp_tar.path();
         trace!(?temp_tar_path, "Create temporary tar file");
@@ -158,8 +162,26 @@ impl Project {
         Ok(release_path)
     }
 
+    #[instrument(skip(self))]
+    fn create_source_package(&self) -> anyhow::Result<PathBuf> {
+        let bundle = SourceBundle {};
+        let source_name = bundle.package_file_name(
+            &self.project_manifest.name,
+            &SemanticVersion::try_from(self.project_manifest.version.clone())?,
+        );
+        let archive_path = self.project_dir(ProjectDirectory::Dist).join(source_name);
+
+        let files = self
+            .path
+            .get_package_files(super::package::BundleType::SourceBundle)?;
+
+        self.compress(&files, &self.path, &archive_path)?;
+
+        Ok(archive_path)
+    }
+
     fn release_package_path(&self) -> PathBuf {
-        self.dist_path().join(format!(
+        self.project_dir(ProjectDirectory::Dist).join(format!(
             "{}_{}.tar.gz",
             self.project_manifest.name,
             self.project_manifest.version.to_string().replace(".", "-")
@@ -191,13 +213,7 @@ impl Project {
     }
 }
 
-static PROJECT_EXCLUDE_PATHS: &[&str] = &[
-    "build",
-    ".git",
-    ".vscode",
-    ".DS_Store",
-    ProjectDirectory::Dist.directory_name(),
-];
+static PROJECT_EXCLUDE_PATHS: &[&str] = &["build", ".git", ".vscode", ".DS_Store"];
 
 /// determines if a given path within the project directory gets ignored or not
 /// returns `true` if the given path should be rejected
@@ -215,11 +231,6 @@ mod tests {
     #[test]
     fn test_exclude_path() {
         let path = env::current_dir().unwrap();
-
-        for reject in ["dist", ".git"] {
-            assert!(exclude_path(&path, &path.join(reject)));
-            assert!(exclude_path(&path, &path.join("sub_idr").join(reject)));
-        }
 
         for non_reject in ["foo.scd", "classes"] {
             assert!(!exclude_path(&path, &path.join(non_reject)));

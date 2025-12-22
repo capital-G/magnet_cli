@@ -1,3 +1,5 @@
+use crate::models::project::Project;
+
 #[derive(Debug, Clone)]
 pub enum ProjectDirectory {
     /// sclang source code in .sc format
@@ -13,14 +15,15 @@ pub enum ProjectDirectory {
     Tests,
 }
 
-impl ProjectDirectory {
-    pub const fn directory_name(&self) -> &'static str {
-        match self {
+impl From<ProjectDirectory> for String {
+    fn from(value: ProjectDirectory) -> Self {
+        match value {
             ProjectDirectory::Classes => "classes",
             ProjectDirectory::Dist => "dist",
             ProjectDirectory::Docs => "docs",
             ProjectDirectory::Tests => "tests",
             ProjectDirectory::External => "external",
         }
+        .to_string()
     }
 }
