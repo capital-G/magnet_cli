@@ -65,7 +65,7 @@ impl MagnetSubCommand for ProjectInitArgs {
             "Project kind:",
             vec![
                 MagnetManifestV1ArtifactsItemKind::Quark,
-                MagnetManifestV1ArtifactsItemKind::Gluon,
+                // MagnetManifestV1ArtifactsItemKind::Gluon,
                 MagnetManifestV1ArtifactsItemKind::Lepton,
             ],
         )
