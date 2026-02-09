@@ -62,7 +62,7 @@ impl MagnetSubCommand for ProjectInitArgs {
             .prompt()?;
 
         let project_kind = Select::new(
-            "Project king:",
+            "Project kind:",
             vec![
                 MagnetManifestV1ArtifactsItemKind::Quark,
                 MagnetManifestV1ArtifactsItemKind::Gluon,
