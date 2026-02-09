@@ -76,7 +76,7 @@ impl MagnetManifestV1 {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let file =
             File::open(path).context(format!("Could not open magnet project file {:?}", path))?;
-        let value = serde_yaml::from_reader(file);
+        let value = serde_saphyr::from_reader(file);
         match value {
             Ok(project) => Ok(project),
             Err(err) => {
@@ -90,7 +90,7 @@ impl MagnetManifestV1 {
     pub fn write(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path).context("Could not create project file")?;
         let mut writer = BufWriter::new(file);
-        serde_yaml::to_writer(&mut writer, self).context("Could not write project file")?;
+        serde_saphyr::to_io_writer(&mut writer, self).context("Could not write project file")?;
         writer.flush()?;
         trace!("Init project file");
         Ok(())

@@ -28,7 +28,7 @@ pub fn load_config(config_path: Option<PathBuf>) -> anyhow::Result<Config> {
 fn read_config(path: PathBuf) -> anyhow::Result<Config> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let config: Config = serde_yaml::from_reader(reader)?;
+    let config: Config = serde_saphyr::from_reader(reader)?;
     Ok(config)
 }
 
@@ -64,7 +64,7 @@ fn create_empty_config_file() -> anyhow::Result<PathBuf> {
         let empty_config = Config::new();
         let file = File::create(&config_path)?;
         let mut writer = BufWriter::new(file);
-        let _ = serde_yaml::to_writer(&mut writer, &empty_config);
+        let _ = serde_saphyr::to_io_writer(&mut writer, &empty_config);
     }
     Ok(config_path)
 }
