@@ -5,4 +5,5 @@ pub mod config;
 pub mod git_client;
 pub mod http_client;
 pub mod models;
+pub mod packaging;
 pub mod resolver;

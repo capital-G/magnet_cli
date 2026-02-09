@@ -1,5 +1,5 @@
 use std::{
-    fmt::Display,
+    fmt::{write, Display},
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -13,8 +13,13 @@ use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency},
     models::{
-        directories::ProjectDirectory, lock_file::LockFile, project_manifest::ProjectManifest,
+        directories::ProjectDirectory,
+        lock_file::LockFile,
+        package::{BundleFormat, MagnetPackage, SourceBundle},
+        project,
+        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
     },
+    packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
     resolver::online_provider::RootProvider,
 };
 
@@ -35,21 +40,25 @@ pub enum ProjectTypeEnum {
 
 impl Display for ProjectTypeEnum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        let name = match self {
+            ProjectTypeEnum::Quark => "Quark",
+            ProjectTypeEnum::ServerExtension => "Lepton",
+        };
+        write!(f, "{}", name)
     }
 }
 
 /// The Project struct is used to manage files of a project, such as
 /// adding a dependency, creating a lockfile or packaging up for release.
 pub struct Project {
-    project_manifest: ProjectManifest,
+    project_manifest: MagnetManifestV1,
     lock_file: LockFile,
     path: PathBuf,
 }
 
 impl Project {
     #[instrument(skip(project_manifest))]
-    pub fn create(path: &Path, project_manifest: ProjectManifest) -> anyhow::Result<Self> {
+    pub fn create(path: &Path, project_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
         project_manifest.write(&path.join(MAGNET_PROJECT_FILE))?;
         let project = Self {
             project_manifest,
@@ -63,7 +72,7 @@ impl Project {
 
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
-            project_manifest: ProjectManifest::open(&path.join(MAGNET_PROJECT_FILE))?,
+            project_manifest: MagnetManifestV1::open(&path.join(MAGNET_PROJECT_FILE))?,
             lock_file: LockFile::open(&path.join(MAGNET_LOCK_FILE))?,
             path: path.to_path_buf(),
         })
@@ -72,24 +81,20 @@ impl Project {
     #[instrument(skip(self))]
     pub fn generate_project_directories(&self) -> anyhow::Result<()> {
         for directory in [
-            ProjectDirectory::Assets,
             ProjectDirectory::Classes,
-            ProjectDirectory::Dist,
-            ProjectDirectory::Examples,
-            ProjectDirectory::HelpSource,
-            ProjectDirectory::Platform,
             ProjectDirectory::Tests,
+            ProjectDirectory::Docs,
+            ProjectDirectory::External,
         ] {
-            let directory_name = directory.directory_name();
-            let path = self.path.join(directory_name);
+            trace!(?directory, "Create project folder");
+            let path = self.path.join(String::from(directory));
             fs::create_dir_all(&path).context("Could not create folder {?:folder}")?;
-            trace!(?directory_name, "Created project folder");
         }
         Ok(())
     }
 
-    fn dist_path(&self) -> PathBuf {
-        self.path.join("dist")
+    fn project_dir(&self, directory: ProjectDirectory) -> PathBuf {
+        self.path.join(String::from(directory))
     }
 
     pub fn add_dependency(
@@ -97,11 +102,17 @@ impl Project {
         provider: GitClient,
         dependency: GitDependency,
     ) -> anyhow::Result<()> {
-        self.project_manifest.dependencies.push(dependency);
+        self.project_manifest.dependencies.push(dependency.into());
 
         let root_provider = RootProvider {
             git_provider: provider,
-            dependencies: self.project_manifest.dependencies.clone(),
+            dependencies: self
+                .project_manifest
+                .dependencies
+                .clone()
+                .into_iter()
+                .map(GitDependency::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
         };
 
         match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
@@ -122,14 +133,19 @@ impl Project {
 
     /// collects all files of the project and puts them into a .tar.gz
     /// file which can be distributed.
-    /// Every Quark that gets uploaded to the package index gets packaged
-    /// this way.
     /// It will be saved under with the upload identifier format in the project directory
     /// under `/dist`.
-    #[instrument(skip(self))]
-    pub fn create_package(&self) -> anyhow::Result<PathBuf> {
+    /// Additionally, the source package will also be created or updated.
+    #[instrument(skip(self, artifact_kind, bundle_format))]
+    pub fn create_package<P: MagnetPackage>(
+        &self,
+        artifact_kind: Option<MagnetManifestV1ArtifactsItemKind>,
+        bundle_format: Option<BundleFormat<P>>,
+    ) -> anyhow::Result<PathBuf> {
         // create tar file outside of directory and move it later back in to avoid recursive problems
         // while scanning the project directory
+        self.create_source_package()?;
+
         let temp_tar = tempfile::NamedTempFile::new()?;
         let temp_tar_path = temp_tar.path();
         trace!(?temp_tar_path, "Create temporary tar file");
@@ -151,8 +167,26 @@ impl Project {
         Ok(release_path)
     }
 
+    #[instrument(skip(self))]
+    fn create_source_package(&self) -> anyhow::Result<PathBuf> {
+        let bundle = SourceBundle {};
+        let source_name = bundle.package_file_name(
+            &self.project_manifest.name,
+            &SemanticVersion::try_from(self.project_manifest.version.clone())?,
+        );
+        let archive_path = self.project_dir(ProjectDirectory::Dist).join(source_name);
+
+        let files = self
+            .path
+            .get_package_files(super::package::BundleType::SourceBundle)?;
+
+        self.compress(&files, &self.path, &archive_path)?;
+
+        Ok(archive_path)
+    }
+
     fn release_package_path(&self) -> PathBuf {
-        self.dist_path().join(format!(
+        self.project_dir(ProjectDirectory::Dist).join(format!(
             "{}_{}.tar.gz",
             self.project_manifest.name,
             self.project_manifest.version.to_string().replace(".", "-")
@@ -184,15 +218,7 @@ impl Project {
     }
 }
 
-static PROJECT_EXCLUDE_PATHS: &[&str] = &[
-    "build",
-    ".git",
-    ".vscode",
-    ".DS_Store",
-    ProjectDirectory::Assets.directory_name(),
-    ProjectDirectory::Dist.directory_name(),
-    ProjectDirectory::Platform.directory_name(),
-];
+static PROJECT_EXCLUDE_PATHS: &[&str] = &["build", ".git", ".vscode", ".DS_Store"];
 
 /// determines if a given path within the project directory gets ignored or not
 /// returns `true` if the given path should be rejected
@@ -210,11 +236,6 @@ mod tests {
     #[test]
     fn test_exclude_path() {
         let path = env::current_dir().unwrap();
-
-        for reject in ["dist", "platform", ".git"] {
-            assert!(exclude_path(&path, &path.join(reject)));
-            assert!(exclude_path(&path, &path.join("sub_idr").join(reject)));
-        }
 
         for non_reject in ["foo.scd", "classes"] {
             assert!(!exclude_path(&path, &path.join(non_reject)));

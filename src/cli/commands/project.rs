@@ -1,22 +1,23 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
+use crate::cli::MagnetSubCommand;
 use anyhow::Context;
 use clap::{arg, Parser};
 use inquire::{
     validator::{self, Validation},
     Select, Text,
 };
+use magnet::models::package::{BundleFormat, Quark, QuarkAbiTag, SourcePlatformTag};
 use magnet::{
     git_client::models::GitDependency,
     models::{
         project::{Project, ProjectTypeEnum},
-        project_manifest::ProjectManifest,
+        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
     },
 };
+use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{trace, warn};
-
-use crate::cli::MagnetSubCommand;
 
 #[derive(Debug, Parser)]
 pub struct ProjectInitArgs {
@@ -45,23 +46,28 @@ impl MagnetSubCommand for ProjectInitArgs {
             }
         }
 
-        let valid_project_name = |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
-            match ProjectManifest::is_valid_name(input) {
-                true => Ok(Validation::Valid),
-                false => Ok(Validation::Invalid(
-                    "Project name can only consist of alphanumeric characters and -_".into(),
-                )),
-            }
-        };
-
         let project_name = Text::new("Name of the project:")
             .with_validator(validator::ValueRequiredValidator::default())
-            .with_validator(valid_project_name)
+            .with_validator(
+                |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
+                    match MagnetManifestV1::is_valid_name(input) {
+                        true => Ok(Validation::Valid),
+                        false => Ok(Validation::Invalid(
+                            "Project name can only consist of alphanumeric characters and -_"
+                                .into(),
+                        )),
+                    }
+                },
+            )
             .prompt()?;
 
-        let project_type = Select::new(
-            "Project type:",
-            vec![ProjectTypeEnum::Quark, ProjectTypeEnum::ServerExtension],
+        let project_kind = Select::new(
+            "Project king:",
+            vec![
+                MagnetManifestV1ArtifactsItemKind::Quark,
+                MagnetManifestV1ArtifactsItemKind::Gluon,
+                MagnetManifestV1ArtifactsItemKind::Lepton,
+            ],
         )
         .prompt()?;
 
@@ -80,7 +86,14 @@ impl MagnetSubCommand for ProjectInitArgs {
             fs::create_dir_all(&project_path).context("Could not create project directory")?;
         }
 
-        let project_manifest = ProjectManifest::new(project_name, None, None, None, None);
+        let project_manifest = MagnetManifestV1::new(
+            project_name,
+            None,
+            None,
+            SemanticVersion::new(0, 1, 0),
+            None,
+            project_kind,
+        )?;
 
         Project::create(&project_path, project_manifest)?;
 
@@ -151,7 +164,14 @@ impl MagnetSubCommand for ProjectBundleArgs {
             None => env::current_dir()?,
         };
         let project = Project::open(&project_path)?;
-        project.create_package()?;
+        let bundle_format: BundleFormat<Quark> = BundleFormat {
+            abi: QuarkAbiTag::Sclang314,
+            platform: SourcePlatformTag::Any,
+        };
+        project.create_package(
+            Some(MagnetManifestV1ArtifactsItemKind::Gluon),
+            Some(bundle_format),
+        )?;
         Ok(())
     }
 }
