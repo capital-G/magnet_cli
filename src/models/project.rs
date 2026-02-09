@@ -59,7 +59,7 @@ pub struct Project {
 impl Project {
     #[instrument(skip(project_manifest))]
     pub fn create(path: &Path, project_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
-        project_manifest.write(&path.join(MAGNET_PROJECT_FILE))?;
+        project_manifest.write_new(&path.join(MAGNET_PROJECT_FILE))?;
         let project = Self {
             project_manifest,
             lock_file: LockFile::create_empty(path.join(MAGNET_LOCK_FILE))?,

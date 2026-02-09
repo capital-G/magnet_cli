@@ -95,11 +95,65 @@ impl MagnetManifestV1 {
         trace!("Init project file");
         Ok(())
     }
+
+    /// creates a new file
+    pub fn write_new(&self, path: &Path) -> anyhow::Result<()> {
+        let file = File::create(path).context("Could not create project file")?;
+        let mut writer = BufWriter::new(file);
+        writer.write(self.new_template().as_bytes())?;
+        writer.flush()?;
+        trace!("Init project file");
+        Ok(())
+    }
+
+    /// This scaffolds a new magnet template, which allows to force a certain formatting
+    fn new_template(&self) -> String {
+        let content = format!(
+            "magnet: 1
+
+name: {name}
+version: \"{version}\"
+
+dependencies: []
+
+artifacts: []
+
+metadata:
+
+",
+            name = self.name.to_string(),
+            version = self.version.to_string(),
+        );
+        content
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_manifest() -> MagnetManifestV1 {
+        MagnetManifestV1::new(
+            "test-project".to_string(),
+            Some("A test project".to_string()),
+            Some("GPL-3.0".to_string()),
+            SemanticVersion::new(0, 1, 0),
+            None,
+            MagnetManifestV1ArtifactsItemKind::Quark,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_new_template_valid_yaml() {
+        let manifest = sample_manifest();
+        let yaml_string = manifest.new_template();
+        let parsed: MagnetManifestV1 = serde_saphyr::from_str(yaml_string.as_str()).unwrap();
+        assert_eq!(parsed.name, "test-project");
+        assert_eq!(parsed.version.to_string(), "0.1.0");
+        assert_eq!(parsed.dependencies.len(), 0);
+        assert_eq!(parsed.artifacts.len(), 0);
+    }
 
     #[test]
     fn test_project_name() {
