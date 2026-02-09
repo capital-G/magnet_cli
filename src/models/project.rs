@@ -13,8 +13,11 @@ use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency},
     models::{
-        directories::ProjectDirectory, lock_file::LockFile, package::SourceBundle, project,
-        project_manifest::MagnetManifestV1,
+        directories::ProjectDirectory,
+        lock_file::LockFile,
+        package::{BundleFormat, MagnetPackage, SourceBundle},
+        project,
+        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
     },
     packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
     resolver::online_provider::RootProvider,
@@ -130,15 +133,17 @@ impl Project {
 
     /// collects all files of the project and puts them into a .tar.gz
     /// file which can be distributed.
-    /// Every Quark that gets uploaded to the package index gets packaged
-    /// this way.
     /// It will be saved under with the upload identifier format in the project directory
     /// under `/dist`.
-    #[instrument(skip(self))]
-    pub fn create_package(&self) -> anyhow::Result<PathBuf> {
+    /// Additionally, the source package will also be created or updated.
+    #[instrument(skip(self, artifact_kind, bundle_format))]
+    pub fn create_package<P: MagnetPackage>(
+        &self,
+        artifact_kind: Option<MagnetManifestV1ArtifactsItemKind>,
+        bundle_format: Option<BundleFormat<P>>,
+    ) -> anyhow::Result<PathBuf> {
         // create tar file outside of directory and move it later back in to avoid recursive problems
         // while scanning the project directory
-
         self.create_source_package()?;
 
         let temp_tar = tempfile::NamedTempFile::new()?;

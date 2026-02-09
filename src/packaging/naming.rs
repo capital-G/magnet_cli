@@ -1,12 +1,12 @@
 use pubgrub::SemanticVersion;
 
-use crate::models::package::{Bundle, MagnetPackage, SourceBundle};
+use crate::models::package::{BundleFormat, MagnetPackage, SourceBundle};
 
 pub trait PackageNaming {
     fn package_file_name(&self, name: &str, version: &SemanticVersion) -> String;
 }
 
-impl<P: MagnetPackage> PackageNaming for Bundle<P> {
+impl<P: MagnetPackage> PackageNaming for BundleFormat<P> {
     fn package_file_name(&self, name: &str, version: &SemanticVersion) -> String {
         format!(
             "{}-{}-{}-{}-{}.tar.gz",
@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_quark_name() {
-        let bundle = Bundle::<Quark> {
+        let bundle = BundleFormat::<Quark> {
             abi: QuarkAbiTag::Sclang310,
             platform: SourcePlatformTag::Any,
         };
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_lepton_name() {
-        let bundle = Bundle::<Lepton> {
+        let bundle = BundleFormat::<Lepton> {
             abi: LeptonAbiTag::UniversalServer3,
             platform: BinaryPlatformTag::MacOSXArm64,
         };
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn test_gluon_name() {
-        let bundle = Bundle::<Gluon> {
+        let bundle = BundleFormat::<Gluon> {
             abi: GluonAbiTag::GluonV1,
             platform: BinaryPlatformTag::Win32,
         };

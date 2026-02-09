@@ -1,11 +1,13 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
+use crate::cli::MagnetSubCommand;
 use anyhow::Context;
 use clap::{arg, Parser};
 use inquire::{
     validator::{self, Validation},
     Select, Text,
 };
+use magnet::models::package::{BundleFormat, Quark, QuarkAbiTag, SourcePlatformTag};
 use magnet::{
     git_client::models::GitDependency,
     models::{
@@ -16,8 +18,6 @@ use magnet::{
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{trace, warn};
-
-use crate::cli::MagnetSubCommand;
 
 #[derive(Debug, Parser)]
 pub struct ProjectInitArgs {
@@ -164,7 +164,14 @@ impl MagnetSubCommand for ProjectBundleArgs {
             None => env::current_dir()?,
         };
         let project = Project::open(&project_path)?;
-        project.create_package()?;
+        let bundle_format: BundleFormat<Quark> = BundleFormat {
+            abi: QuarkAbiTag::Sclang314,
+            platform: SourcePlatformTag::Any,
+        };
+        project.create_package(
+            Some(MagnetManifestV1ArtifactsItemKind::Gluon),
+            Some(bundle_format),
+        )?;
         Ok(())
     }
 }

@@ -90,7 +90,7 @@ impl MagnetPackage for Gluon {
 pub struct SourceBundle;
 
 #[derive(Debug, Clone)]
-pub struct Bundle<P: MagnetPackage> {
+pub struct BundleFormat<P: MagnetPackage> {
     pub abi: P::Abi,
     pub platform: P::Platform,
 }

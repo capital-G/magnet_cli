@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use git2::Repository;
 use walkdir::WalkDir;
 
-use crate::models::package::BundleType;
+use crate::models::{directories::ProjectDirectory, package::BundleType};
 
 pub trait CollectFiles {
     fn get_package_files(&self, bundle_type: BundleType) -> anyhow::Result<Vec<PathBuf>>;
