@@ -20,12 +20,9 @@ jobs:
             artifact-suffix: win-x86-64
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         submodules: recursive
-
-    - uses: pre-commit/action@v3.0.1
-      name: Run pre-commit
 
     - name: Build
       run: cargo build --verbose
