@@ -1,13 +1,13 @@
+use anyhow::Context;
+use pubgrub::SemanticVersion;
+use regex::Regex;
+use std::io::Read;
 use std::{
     fs::File,
     io::{BufWriter, Write},
     path::Path,
     str::FromStr,
 };
-
-use anyhow::Context;
-use pubgrub::SemanticVersion;
-use regex::Regex;
 use tracing::{error, instrument, trace};
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
@@ -74,9 +74,16 @@ impl MagnetManifestV1 {
 
     #[instrument(fields(path))]
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let file =
-            File::open(path).context(format!("Could not open magnet project file {:?}", path))?;
-        let value = serde_saphyr::from_reader(file);
+        let mut content = String::new();
+        File::open(path)
+            .context(format!("Could not open magnet project file {:?}", path))?
+            .read_to_string(&mut content)?;
+
+        Self::from_string(&content)
+    }
+
+    fn from_string(content: &str) -> anyhow::Result<Self> {
+        let value = serde_saphyr::from_str(content);
         match value {
             Ok(project) => Ok(project),
             Err(err) => {
@@ -126,6 +133,82 @@ metadata:
         );
         content
     }
+
+    /// insert a new entry to a top level section (e.g. dependencies)
+    /// this is done via string manipulation to not delete any comments and keep
+    /// changes on the file to a minimum.
+    ///
+    /// `new_entry` should end with a new line.
+    /// If `section_name` could not be found it will return `None`.
+    fn insert_before_next_section(
+        contents: &str,
+        section_name: &str,
+        new_entry: &str,
+    ) -> Option<String> {
+        let lines: Vec<&str> = contents.lines().collect();
+        let section_header = format!("{}:", section_name);
+
+        // search for start of section
+        let Some(section_start) = lines.iter().position(|l| l.starts_with(&section_header)) else {
+            return None;
+        };
+
+        let mut last_content_line = section_start;
+        for i in (section_start + 1)..lines.len() {
+            let line = lines[i];
+            if line.trim().is_empty() {
+                // skip blank lines as they do not end a section
+                continue;
+            }
+            if !line.starts_with(' ') {
+                // non-indented && non-blank = next top level key
+                break;
+            }
+            last_content_line += 1;
+        }
+
+        // rebuild by appending the new_entry
+        let mut result = String::with_capacity(contents.len() + new_entry.len());
+        for (i, line) in lines.iter().enumerate() {
+            result.push_str(line);
+            result.push('\n');
+            if i == last_content_line {
+                result.push_str(new_entry)
+            }
+        }
+        Some(result)
+    }
+
+    /// adds a dependency to the manifest YAML. Returns the new string if successful.
+    /// This is done via string patching b/c we would otherwise delete comments
+    /// when we parse and write the YAML file back.
+    pub fn add_dependency(
+        yaml_content: &str,
+        name: &str,
+        requirement: &str,
+    ) -> anyhow::Result<String> {
+        // validate current manifest
+        let manifest: MagnetManifestV1 = serde_saphyr::from_str(&yaml_content)?;
+
+        let new_entry = format!("  - name: {name}\n    requirement: \"{requirement}\"\n");
+
+        let output = if manifest.dependencies.is_empty() {
+            yaml_content.replace("dependencies: []", &format!("dependencies:\n{new_entry}"))
+        } else {
+            if let Some(text) =
+                Self::insert_before_next_section(&yaml_content, "dependencies", &new_entry)
+            {
+                text
+            } else {
+                anyhow::bail!("Could not find section \"dependencies\" in magnet.yaml")
+            }
+        };
+
+        // re-validate after insertion
+        let _: MagnetManifestV1 = serde_saphyr::from_str(&output)?;
+
+        Ok(output)
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +236,59 @@ mod tests {
         assert_eq!(parsed.version.to_string(), "0.1.0");
         assert_eq!(parsed.dependencies.len(), 0);
         assert_eq!(parsed.artifacts.len(), 0);
+    }
+
+    #[test]
+    fn test_insert_before_next_section_no_section() {
+        let text = MagnetManifestV1::insert_before_next_section(
+            "name: foo\n",
+            "hello",
+            "nothing_new: foo",
+        );
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_insert_before_next_section_proper() {
+        let text =
+            MagnetManifestV1::insert_before_next_section("name:\n  -foo\n", "name", "  -bar\n");
+        assert!(text.is_some());
+        let new_text = text.unwrap();
+        assert_eq!(new_text, "name:\n  -foo\n  -bar\n");
+    }
+
+    #[test]
+    fn add_dependency_empty_dependencies() {
+        let manifest = sample_manifest();
+        let empty_dependencies_yaml = manifest.new_template();
+        let new_yaml =
+            MagnetManifestV1::add_dependency(&empty_dependencies_yaml, "foo", "1.2.0").unwrap();
+        assert!(new_yaml.contains("dependencies:\n  - name: foo\n    requirement: \"1.2.0\"\n"));
+        let new_manifest = MagnetManifestV1::from_string(&new_yaml).unwrap();
+
+        assert_eq!(new_manifest.dependencies.len(), 1);
+        assert_eq!(new_manifest.dependencies[0].name, "foo");
+        // @todo version is currently not parsed
+        // let version = new_manifest.dependencies[0].version.clone().unwrap();
+        // assert_eq!(version, "1.2.0");
+    }
+
+    #[test]
+    fn add_dependency_existing_dependencies() {
+        let manifest = sample_manifest();
+        let empty_dependencies_yaml = manifest.new_template();
+        // this is covered by add_dependency_empty_dependencies
+        let new_yaml =
+            MagnetManifestV1::add_dependency(&empty_dependencies_yaml, "foo", "1.2.0").unwrap();
+        let new_manifest = MagnetManifestV1::from_string(&new_yaml).unwrap();
+        let newest_yaml = MagnetManifestV1::add_dependency(&new_yaml, "bar", "2.2.0").unwrap();
+        assert!(newest_yaml.contains("dependencies:\n  - name: foo\n    requirement: \"1.2.0\"\n  - name: bar\n    requirement: \"2.2.0\"\n"));
+
+        let newest_manifest = MagnetManifestV1::from_string(&newest_yaml).unwrap();
+        assert_eq!(newest_manifest.dependencies.len(), 2);
+        assert_eq!(newest_manifest.dependencies[0].name, "foo");
+        assert_eq!(newest_manifest.dependencies[1].name, "bar");
+        // @todo version is currently not parsed
     }
 
     #[test]
