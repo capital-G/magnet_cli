@@ -102,8 +102,6 @@ impl Project {
         provider: GitClient,
         dependency: GitDependency,
     ) -> anyhow::Result<()> {
-        self.project_manifest.dependencies.push(dependency.into());
-
         let root_provider = RootProvider {
             git_provider: provider,
             dependencies: self
@@ -118,6 +116,11 @@ impl Project {
         match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
             Ok(tree) => {
                 info!("Successfully resolved the tree! {:?}", tree);
+                MagnetManifestV1::add_dependency_to_file(
+                    &self.path.join(MAGNET_PROJECT_FILE),
+                    &dependency.name,
+                    &dependency.constraint.to_string(),
+                )?;
                 self.lock_file = LockFile::from_tree(&tree)?;
                 self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
                 self.project_manifest

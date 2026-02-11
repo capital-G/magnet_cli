@@ -209,6 +209,18 @@ metadata:
 
         Ok(output)
     }
+
+    /// Inserts a new dependency to the manifest file.
+    pub fn add_dependency_to_file(
+        path: &Path,
+        name: &str,
+        requirement: &str,
+    ) -> anyhow::Result<()> {
+        let mut content = std::fs::read_to_string(path)?;
+        let modified = Self::add_dependency(&content, name, requirement)?;
+        std::fs::write(path, modified)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
