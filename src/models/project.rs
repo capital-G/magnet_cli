@@ -123,14 +123,20 @@ impl Project {
                 )?;
                 self.lock_file = LockFile::from_tree(&tree)?;
                 self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
-                self.project_manifest
-                    .write(&self.path.join(MAGNET_PROJECT_FILE))?;
             }
             Err(err) => {
                 bail!("Failed to add dependency: {:?}", err);
             }
         }
 
+        self.reload_from_file()?;
+
+        Ok(())
+    }
+
+    fn reload_from_file(&mut self) -> anyhow::Result<()> {
+        self.project_manifest = MagnetManifestV1::open(&self.path.join(MAGNET_PROJECT_FILE))?;
+        self.lock_file = LockFile::open(&self.path.join(MAGNET_LOCK_FILE))?;
         Ok(())
     }
 
