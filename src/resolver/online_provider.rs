@@ -1,7 +1,7 @@
-use std::convert::Infallible;
-
 use pubgrub::{Dependencies, DependencyConstraints, DependencyProvider, Ranges, SemanticVersion};
 use semver::VersionReq;
+use std::convert::Infallible;
+use std::ops::Add;
 use tracing::error;
 
 use crate::git_client::{client::GitClient, models::GitDependency};
@@ -26,8 +26,23 @@ impl ToRanges for VersionReq {
                 semver::Op::Greater => Ranges::strictly_higher_than(semantic_version),
                 semver::Op::GreaterEq => Ranges::higher_than(semantic_version),
                 semver::Op::Less => Ranges::strictly_lower_than(semantic_version),
-                semver::Op::LessEq | semver::Op::Tilde | semver::Op::Caret => {
-                    Ranges::lower_than(semantic_version)
+                semver::Op::LessEq => Ranges::lower_than(semantic_version),
+                semver::Op::Caret => {
+                    // ^1.2.3 is equal to >= 1.2.3, <2.0.0
+                    let upper =
+                        SemanticVersion::new((comperator.major + 1).try_into().unwrap_or(0), 0, 0);
+                    Ranges::higher_than(semantic_version)
+                        .intersection(&Ranges::strictly_lower_than(upper))
+                }
+                semver::Op::Tilde => {
+                    // ~1.2.3 is equal to >= 1.2.3, <1.3.0
+                    let upper = SemanticVersion::new(
+                        comperator.major.try_into().unwrap_or(0),
+                        comperator.minor.unwrap_or(0).try_into().unwrap_or(0) + 1,
+                        0,
+                    );
+                    Ranges::higher_than(semantic_version)
+                        .intersection(&Ranges::strictly_lower_than(upper))
                 }
                 semver::Op::Wildcard => Ranges::full(),
                 _ => {
@@ -175,5 +190,90 @@ impl DependencyProvider for RootProvider {
         } else {
             self.git_provider.get_dependencies(package, version)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exact() {
+        let req = VersionReq::parse("=1.0.0").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(!req.contains(&SemanticVersion::zero()));
+        assert!(!req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(!req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(!req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_greater() {
+        let req = VersionReq::parse(">1.0.0").unwrap().to_ranges();
+        assert!(!req.contains(&SemanticVersion::one()));
+        assert!(!req.contains(&SemanticVersion::zero()));
+        assert!(req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_greater_equal() {
+        let req = VersionReq::parse(">=1.0.0").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(!req.contains(&SemanticVersion::zero()));
+        assert!(req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_less() {
+        let req = VersionReq::parse("<1.1.0").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(req.contains(&SemanticVersion::zero()));
+        assert!(!req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(!req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_less_equal() {
+        let req = VersionReq::parse("<=1.1.0").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(req.contains(&SemanticVersion::zero()));
+        assert!(req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(!req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_caret() {
+        let req = VersionReq::parse("^1.0.0").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(!req.contains(&SemanticVersion::zero()));
+        assert!(req.contains(&SemanticVersion::new(1, 2, 0)));
+        assert!(!req.contains(&SemanticVersion::new(0, 2, 0)));
+        assert!(!req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_tilde() {
+        let req = VersionReq::parse("~1.0.0").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(!req.contains(&SemanticVersion::zero()));
+        assert!(!req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(!req.contains(&SemanticVersion::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_wildcard() {
+        let req = VersionReq::parse("*").unwrap().to_ranges();
+        assert!(req.contains(&SemanticVersion::one()));
+        assert!(req.contains(&SemanticVersion::zero()));
+        assert!(req.contains(&SemanticVersion::new(1, 1, 0)));
+        assert!(req.contains(&SemanticVersion::new(1, 0, 4)));
+        assert!(req.contains(&SemanticVersion::new(2, 0, 0)));
     }
 }
