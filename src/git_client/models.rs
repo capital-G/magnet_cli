@@ -106,7 +106,10 @@ impl TryFrom<MagnetManifestV1DependenciesItem> for GitDependency {
     fn try_from(value: MagnetManifestV1DependenciesItem) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name,
-            constraint: VersionReq::parse(value.version.unwrap_or("999.0.0".to_string()).as_str())?,
+            constraint: match value.version {
+                None => VersionReq::STAR,
+                Some(version_string) => version_string.parse()?,
+            },
         })
     }
 }
