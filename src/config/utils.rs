@@ -1,11 +1,11 @@
+use anyhow;
+use std::io::Read;
 use std::{
     env,
     fs::{self, File},
     io::{BufReader, BufWriter},
     path::PathBuf,
 };
-
-use anyhow;
 use tracing::{error, info};
 
 use crate::{
@@ -26,9 +26,8 @@ pub fn load_config(config_path: Option<PathBuf>) -> anyhow::Result<Config> {
 }
 
 fn read_config(path: PathBuf) -> anyhow::Result<Config> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let config: Config = serde_saphyr::from_reader(reader)?;
+    let buf = std::fs::read_to_string(&path)?;
+    let config: Config = toml::from_str(&buf)?;
     Ok(config)
 }
 
@@ -62,9 +61,7 @@ fn create_empty_config_file() -> anyhow::Result<PathBuf> {
         error!("Config file already exists!");
     } else {
         let empty_config = Config::new();
-        let file = File::create(&config_path)?;
-        let mut writer = BufWriter::new(file);
-        let _ = serde_saphyr::to_io_writer(&mut writer, &empty_config);
+        fs::write(&config_path, toml::to_string(&empty_config)?)?;
     }
     Ok(config_path)
 }

@@ -34,7 +34,8 @@ tempfile = "3.22.0"
 indicatif = { version = "0.18.0", features = ["tokio"] }
 regress = "0.10.5"
 walkdir = "2.5.0"
-serde-saphyr = "0.0.17"
+toml = "1.1.2"
+toml_edit = "0.25.12"
 
 [build-dependencies]
 typify = "0.5.0"

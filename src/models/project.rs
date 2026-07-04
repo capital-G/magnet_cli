@@ -9,6 +9,7 @@ use pubgrub::{resolve, SemanticVersion};
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, trace};
 
+use crate::models::project_manifest::{MagnetManifestV1DependenciesItem, ProjectManifest};
 use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency},
@@ -51,15 +52,16 @@ impl Display for ProjectTypeEnum {
 /// The Project struct is used to manage files of a project, such as
 /// adding a dependency, creating a lockfile or packaging up for release.
 pub struct Project {
-    project_manifest: MagnetManifestV1,
+    project_manifest: ProjectManifest,
     lock_file: LockFile,
     path: PathBuf,
 }
 
 impl Project {
-    #[instrument(skip(project_manifest))]
-    pub fn create(path: &Path, project_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
-        project_manifest.write_new(&path.join(MAGNET_PROJECT_FILE))?;
+    #[instrument(skip(magnet_manifest))]
+    pub fn create(path: &Path, magnet_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
+        let project_manifest =
+            ProjectManifest::write_new(path.join(MAGNET_PROJECT_FILE), &magnet_manifest)?;
         let project = Self {
             project_manifest,
             lock_file: LockFile::create_empty(path.join(MAGNET_LOCK_FILE))?,
@@ -72,7 +74,7 @@ impl Project {
 
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
-            project_manifest: MagnetManifestV1::open(&path.join(MAGNET_PROJECT_FILE))?,
+            project_manifest: ProjectManifest::open(path.join(MAGNET_PROJECT_FILE))?,
             lock_file: LockFile::open(&path.join(MAGNET_LOCK_FILE))?,
             path: path.to_path_buf(),
         })
@@ -106,6 +108,7 @@ impl Project {
             git_provider: provider,
             dependencies: self
                 .project_manifest
+                .get_manifest()
                 .dependencies
                 .clone()
                 .into_iter()
@@ -116,11 +119,15 @@ impl Project {
         match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
             Ok(tree) => {
                 info!("Successfully resolved the tree! {:?}", tree);
-                MagnetManifestV1::add_dependency_to_file(
-                    &self.path.join(MAGNET_PROJECT_FILE),
-                    &dependency.name,
-                    &dependency.constraint.to_string(),
-                )?;
+                let magnet_dependency = MagnetManifestV1DependenciesItem {
+                    git: None,
+                    index: None,
+                    legacy_quark: None,
+                    name: dependency.name.to_string(),
+                    path: None,
+                    version: Some(dependency.constraint.to_string()),
+                };
+                self.project_manifest.add_dependency(magnet_dependency)?;
                 self.lock_file = LockFile::from_tree(&tree)?;
                 self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
             }
@@ -135,7 +142,7 @@ impl Project {
     }
 
     fn reload_from_file(&mut self) -> anyhow::Result<()> {
-        self.project_manifest = MagnetManifestV1::open(&self.path.join(MAGNET_PROJECT_FILE))?;
+        self.project_manifest = ProjectManifest::open(self.path.join(MAGNET_PROJECT_FILE))?;
         self.lock_file = LockFile::open(&self.path.join(MAGNET_LOCK_FILE))?;
         Ok(())
     }
@@ -180,8 +187,8 @@ impl Project {
     fn create_source_package(&self) -> anyhow::Result<PathBuf> {
         let bundle = SourceBundle {};
         let source_name = bundle.package_file_name(
-            &self.project_manifest.name,
-            &SemanticVersion::try_from(self.project_manifest.version.clone())?,
+            &self.project_manifest.get_manifest().name,
+            &SemanticVersion::try_from(self.project_manifest.get_manifest().version.clone())?,
         );
         let archive_path = self.project_dir(ProjectDirectory::Dist).join(source_name);
 
@@ -197,8 +204,12 @@ impl Project {
     fn release_package_path(&self) -> PathBuf {
         self.project_dir(ProjectDirectory::Dist).join(format!(
             "{}_{}.tar.gz",
-            self.project_manifest.name,
-            self.project_manifest.version.to_string().replace(".", "-")
+            self.project_manifest.get_manifest().name,
+            self.project_manifest
+                .get_manifest()
+                .version
+                .to_string()
+                .replace(".", "-")
         ))
     }
 
