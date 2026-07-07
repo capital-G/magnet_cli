@@ -9,7 +9,9 @@ use pubgrub::{resolve, SemanticVersion};
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, trace};
 
-use crate::models::project_manifest::{MagnetManifestV1DependenciesItem, ProjectManifest};
+use crate::models::project_manifest::{
+    MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
+};
 use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency},
@@ -112,22 +114,29 @@ impl Project {
                 .dependencies
                 .clone()
                 .into_iter()
-                .map(GitDependency::try_from)
+                .map(|(name, dependency)| {
+                    GitDependency::try_from(NamedDependency { name, dependency })
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
         match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
             Ok(tree) => {
                 info!("Successfully resolved the tree! {:?}", tree);
-                let magnet_dependency = MagnetManifestV1DependenciesItem {
+                let magnet_dependency = MagnetManifestV1DependenciesValue::Object {
+                    branch: None,
                     git: None,
                     index: None,
                     legacy_quark: None,
-                    name: dependency.name.to_string(),
                     path: None,
+                    ref_: None,
+                    tag: None,
                     version: Some(dependency.constraint.to_string()),
                 };
-                self.project_manifest.add_dependency(magnet_dependency)?;
+                self.project_manifest.add_dependency(NamedDependency {
+                    name: dependency.name,
+                    dependency: magnet_dependency,
+                })?;
                 self.lock_file = LockFile::from_tree(&tree)?;
                 self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
             }
@@ -187,8 +196,10 @@ impl Project {
     fn create_source_package(&self) -> anyhow::Result<PathBuf> {
         let bundle = SourceBundle {};
         let source_name = bundle.package_file_name(
-            &self.project_manifest.get_manifest().name,
-            &SemanticVersion::try_from(self.project_manifest.get_manifest().version.clone())?,
+            &self.project_manifest.get_manifest().package.name,
+            &SemanticVersion::try_from(
+                self.project_manifest.get_manifest().package.version.clone(),
+            )?,
         );
         let archive_path = self.project_dir(ProjectDirectory::Dist).join(source_name);
 
@@ -204,9 +215,10 @@ impl Project {
     fn release_package_path(&self) -> PathBuf {
         self.project_dir(ProjectDirectory::Dist).join(format!(
             "{}_{}.tar.gz",
-            self.project_manifest.get_manifest().name,
+            self.project_manifest.get_manifest().package.name,
             self.project_manifest
                 .get_manifest()
+                .package
                 .version
                 .to_string()
                 .replace(".", "-")

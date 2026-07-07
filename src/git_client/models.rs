@@ -2,11 +2,8 @@ use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::models::{
-    project::{ArchitectureEnum, AssetFormatEnum, ServerAbiVersionEnum},
-    project_manifest::MagnetManifestV1DependenciesItem,
-};
-
+use crate::models::project::{ArchitectureEnum, AssetFormatEnum, ServerAbiVersionEnum};
+use crate::models::project_manifest::{MagnetManifestV1DependenciesValue, NamedDependency};
 // This contains the structure of the json files stored in git
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -100,28 +97,36 @@ where
     serializer.serialize_str(&version.to_string())
 }
 
-impl TryFrom<MagnetManifestV1DependenciesItem> for GitDependency {
+impl TryFrom<NamedDependency> for GitDependency {
     type Error = anyhow::Error;
 
-    fn try_from(value: MagnetManifestV1DependenciesItem) -> Result<Self, Self::Error> {
-        Ok(Self {
-            name: value.name,
-            constraint: match value.version {
-                None => VersionReq::STAR,
-                Some(version_string) => version_string.parse()?,
+    fn try_from(value: NamedDependency) -> Result<Self, Self::Error> {
+        let git_dependency = match value.dependency {
+            MagnetManifestV1DependenciesValue::String(version) => Self {
+                name: value.name,
+                constraint: version.parse()?,
             },
-        })
+            MagnetManifestV1DependenciesValue::Object {
+                version: _version, ..
+            } => Self {
+                name: value.name,
+                constraint: _version.unwrap_or("*".to_string()).parse()?,
+            },
+        };
+        Ok(git_dependency)
     }
 }
 
-impl From<GitDependency> for MagnetManifestV1DependenciesItem {
+impl From<GitDependency> for MagnetManifestV1DependenciesValue {
     fn from(value: GitDependency) -> Self {
-        MagnetManifestV1DependenciesItem {
+        MagnetManifestV1DependenciesValue::Object {
+            branch: None,
             git: None,
             index: None,
             legacy_quark: None,
-            name: value.name,
             path: None,
+            ref_: None,
+            tag: None,
             version: Some(value.constraint.to_string()),
         }
     }

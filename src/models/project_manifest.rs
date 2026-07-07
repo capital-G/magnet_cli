@@ -1,6 +1,7 @@
 use anyhow::Context;
 use pubgrub::SemanticVersion;
 use regex::Regex;
+use std::collections::HashMap;
 use std::default::Default;
 use std::io::Read;
 use std::path::PathBuf;
@@ -15,10 +16,36 @@ use tracing::{error, instrument, trace};
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
 
-impl TryFrom<MagnetManifestV1Version> for SemanticVersion {
+pub struct NamedDependency {
+    pub name: String,
+    pub dependency: MagnetManifestV1DependenciesValue,
+}
+
+impl MagnetManifestV1DependenciesValue {
+    pub fn to_toml_edit_item(&self) -> toml_edit::Item {
+        match self {
+            MagnetManifestV1DependenciesValue::String(version) => {
+                toml_edit::value(version.as_str())
+            }
+            _ => {
+                let toml_str = toml::to_string(self).unwrap();
+                let doc: DocumentMut = toml_str.parse().unwrap();
+                let mut inline = toml_edit::InlineTable::new();
+                for (key, item) in doc.as_table().iter() {
+                    if let Some(v) = item.as_value() {
+                        inline.insert(key, v.clone());
+                    }
+                }
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(inline))
+            }
+        }
+    }
+}
+
+impl TryFrom<MagnetManifestV1PackageVersion> for SemanticVersion {
     type Error = <SemanticVersion as FromStr>::Err;
 
-    fn try_from(value: MagnetManifestV1Version) -> Result<Self, Self::Error> {
+    fn try_from(value: MagnetManifestV1PackageVersion) -> Result<Self, Self::Error> {
         SemanticVersion::from_str(&value)
     }
 }
@@ -68,10 +95,7 @@ impl ProjectManifest {
         Self::open(path)
     }
 
-    pub fn add_dependency(
-        &self,
-        dependency: MagnetManifestV1DependenciesItem,
-    ) -> anyhow::Result<()> {
+    pub fn add_dependency(&self, dependency: NamedDependency) -> anyhow::Result<()> {
         let updated = Self::add_dependency_preserving(
             &std::fs::read_to_string(&self.path).context("Could not read file")?,
             dependency,
@@ -98,27 +122,20 @@ impl ProjectManifest {
     /// comments, positioning and formatting are preserved.
     fn add_dependency_preserving(
         contents: &str,
-        requirement: MagnetManifestV1DependenciesItem,
+        requirement: NamedDependency,
     ) -> anyhow::Result<String> {
         let mut doc: DocumentMut = contents.parse()?;
 
         let dependencies = doc
             .entry("dependencies")
-            .or_insert_with(|| toml_edit::Item::ArrayOfTables(Default::default()))
-            .as_array_of_tables_mut()
+            .or_insert_with(|| toml_edit::Item::Table(Default::default()))
+            .as_table_like_mut()
             .context("dependencies is not an array of tables")?;
 
-        let existing_index = dependencies
-            .iter_mut()
-            .position(|d| d.get("name").and_then(|x| x.as_str()) == Some(&requirement.name));
-
-        if let Some(index) = existing_index {
-            let version_string = toml_edit::value(requirement.version.unwrap().to_string());
-            let dependency = dependencies.iter_mut().nth(index).unwrap();
-            dependency.insert("requirement", version_string);
-        } else {
-            dependencies.push(serialize_toml_via_serde(&requirement)?);
-        }
+        dependencies.insert(
+            &requirement.name,
+            requirement.dependency.to_toml_edit_item(),
+        );
 
         Ok(doc.to_string())
     }
@@ -149,7 +166,7 @@ impl MagnetManifestV1 {
             )?),
             None => None,
         };
-        let version = MagnetManifestV1Version::from_str(&version.to_string())?;
+        let version = MagnetManifestV1PackageVersion::from_str(&version.to_string())?;
 
         let metadata = MagnetManifestV1Metadata {
             authors: vec![],
@@ -166,13 +183,12 @@ impl MagnetManifestV1 {
                 kind: project_kind,
                 platform_paths: None,
             }],
-            dependencies: vec![],
+            dependencies: HashMap::new(),
             entrypoints: vec![],
-            magnet: 1.0,
+            magnet_version: 1,
             metadata: Some(metadata),
             min_sclang_version,
-            name,
-            version,
+            package: MagnetManifestV1Package { name, version },
         })
     }
 
@@ -215,14 +231,13 @@ mod tests {
     use super::*;
 
     fn sample_manifest() -> String {
-        "magnet = 1
+        "magnet-version = 1
 
+[package]
 name = \"test-project\"
 version = \"0.1.0\"
 
 [metadata]
-
-[[dependency]]
 
 "
         .to_string()
@@ -231,9 +246,8 @@ version = \"0.1.0\"
     fn sample_manifest_with_dependency() -> String {
         format!(
             "{}
-[[dependencies]]
-name = \"foo\"
-requirement = \"1.2.0\"
+[dependencies]
+foo = \"1.2.0\"
 ",
             sample_manifest()
         )
@@ -242,8 +256,8 @@ requirement = \"1.2.0\"
     #[test]
     fn test_new_template_valid_toml() {
         let parsed: MagnetManifestV1 = toml::from_str(&sample_manifest()).unwrap();
-        assert_eq!(parsed.name, "test-project");
-        assert_eq!(parsed.version.to_string(), "0.1.0");
+        assert_eq!(parsed.package.name, "test-project");
+        assert_eq!(parsed.package.version.to_string(), "0.1.0");
         assert_eq!(parsed.dependencies.len(), 0);
         assert_eq!(parsed.artifacts.len(), 0);
     }
@@ -252,10 +266,17 @@ requirement = \"1.2.0\"
     fn test_dependency() {
         let manifest = MagnetManifestV1::from_string(&sample_manifest_with_dependency()).unwrap();
         assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "foo");
+        assert_eq!(manifest.dependencies.keys().last().unwrap(), "foo");
+        match manifest.dependencies.get("foo").unwrap() {
+            MagnetManifestV1DependenciesValue::String(semver) => {
+                assert_eq!(semver.to_string(), "1.2.0");
+            }
+            MagnetManifestV1DependenciesValue::Object { .. } => {
+                todo!()
+            }
+        }
+
         // @todo version is currently not parsed
-        // let version = new_manifest.dependencies[0].version.clone().unwrap();
-        // assert_eq!(version, "1.2.0");
     }
 
     #[test]
@@ -263,13 +284,18 @@ requirement = \"1.2.0\"
         let raw_manifest = sample_manifest_with_dependency();
         let modified_raw_manifest = ProjectManifest::add_dependency_preserving(
             &raw_manifest,
-            MagnetManifestV1DependenciesItem {
+            NamedDependency {
                 name: "bar".to_string(),
-                version: Some("2.0.0".to_string()),
-                git: None,
-                index: None,
-                legacy_quark: None,
-                path: None,
+                dependency: MagnetManifestV1DependenciesValue::Object {
+                    branch: None,
+                    version: Some("2.0.0".to_string()),
+                    git: None,
+                    index: None,
+                    legacy_quark: Some(true),
+                    path: None,
+                    ref_: None,
+                    tag: None,
+                },
             },
         )
         .unwrap();
@@ -277,8 +303,8 @@ requirement = \"1.2.0\"
         let modified_manifest = MagnetManifestV1::from_string(&modified_raw_manifest).unwrap();
 
         assert_eq!(modified_manifest.dependencies.len(), 2);
-        assert_eq!(modified_manifest.dependencies[0].name, "foo");
-        assert_eq!(modified_manifest.dependencies[1].name, "bar");
+        assert!(modified_manifest.dependencies.contains_key("foo"));
+        assert!(modified_manifest.dependencies.contains_key("bar"));
         // @todo version is currently not parsed
     }
 
@@ -291,5 +317,34 @@ requirement = \"1.2.0\"
         for name in ["foo@bar", "42hello", "_hello"] {
             assert!(!MagnetManifestV1::is_valid_name(name))
         }
+    }
+
+    #[test]
+    fn test_dependency_string_to_toml_edit_item() {
+        let item =
+            MagnetManifestV1DependenciesValue::String("0.2.0".to_string()).to_toml_edit_item();
+        assert_eq!(item.as_str(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn test_dependency_object_to_toml_edit_item() {
+        let dep = MagnetManifestV1DependenciesValue::Object {
+            git: Some("http://my.git".to_string()),
+            branch: Some("main".to_string()),
+            index: None,
+            legacy_quark: None,
+            path: None,
+            ref_: None,
+            tag: None,
+            version: None,
+        };
+        let item = dep.to_toml_edit_item();
+        let table = item.as_inline_table().unwrap();
+        assert_eq!(
+            table.get("git").and_then(|v| v.as_str()),
+            Some("http://my.git")
+        );
+        assert_eq!(table.get("branch").and_then(|v| v.as_str()), Some("main"));
+        assert!(table.get("version").is_none());
     }
 }
