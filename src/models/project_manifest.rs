@@ -86,13 +86,56 @@ impl ProjectManifest {
     }
 
     pub fn write_new(path: PathBuf, manifest: &MagnetManifestV1) -> anyhow::Result<Self> {
-        let content = toml::to_string(manifest)?;
+        let content = Self::serialize_manifest(manifest)?;
         let file = File::create(&path).context("Could not create project file")?;
         let mut writer = BufWriter::new(file);
         writer.write(content.as_bytes())?;
         writer.flush()?;
         trace!("Init project file");
         Self::open(path)
+    }
+
+    /// A helper function to create a new magnet file w/ a specific layout to start with.
+    /// Do not use this to edit an existing manifest file as this will overwrite existing comments
+    /// and layout.
+    fn serialize_manifest(manifest: &MagnetManifestV1) -> anyhow::Result<String> {
+        let mut doc = DocumentMut::new();
+
+        doc["magnet-version"] = toml_edit::value(manifest.magnet_version);
+
+        let mut package = toml_edit::Table::new();
+        package["name"] = toml_edit::value(manifest.package.name.as_str());
+        package["version"] = toml_edit::value(manifest.package.version.to_string());
+        package.decor_mut().set_prefix("\n");
+        doc["package"] = toml_edit::Item::Table(package);
+
+        let mut metadata = match &manifest.metadata {
+            Some(meta) => serialize_toml_via_serde(meta)?,
+            None => toml_edit::Table::new(),
+        };
+        metadata.decor_mut().set_prefix("\n");
+        doc["metadata"] = toml_edit::Item::Table(metadata);
+
+        let mut deps = toml_edit::Table::new();
+        for (name, value) in &manifest.dependencies {
+            deps.insert(name, value.to_toml_edit_item());
+        }
+        deps.decor_mut().set_prefix("\n");
+        doc["dependencies"] = toml_edit::Item::Table(deps);
+
+        if !manifest.artifacts.is_empty() {
+            let mut artifacts = toml_edit::ArrayOfTables::new();
+            for (i, artifact) in manifest.artifacts.iter().enumerate() {
+                let mut table = serialize_toml_via_serde(artifact)?;
+                if i == 0 {
+                    table.decor_mut().set_prefix("\n");
+                }
+                artifacts.push(table);
+            }
+            doc.insert("artifacts", toml_edit::Item::ArrayOfTables(artifacts));
+        }
+
+        Ok(doc.to_string())
     }
 
     pub fn add_dependency(&self, dependency: NamedDependency) -> anyhow::Result<()> {
@@ -346,5 +389,50 @@ foo = \"1.2.0\"
         );
         assert_eq!(table.get("branch").and_then(|v| v.as_str()), Some("main"));
         assert!(table.get("version").is_none());
+    }
+
+    #[test]
+    fn test_serialize_manifest() {
+        let manifest = MagnetManifestV1 {
+            magnet_version: 1,
+            package: MagnetManifestV1Package {
+                name: "bar".to_string(),
+                version: MagnetManifestV1PackageVersion::from_str("0.1.0").unwrap(),
+            },
+            metadata: Some(MagnetManifestV1Metadata {
+                authors: vec![],
+                description: None,
+                license: None,
+                readme: None,
+                repository: None,
+                tags: vec![],
+            }),
+            dependencies: HashMap::new(),
+            artifacts: vec![MagnetManifestV1ArtifactsItem {
+                kind: MagnetManifestV1ArtifactsItemKind::Quark,
+                global_paths: vec![],
+                platform_paths: None,
+            }],
+            entrypoints: vec![],
+            min_sclang_version: None,
+        };
+
+        let content = ProjectManifest::serialize_manifest(&manifest).unwrap();
+
+        assert_eq!(
+            content,
+            "magnet-version = 1\n\
+             \n\
+             [package]\n\
+             name = \"bar\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [metadata]\n\
+             \n\
+             [dependencies]\n\
+             \n\
+             [[artifacts]]\n\
+             kind = \"quark\"\n"
+        );
     }
 }
