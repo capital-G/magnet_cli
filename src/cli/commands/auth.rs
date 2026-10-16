@@ -1,8 +1,8 @@
 use clap::{command, Parser, Subcommand};
-use magnet::http_client::basic::{MagnetClient, NoAuth, OAuthToken};
+use magnet::http_client::basic::OAuthToken;
 use tracing::{error, info};
 
-use crate::cli::MagnetSubCommand;
+use crate::cli::{CliContext, MagnetSubCommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "auth", about = "Authentication on Magnet Package Index Server")]
@@ -20,18 +20,15 @@ pub enum AuthCommand {
 }
 
 impl MagnetSubCommand for AuthArgs {
-    async fn run(
-        self,
-        _git_client: magnet::git_client::client::GitClient,
-        http_client: MagnetClient<NoAuth>,
-    ) -> anyhow::Result<()> {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
         match self.command {
             AuthCommand::Login => match OAuthToken::local_token_path()?.exists() {
                 true => {
                     info!("Already authenticated");
                     Ok(())
                 }
-                false => match http_client
+                false => match cli_context
+                    .http_client()
                     .authenticate(&OAuthToken::local_token_path()?)
                     .await
                 {

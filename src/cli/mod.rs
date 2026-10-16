@@ -12,11 +12,7 @@ use url::Url;
 use std::env;
 
 pub trait MagnetSubCommand {
-    async fn run(
-        self,
-        git_client: GitClient,
-        http_client: MagnetClient<NoAuth>,
-    ) -> anyhow::Result<()>;
+    async fn run(self, ctx: &CliContext) -> anyhow::Result<()>;
 }
 
 #[derive(Parser)]
@@ -67,29 +63,36 @@ enum Commands {
     Bundle(ProjectBundleArgs),
 }
 
+pub struct CliContext {
+    global_args: GlobalArgs,
+}
+
+impl CliContext {
+    pub fn git_client(&self) -> anyhow::Result<GitClient> {
+        GitClient::new(
+            self.global_args.git_index_url.clone(),
+            env::home_dir().unwrap().join(".magnet").join("index"),
+        )
+    }
+    pub fn http_client(&self) -> MagnetClient<NoAuth> {
+        MagnetClient::<NoAuth>::new(self.global_args.index_url.clone())
+    }
+}
+
 pub(crate) async fn cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     logging::init_tracing(cli.global.verbosity)?;
 
-    // @todo turn these and args into a struct which then can be passed such that
-    // the the contract can be modifed w/o touching the signature
-    let http_client = MagnetClient::<NoAuth>::new(cli.global.index_url.clone());
-
-    let git_client = GitClient::new(
-        cli.global.git_index_url.clone(),
-        env::home_dir().unwrap().join(".magnet").join("index"),
-    )?;
+    let cli_context = CliContext {
+        global_args: cli.global,
+    };
 
     match cli.command {
-        Commands::Init(init_args) => init_args.run(git_client, http_client).await,
+        Commands::Init(init_args) => init_args.run(&cli_context).await,
         Commands::Add(project_add_dependency_args) => {
-            project_add_dependency_args
-                .run(git_client, http_client)
-                .await
+            project_add_dependency_args.run(&cli_context).await
         }
-        Commands::Bundle(project_bundle_args) => {
-            project_bundle_args.run(git_client, http_client).await
-        }
+        Commands::Bundle(project_bundle_args) => project_bundle_args.run(&cli_context).await,
     }
 }

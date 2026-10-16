@@ -1,14 +1,10 @@
 use anyhow::Context;
 use clap::{command, Parser, Subcommand};
-use magnet::{
-    git_client::{client::GitClient, models::GitDependency},
-    http_client::basic::{MagnetClient, NoAuth},
-    resolver::online_provider::RootProvider,
-};
+use magnet::{git_client::models::GitDependency, resolver::online_provider::RootProvider};
 use pubgrub::{resolve, DefaultStringReporter, PubGrubError, Reporter, SemanticVersion};
 use tracing::info;
 
-use crate::cli::MagnetSubCommand;
+use crate::cli::{CliContext, MagnetSubCommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "index", about = "Package index")]
@@ -39,11 +35,8 @@ pub enum IndexCommand {
 }
 
 impl MagnetSubCommand for IndexArgs {
-    async fn run(
-        self,
-        git_client: GitClient,
-        _http_client: MagnetClient<NoAuth>,
-    ) -> anyhow::Result<()> {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
+        let git_client = cli_context.git_client()?;
         match self.command {
             IndexCommand::Update => match git_client.update() {
                 Ok(_) => {

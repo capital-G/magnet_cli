@@ -1,6 +1,6 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
-use crate::cli::MagnetSubCommand;
+use crate::cli::{CliContext, MagnetSubCommand};
 use anyhow::Context;
 use clap::{arg, Parser};
 use inquire::{
@@ -11,7 +11,7 @@ use magnet::models::package::{BundleFormat, Quark, QuarkAbiTag, SourcePlatformTa
 use magnet::{
     git_client::models::GitDependency,
     models::{
-        project::{Project, ProjectTypeEnum},
+        project::Project,
         project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
     },
 };
@@ -35,11 +35,7 @@ pub struct ProjectInitArgs {
 }
 
 impl MagnetSubCommand for ProjectInitArgs {
-    async fn run(
-        self,
-        _git_client: magnet::git_client::client::GitClient,
-        _http_client: magnet::http_client::basic::MagnetClient<magnet::http_client::basic::NoAuth>,
-    ) -> anyhow::Result<()> {
+    async fn run(self, _ctx: &CliContext) -> anyhow::Result<()> {
         if let Some(ref path) = self.path {
             if path.read_dir().iter().len() > 0 {
                 warn!(?path, "Specified project directory is not empty!");
@@ -125,11 +121,7 @@ fn parse_dependency(input: String) -> anyhow::Result<GitDependency> {
 }
 
 impl MagnetSubCommand for ProjectAddDependencyArgs {
-    async fn run(
-        self,
-        git_client: magnet::git_client::client::GitClient,
-        _http_client: magnet::http_client::basic::MagnetClient<magnet::http_client::basic::NoAuth>,
-    ) -> anyhow::Result<()> {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
         let project_path = match self.path {
             Some(path) => path,
             None => env::current_dir()?,
@@ -137,7 +129,7 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
         let mut project_manager = Project::open(&project_path)?;
         let dependency = parse_dependency(self.dependency)?;
 
-        project_manager.add_dependency(git_client, dependency)
+        project_manager.add_dependency(cli_context.git_client()?, dependency)
     }
 }
 
@@ -154,11 +146,7 @@ pub struct ProjectBundleArgs {
 }
 
 impl MagnetSubCommand for ProjectBundleArgs {
-    async fn run(
-        self,
-        _git_client: magnet::git_client::client::GitClient,
-        _http_client: magnet::http_client::basic::MagnetClient<magnet::http_client::basic::NoAuth>,
-    ) -> anyhow::Result<()> {
+    async fn run(self, _cli_context: &CliContext) -> anyhow::Result<()> {
         let project_path = match self.path {
             Some(path) => path,
             None => env::current_dir()?,
