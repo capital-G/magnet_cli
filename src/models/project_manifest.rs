@@ -76,15 +76,6 @@ impl ProjectManifest {
         })
     }
 
-    pub fn new(path: PathBuf, name: &String, version: &SemanticVersion) -> anyhow::Result<Self> {
-        let file = File::create(&path).context("Could not create project file")?;
-        let mut writer = BufWriter::new(file);
-        writer.write(MagnetManifestV1::new_template(&name, &version).as_bytes())?;
-        writer.flush()?;
-        trace!("Init project file");
-        Self::open(path)
-    }
-
     pub fn write_new(path: PathBuf, manifest: &MagnetManifestV1) -> anyhow::Result<Self> {
         let content = Self::serialize_manifest(manifest)?;
         let file = File::create(&path).context("Could not create project file")?;
@@ -150,16 +141,6 @@ impl ProjectManifest {
     pub fn get_manifest(&self) -> &MagnetManifestV1 {
         &self.manifest
     }
-
-    // #[instrument(skip(self))]
-    // pub fn write(&self) -> anyhow::Result<()> {
-    //     std::fs::write(
-    //         &self.path,
-    //         toml::to_string_pretty(&self.manifest).context("Could not serialize project file")?
-    //     ).context("Could not write project file")?;
-    //     trace!("Init project file");
-    //     Ok(())
-    // }
 
     /// transforms the manifest in a non-destructive way, i.e.
     /// comments, positioning and formatting are preserved.
@@ -249,23 +230,6 @@ impl MagnetManifestV1 {
                 Err(err.into())
             }
         }
-    }
-
-    /// This scaffolds a new magnet template, which allows to force a certain formatting
-    fn new_template(name: &String, version: &SemanticVersion) -> String {
-        let content = format!(
-            "magnet = 1
-
-name = \"{name}\"
-version = \"{version}\"
-
-[metadata]
-
-",
-            name = name,
-            version = version.to_string(),
-        );
-        content
     }
 }
 
