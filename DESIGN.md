@@ -163,6 +163,20 @@ Therefore, some advice:
 
 At some point it will be hopefully possible to indicate a version as `alpha`, `beta` or `rc` in order to publish a version for testing which will be ignored when resolving dependency unless explicitly requested.
 
+#### Version range restriction
+
+Version restrictions follow the ones from [`cargo`](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html) and [`npm`](https://docs.npmjs.com/cli/v12/configuring-npm/package-json#dependencies)
+
+Written | Comment
+--- | ---
+`1.2.3` | Equivalent to `^1.2.3`
+`^1.2.3` | `>=1.2.3`, `<2.0.0`
+` ` (empty) | Equivalent to `*`
+`*` | `>=0.0.0`
+`~1.2.3` | `>=1.2.3`, `<1.3.0`
+
+Pre-releases are not supported yet.
+
 ### Lock file`magnet.lock.json`
 
 Magnet will also create a lock file which stores the exact version of every installed dependency.
