@@ -10,7 +10,6 @@ description = "Package manager for SuperCollider"
 tracing = "0.1.40"
 tracing-subscriber = {version = "0.3.18", features = ["std", "env-filter", "fmt"]}
 tokio = { version = "1.37.0", features = ["full"] }
-tokio-graceful-shutdown = "0.16.0"
 clap = { version = "4.5.4", features = ["derive", "env"] }
 serde = { version = "1.0.219", features = ["derive"] }
 semver = { version = "1.0.26", features = ["serde"] }
