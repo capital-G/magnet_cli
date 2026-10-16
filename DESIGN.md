@@ -177,12 +177,24 @@ Written | Comment
 
 Pre-releases are not supported yet.
 
-### Lock file`magnet.lock.json`
+### Lock file`magnet.lock`
 
 Magnet will also create a lock file which stores the exact version of every installed dependency.
 This is particularly relevant for transient dependencies, and only with a lock file a full replication of the environment can be guaranteed.
 
 While libraries should not publish such a file (since libraries are expected to work with a variety of versions rather than only one version of a dependency), projects should always include their lock file when sharing it with other people such that the same behavior can be guaranteed.
+
+#### Example
+
+```toml
+lock-version = "1.0.0"
+index = "http://git.supercollider.online/magnet-index"
+
+[dependencies]
+foo = { version = "0.1.0", source = "index", checksum = "sha256" }
+bar = { version = "0.2.0", source = "git+<url>#<sha>", checksum = "sha256" }
+baz = { version = "0.3.0", source = "../baz", checksum = "sha256" }
+```
 
 ## `magnet` as local CLI
 
