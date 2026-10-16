@@ -1,4 +1,5 @@
 .vscode/
+.idea/
 
 magnet.yaml
 magnet*.yaml
