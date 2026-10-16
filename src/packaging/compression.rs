@@ -39,7 +39,7 @@ impl MagnetArchive for Project {
         Ok(())
     }
 
-    fn extract(&self, source: &PathBuf, target: &PathBuf) -> anyhow::Result<()> {
+    fn extract(&self, _source: &PathBuf, _target: &PathBuf) -> anyhow::Result<()> {
         todo!()
     }
 }

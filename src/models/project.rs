@@ -160,11 +160,11 @@ impl Project {
     /// It will be saved under with the upload identifier format in the project directory
     /// under `/dist`.
     /// Additionally, the source package will also be created or updated.
-    #[instrument(skip(self, artifact_kind, bundle_format))]
+    #[instrument(skip(self, _artifact_kind, _bundle_format))]
     pub fn create_package<P: MagnetPackage>(
         &self,
-        artifact_kind: Option<MagnetManifestV1ArtifactsItemKind>,
-        bundle_format: Option<BundleFormat<P>>,
+        _artifact_kind: Option<MagnetManifestV1ArtifactsItemKind>,
+        _bundle_format: Option<BundleFormat<P>>,
     ) -> anyhow::Result<PathBuf> {
         // create tar file outside of directory and move it later back in to avoid recursive problems
         // while scanning the project directory
