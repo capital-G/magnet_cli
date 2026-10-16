@@ -291,8 +291,10 @@ version = \"0.1.0\"
             "{}
 [dependencies]
 foo = \"1.2.0\"
+baz = {}
 ",
-            sample_manifest()
+            sample_manifest(),
+            "{ version = \"1.2.0\", legacy-quark = true }",
         )
     }
 
@@ -308,8 +310,7 @@ foo = \"1.2.0\"
     #[test]
     fn test_dependency() {
         let manifest = MagnetManifestV1::from_string(&sample_manifest_with_dependency()).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies.keys().last().unwrap(), "foo");
+        assert_eq!(manifest.dependencies.len(), 2);
         match manifest.dependencies.get("foo").unwrap() {
             MagnetManifestV1DependenciesValue::String(semver) => {
                 assert_eq!(semver.to_string(), "1.2.0");
@@ -319,7 +320,19 @@ foo = \"1.2.0\"
             }
         }
 
-        // @todo version is currently not parsed
+        match manifest.dependencies.get("baz").unwrap() {
+            MagnetManifestV1DependenciesValue::String(_) => {
+                todo!();
+            }
+            MagnetManifestV1DependenciesValue::Object {
+                legacy_quark,
+                version,
+                ..
+            } => {
+                assert_eq!(version.as_ref().unwrap().to_string(), "1.2.0");
+                assert_eq!(legacy_quark.unwrap(), true);
+            }
+        }
     }
 
     #[test]
@@ -345,9 +358,10 @@ foo = \"1.2.0\"
 
         let modified_manifest = MagnetManifestV1::from_string(&modified_raw_manifest).unwrap();
 
-        assert_eq!(modified_manifest.dependencies.len(), 2);
+        assert_eq!(modified_manifest.dependencies.len(), 3);
         assert!(modified_manifest.dependencies.contains_key("foo"));
         assert!(modified_manifest.dependencies.contains_key("bar"));
+        assert!(modified_manifest.dependencies.contains_key("baz"));
         // @todo version is currently not parsed
     }
 
