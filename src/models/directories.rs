@@ -1,5 +1,3 @@
-use crate::models::project::Project;
-
 #[derive(Debug, Clone)]
 pub enum ProjectDirectory {
     /// sclang source code in .sc format

@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::{
     fs::File,
     io::{BufWriter, Write},
-    path::Path,
     str::FromStr,
 };
 use toml_edit::DocumentMut;

@@ -1,5 +1,5 @@
 use std::{
-    fmt::{write, Display},
+    fmt::Display,
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -19,7 +19,6 @@ use crate::{
         directories::ProjectDirectory,
         lock_file::LockFile,
         package::{BundleFormat, MagnetPackage, SourceBundle},
-        project,
         project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
     },
     packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},

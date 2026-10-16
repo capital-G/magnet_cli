@@ -1,6 +1,6 @@
 use std::{fs::File, path::PathBuf};
 
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, instrument, trace};
 
 use crate::models::project::Project;
 

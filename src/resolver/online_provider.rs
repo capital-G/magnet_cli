@@ -1,7 +1,6 @@
 use pubgrub::{Dependencies, DependencyConstraints, DependencyProvider, Ranges, SemanticVersion};
 use semver::VersionReq;
 use std::convert::Infallible;
-use std::ops::Add;
 use tracing::error;
 
 use crate::git_client::{client::GitClient, models::GitDependency};

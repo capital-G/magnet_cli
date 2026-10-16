@@ -1,9 +1,7 @@
 use anyhow;
-use std::io::Read;
 use std::{
     env,
-    fs::{self, File},
-    io::{BufReader, BufWriter},
+    fs::{self},
     path::PathBuf,
 };
 use tracing::{error, info};
