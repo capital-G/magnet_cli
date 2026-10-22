@@ -1,4 +1,4 @@
-use crate::models::project_manifest::MagnetManifestV1ArtifactsItemKind;
+use crate::models::project_manifest::MagnetManifestV1PackageKind;
 
 /// Describes the ABI which of the server it was compiled against.
 /// Since some plugins are not compatible with Supernova (e.g. FluCoMa)
@@ -64,25 +64,25 @@ pub struct Lepton;
 pub struct Gluon;
 
 pub trait MagnetPackage {
-    const KIND: MagnetManifestV1ArtifactsItemKind;
+    const KIND: MagnetManifestV1PackageKind;
     type Abi: std::fmt::Debug;
     type Platform: std::fmt::Debug;
 }
 
 impl MagnetPackage for Quark {
-    const KIND: MagnetManifestV1ArtifactsItemKind = MagnetManifestV1ArtifactsItemKind::Quark;
+    const KIND: MagnetManifestV1PackageKind = MagnetManifestV1PackageKind::Quark;
     type Abi = QuarkAbiTag;
     type Platform = SourcePlatformTag;
 }
 
 impl MagnetPackage for Lepton {
-    const KIND: MagnetManifestV1ArtifactsItemKind = MagnetManifestV1ArtifactsItemKind::Lepton;
+    const KIND: MagnetManifestV1PackageKind = MagnetManifestV1PackageKind::Lepton;
     type Abi = LeptonAbiTag;
     type Platform = BinaryPlatformTag;
 }
 
 impl MagnetPackage for Gluon {
-    const KIND: MagnetManifestV1ArtifactsItemKind = MagnetManifestV1ArtifactsItemKind::Gluon;
+    const KIND: MagnetManifestV1PackageKind = MagnetManifestV1PackageKind::Gluon;
     type Abi = GluonAbiTag;
     type Platform = BinaryPlatformTag;
 }
@@ -98,5 +98,5 @@ pub struct BundleFormat<P: MagnetPackage> {
 #[derive(Debug, Clone)]
 pub enum BundleType {
     SourceBundle,
-    ArtifactBundle(MagnetManifestV1ArtifactsItemKind),
+    ArtifactBundle(MagnetManifestV1PackageKind),
 }

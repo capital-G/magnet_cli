@@ -20,9 +20,19 @@
           "type": "string",
           "description": "Version of this package",
           "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["quark", "lepton", "gluon"],
+          "description": "Kind of the package: quark (sclang classes), lepton (server plugin) or gluon (sclang plugin, reserved)"
+        },
+        "min-sclang-version": {
+          "type": "string",
+          "description": "Minimum sclang version required - defaults to 3.10.0",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
         }
       },
-      "required": ["name", "version"],
+      "required": ["name", "version", "kind"],
       "additionalProperties": false
     },
     "metadata": {
@@ -96,20 +106,28 @@
                 "description": "Used for the legacy quarks package management system"
               },
               "git": {
-                "type": "string",
-                "description": "Git repository URL - magnet index will not be queried"
-              },
-              "branch": {
-                "type": "string",
-                "description": "Git branch to check out"
-              },
-              "tag": {
-                "type": "string",
-                "description": "Git tag to check out"
-              },
-              "ref": {
-                "type": "string",
-                "description": "Pin a specific git commit ID"
+                "type": "object",
+                "description": "Git repository - magnet index will not be queried",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "description": "Git repository URL"
+                  },
+                  "branch": {
+                    "type": "string",
+                    "description": "Git branch to check out"
+                  },
+                  "tag": {
+                    "type": "string",
+                    "description": "Git tag to check out"
+                  },
+                  "ref": {
+                    "type": "string",
+                    "description": "Pin a specific git commit ID"
+                  }
+                },
+                "required": ["url"],
+                "additionalProperties": false
               },
               "path": {
                 "type": "string",
@@ -125,50 +143,41 @@
         ]
       }
     },
-    "artifacts": {
-      "type": "array",
-      "description": "Artifacts of the build process, used for bundling",
-      "items": {
-        "type": "object",
-        "properties": {
-          "kind": {
-            "type": "string",
-            "enum": ["quark", "lepton", "gluon"],
-            "description": "Can be either quark, gluon, or lepton"
-          },
-          "global-paths": {
-            "type": "array",
-            "description": "Paths included for every platform - supports glob wildcards",
-            "items": {
-              "type": "string"
-            }
-          },
-          "platform-paths": {
-            "type": "object",
-            "description": "Platform-dependent paths, e.g. binary build outputs",
-            "properties": {
-              "platform": {
-                "type": "string",
-                "enum": ["windows", "linux", "macos"],
-                "description": "Platform to match"
-              },
-              "paths": {
-                "type": "array",
-                "description": "Platform-dependent files to include",
-                "items": {
-                  "type": "string"
-                }
-              }
-            },
-            "required": ["platform", "paths"],
-            "additionalProperties": false
+    "artifact": {
+      "type": "object",
+      "description": "Files which make up the package, used for bundling",
+      "properties": {
+        "global-paths": {
+          "type": "array",
+          "description": "Paths included for every platform - supports glob wildcards",
+          "items": {
+            "type": "string"
           }
         },
-        "required": ["kind"],
-        "additionalProperties": false
-      }
+        "platform-paths": {
+          "type": "object",
+          "description": "Platform-dependent paths, e.g. binary build outputs",
+          "properties": {
+            "platform": {
+              "type": "string",
+              "enum": ["windows", "linux", "macos"],
+              "description": "Platform to match"
+            },
+            "paths": {
+              "type": "array",
+              "description": "Platform-dependent files to include",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": ["platform", "paths"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
-    "entrypoints": {
+    "entrypoint": {
       "type": "array",
       "description": "Entrypoints for script executions",
       "items": {
@@ -191,11 +200,6 @@
         "required": ["name", "command"],
         "additionalProperties": false
       }
-    },
-    "min-sclang-version": {
-      "type": "string",
-      "description": "Minimum sclang version required - defaults to 3.10.0",
-      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
     }
   },
   "required": ["magnet-version", "package"],

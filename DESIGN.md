@@ -92,6 +92,8 @@ magnet-version = 1
 [package]
 name = "magnet-test"
 version = "0.1.0"
+# can either be quark or lepton (a server plugin)
+kind = "quark"
 min-sclang-version="3.13.0"
 
 [[entrypoint]]
@@ -112,40 +114,26 @@ kind = "sclang"
 [dependencies]
 jitlib-extensions = "0.5.*"
 # allows to rely on old quarks
-ddwCommon = { legacyQuark = true }
+ddwCommon = { legacy-quark = true }
 # we can also reference packages which are not part of the index via git
 outsidOfIndex = { git = { url = "http://my.git", branch = "main" } }
 # we can also refer to other local magnet projects
 # can not publish to index if local package present!
 myLocalDependency = { path = "../mySecretProject" }
 
-[[artifacts]]
-kind = "quark"
-globalPaths = ["Classes/**.sc", "examples/*"]
-
-[[artifacts]]
-kind = "lepton"
-globalPaths = ["LeptonClasses/*.sc"]
-platformPaths = {
-  linux = {
-    paths="build/myout.scx"
-  }
-}
+[artifact]
+global-paths = ["Classes/**.sc", "examples/*"]
 
 [metadata]
 license = "GPL-3.0"
-tags = ["awesome", "jit"]
+tags = ["awesome", "jitlib"]
 description = """
 This is a long description
 """
-
-[[metadata.author]]
-name = "hello"
-email = "hello@hello.com"
-
-[[metadata.author]]
-name = "world"
-email = "world@world.com"
+authors = [
+  { name = "hello", email = "hello@hello.com" },
+  { name = "world", email = "world@world.com" },
+]
 ```
 
 Entrypoints will be an alternative for a standalone version of SuperCollider: Ideally, People would only need the source code and a copy of magnet and everything would be setup accordingly.
@@ -213,11 +201,7 @@ The magnet client mainly is used to
 
 Once a project should be published it needs to be packaged and sent to the server for indexing.
 
-The manifest file specifies which files need to be included for the package, which can be a Quark (covering `.sc` files), a Lepton and/or a Gluon.
-Since the server and language can have different ABI it is necessary to split those into dedicated packages for upload, yet it is possible that a project is exposing a Lepton and a Gluon package.
-
 ```bash
-# optional specify which kind of package, e.g. --quark or --lepton, if multiple
 magnet package
 ```
 
@@ -226,7 +210,7 @@ Since magnet knows via the package manifest which files make up the package, it 
 The naming convention for the `.tar.gz` file follows
 
 ```
-{package name}-{semantic version}-{quark/lepton/gluon}-{abi tag}-{platform tag}.tar.gz
+{package name}-{semantic version}-{quark/lepton}-{abi tag}-{platform tag}.tar.gz
 ```
 
 For platform-dependent binary packages, so Leptons and Gluons, magnet will guess the platform and architecture, but it is possible to specify this explicitly through CLI flags and environment variables for cross-compilation.
@@ -234,7 +218,7 @@ The ABI tag needs to be specified, but defaults to the latest ABI version.
 Leptons and Gluons will also upload a package of the source code to the index and will consist of everything that is not excluded via a `.gitignore` file.
 
 ```
-{package name}-{semantic version}-source.tar.gz
+{package name}-{semantic version}-{quark/lepton}-source.tar.gz
 ```
 
 Since Quarks are not bound to a platform, it will follow the [Python wheels convention](https://peps.python.org/pep-0491/#file-name-convention) of using `any` for `platform tag` and the minimum supported version of sclang as abi tag, so e.g. `sclang3-10-0` which will be deduced from the `magnet.toml` file.
@@ -256,6 +240,14 @@ The platform tag is one of the following values
 * `macosx_universal`
 
 Before uploading the asset to the index a user is expected to inspect its content since the package index only allows to add, never to delete.
+
+#### Package kinds
+
+A package can be one of 2 kinds, *quark* or *lepton* (aka server plugins).
+In the future it would be possible to extend this e.g. with *gluon*, which would be a binary plugin for sclang.
+
+The kind of package does not take part in the dependency resolution, there can only be one kind of package for a given name.
+In case a future *gluon* package also requires a *lepton* package, these should be two separate magnet projects which depend on each other.
 
 #### Valid package names
 

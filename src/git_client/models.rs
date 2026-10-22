@@ -120,13 +120,10 @@ impl TryFrom<NamedDependency> for GitDependency {
 impl From<GitDependency> for MagnetManifestV1DependenciesValue {
     fn from(value: GitDependency) -> Self {
         MagnetManifestV1DependenciesValue::Object {
-            branch: None,
             git: None,
             index: None,
             legacy_quark: None,
             path: None,
-            ref_: None,
-            tag: None,
             version: Some(value.constraint.to_string()),
         }
     }

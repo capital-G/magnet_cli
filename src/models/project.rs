@@ -19,7 +19,7 @@ use crate::{
         directories::ProjectDirectory,
         lock_file::LockFile,
         package::{BundleFormat, MagnetPackage, SourceBundle},
-        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
+        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
     resolver::online_provider::RootProvider,
@@ -123,13 +123,10 @@ impl Project {
             Ok(tree) => {
                 info!("Successfully resolved the tree! {:?}", tree);
                 let magnet_dependency = MagnetManifestV1DependenciesValue::Object {
-                    branch: None,
                     git: None,
                     index: None,
                     legacy_quark: None,
                     path: None,
-                    ref_: None,
-                    tag: None,
                     version: Some(dependency.constraint.to_string()),
                 };
                 self.project_manifest.add_dependency(NamedDependency {
@@ -163,7 +160,7 @@ impl Project {
     #[instrument(skip(self, _artifact_kind, _bundle_format))]
     pub fn create_package<P: MagnetPackage>(
         &self,
-        _artifact_kind: Option<MagnetManifestV1ArtifactsItemKind>,
+        _artifact_kind: Option<MagnetManifestV1PackageKind>,
         _bundle_format: Option<BundleFormat<P>>,
     ) -> anyhow::Result<PathBuf> {
         // create tar file outside of directory and move it later back in to avoid recursive problems

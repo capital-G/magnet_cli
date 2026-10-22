@@ -31,8 +31,9 @@ impl MagnetManifestV1DependenciesValue {
                 let doc: DocumentMut = toml_str.parse().unwrap();
                 let mut inline = toml_edit::InlineTable::new();
                 for (key, item) in doc.as_table().iter() {
-                    if let Some(v) = item.as_value() {
-                        inline.insert(key, v.clone());
+                    // nested tables (e.g. `git`) become nested inline tables
+                    if let Ok(v) = item.clone().into_value() {
+                        inline.insert(key, v);
                     }
                 }
                 toml_edit::Item::Value(toml_edit::Value::InlineTable(inline))
@@ -96,6 +97,10 @@ impl ProjectManifest {
         let mut package = toml_edit::Table::new();
         package["name"] = toml_edit::value(manifest.package.name.as_str());
         package["version"] = toml_edit::value(manifest.package.version.to_string());
+        package["kind"] = toml_edit::value(manifest.package.kind.to_string());
+        if let Some(min_sclang_version) = &manifest.package.min_sclang_version {
+            package["min-sclang-version"] = toml_edit::value(min_sclang_version.to_string());
+        }
         package.decor_mut().set_prefix("\n");
         doc["package"] = toml_edit::Item::Table(package);
 
@@ -113,16 +118,10 @@ impl ProjectManifest {
         deps.decor_mut().set_prefix("\n");
         doc["dependencies"] = toml_edit::Item::Table(deps);
 
-        if !manifest.artifacts.is_empty() {
-            let mut artifacts = toml_edit::ArrayOfTables::new();
-            for (i, artifact) in manifest.artifacts.iter().enumerate() {
-                let mut table = serialize_toml_via_serde(artifact)?;
-                if i == 0 {
-                    table.decor_mut().set_prefix("\n");
-                }
-                artifacts.push(table);
-            }
-            doc.insert("artifacts", toml_edit::Item::ArrayOfTables(artifacts));
+        if let Some(artifact) = &manifest.artifact {
+            let mut table = serialize_toml_via_serde(artifact)?;
+            table.decor_mut().set_prefix("\n");
+            doc["artifact"] = toml_edit::Item::Table(table);
         }
 
         Ok(doc.to_string())
@@ -176,7 +175,7 @@ impl MagnetManifestV1 {
         license: Option<String>,
         version: SemanticVersion,
         min_sclang_version: Option<SemanticVersion>,
-        project_kind: MagnetManifestV1ArtifactsItemKind,
+        project_kind: MagnetManifestV1PackageKind,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             Self::is_valid_name(&name),
@@ -184,7 +183,7 @@ impl MagnetManifestV1 {
         );
 
         let min_sclang_version = match min_sclang_version {
-            Some(version) => Some(MagnetManifestV1MinSclangVersion::from_str(
+            Some(version) => Some(MagnetManifestV1PackageMinSclangVersion::from_str(
                 &version.to_string(),
             )?),
             None => None,
@@ -201,17 +200,17 @@ impl MagnetManifestV1 {
         };
 
         Ok(MagnetManifestV1 {
-            artifacts: vec![MagnetManifestV1ArtifactsItem {
-                global_paths: vec![],
-                kind: project_kind,
-                platform_paths: None,
-            }],
+            artifact: None,
             dependencies: HashMap::new(),
-            entrypoints: vec![],
+            entrypoint: vec![],
             magnet_version: 1,
             metadata: Some(metadata),
-            min_sclang_version,
-            package: MagnetManifestV1Package { name, version },
+            package: MagnetManifestV1Package {
+                kind: project_kind,
+                min_sclang_version,
+                name,
+                version,
+            },
         })
     }
 
@@ -242,6 +241,7 @@ mod tests {
 [package]
 name = \"test-project\"
 version = \"0.1.0\"
+kind = \"quark\"
 
 [metadata]
 
@@ -267,7 +267,7 @@ baz = {}
         assert_eq!(parsed.package.name, "test-project");
         assert_eq!(parsed.package.version.to_string(), "0.1.0");
         assert_eq!(parsed.dependencies.len(), 0);
-        assert_eq!(parsed.artifacts.len(), 0);
+        assert!(parsed.artifact.is_none());
     }
 
     #[test]
@@ -306,14 +306,11 @@ baz = {}
             NamedDependency {
                 name: "bar".to_string(),
                 dependency: MagnetManifestV1DependenciesValue::Object {
-                    branch: None,
                     version: Some("2.0.0".to_string()),
                     git: None,
                     index: None,
                     legacy_quark: Some(true),
                     path: None,
-                    ref_: None,
-                    tag: None,
                 },
             },
         )
@@ -349,22 +346,25 @@ baz = {}
     #[test]
     fn test_dependency_object_to_toml_edit_item() {
         let dep = MagnetManifestV1DependenciesValue::Object {
-            git: Some("http://my.git".to_string()),
-            branch: Some("main".to_string()),
+            git: Some(MagnetManifestV1DependenciesValueObjectGit {
+                url: "http://my.git".to_string(),
+                branch: Some("main".to_string()),
+                ref_: None,
+                tag: None,
+            }),
             index: None,
             legacy_quark: None,
             path: None,
-            ref_: None,
-            tag: None,
             version: None,
         };
         let item = dep.to_toml_edit_item();
         let table = item.as_inline_table().unwrap();
+        let git = table.get("git").and_then(|v| v.as_inline_table()).unwrap();
         assert_eq!(
-            table.get("git").and_then(|v| v.as_str()),
+            git.get("url").and_then(|v| v.as_str()),
             Some("http://my.git")
         );
-        assert_eq!(table.get("branch").and_then(|v| v.as_str()), Some("main"));
+        assert_eq!(git.get("branch").and_then(|v| v.as_str()), Some("main"));
         assert!(table.get("version").is_none());
     }
 
@@ -375,6 +375,8 @@ baz = {}
             package: MagnetManifestV1Package {
                 name: "bar".to_string(),
                 version: MagnetManifestV1PackageVersion::from_str("0.1.0").unwrap(),
+                kind: MagnetManifestV1PackageKind::Quark,
+                min_sclang_version: None,
             },
             metadata: Some(MagnetManifestV1Metadata {
                 authors: vec![],
@@ -385,13 +387,11 @@ baz = {}
                 tags: vec![],
             }),
             dependencies: HashMap::new(),
-            artifacts: vec![MagnetManifestV1ArtifactsItem {
-                kind: MagnetManifestV1ArtifactsItemKind::Quark,
-                global_paths: vec![],
+            artifact: Some(MagnetManifestV1Artifact {
+                global_paths: vec!["classes/**/*.sc".to_string()],
                 platform_paths: None,
-            }],
-            entrypoints: vec![],
-            min_sclang_version: None,
+            }),
+            entrypoint: vec![],
         };
 
         let content = ProjectManifest::serialize_manifest(&manifest).unwrap();
@@ -403,13 +403,29 @@ baz = {}
              [package]\n\
              name = \"bar\"\n\
              version = \"0.1.0\"\n\
+             kind = \"quark\"\n\
              \n\
              [metadata]\n\
              \n\
              [dependencies]\n\
              \n\
-             [[artifacts]]\n\
-             kind = \"quark\"\n"
+             [artifact]\n\
+             global-paths = [\"classes/**/*.sc\"]\n"
         );
+    }
+
+    /// The manifest example in DESIGN.md must always be valid against the schema.
+    #[test]
+    fn test_design_doc_example() {
+        let design = include_str!("../../DESIGN.md");
+        let example = design
+            .split("\n### Example\n")
+            .nth(1)
+            .and_then(|section| section.split("```toml\n").nth(1))
+            .and_then(|block| block.split("\n```").next())
+            .expect("Could not find manifest example in DESIGN.md");
+
+        let manifest = MagnetManifestV1::from_string(example).unwrap();
+        assert_eq!(manifest.package.name, "magnet-test");
     }
 }

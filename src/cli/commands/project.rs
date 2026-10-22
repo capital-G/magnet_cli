@@ -12,7 +12,7 @@ use magnet::{
     git_client::models::GitDependency,
     models::{
         project::Project,
-        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactsItemKind},
+        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
 };
 use pubgrub::SemanticVersion;
@@ -60,9 +60,9 @@ impl MagnetSubCommand for ProjectInitArgs {
         let project_kind = Select::new(
             "Project kind:",
             vec![
-                MagnetManifestV1ArtifactsItemKind::Quark,
-                // MagnetManifestV1ArtifactsItemKind::Gluon,
-                MagnetManifestV1ArtifactsItemKind::Lepton,
+                MagnetManifestV1PackageKind::Quark,
+                // MagnetManifestV1PackageKind::Gluon,
+                MagnetManifestV1PackageKind::Lepton,
             ],
         )
         .prompt()?;
@@ -157,7 +157,7 @@ impl MagnetSubCommand for ProjectBundleArgs {
             platform: SourcePlatformTag::Any,
         };
         project.create_package(
-            Some(MagnetManifestV1ArtifactsItemKind::Gluon),
+            Some(MagnetManifestV1PackageKind::Gluon),
             Some(bundle_format),
         )?;
         Ok(())
