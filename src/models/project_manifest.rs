@@ -417,7 +417,8 @@ baz = {}
     /// The manifest example in DESIGN.md must always be valid against the schema.
     #[test]
     fn test_design_doc_example() {
-        let design = include_str!("../../DESIGN.md");
+        // fix: git may check out DESIGN.md with CRLF line endings on Windows
+        let design = include_str!("../../DESIGN.md").replace("\r\n", "\n");
         let example = design
             .split("\n### Example\n")
             .nth(1)
