@@ -173,6 +173,8 @@ authors = [
 
 Entrypoints will be an alternative for a standalone version of SuperCollider: Ideally, People would only need the source code and a copy of magnet and everything would be setup accordingly.
 
+One can only run the entrypoints of the root project.
+
 ### Semantic versioning
 
 Packages need to define their versions using [semantic versioning](https://semver.org/) which defines for a clear ordering and also communicate compatibility issues.
