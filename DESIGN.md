@@ -336,15 +336,57 @@ Only the `magnet-server` can write into this repository.
 The magnet CLI will clone this repository which contains the list of available packages and update it occasionally.
 Since this repository stores all available packages, versions and assets, is can be used to resolve the requested dependencies locally, which improves performance and reduces load on the server dramatically.
 
-Cargo is following a similar approach - take a look at their index which is located at https://github.com/rust-lang/crates.io-index
+This index will be split, i.e. instead of a flat namespace with all its files, we will use an approach which organizes the packages by its first letter into a sub-folder, i.e. `foobar` would be placed in `f/foobar.jsonl`.
+This uses the normalized name of the package as a basis, i.e. the normalized representation of `DDW_Common` is `ddw-common` within magnet.
+
+Each file while then have a one-lined JSON for each release, which covers
+
+```json
+{"name": "foo", "version": "0.1.3", "kind": "quark", "dependencies": {"bar":  "<0.2.0"}, "yanked": false, "artifacts": [{"abi":  "any", "platform": "any", "sha256":  "abc"}]}
+```
+
+Legacy quarks can also be used as dependencies by providing
+
+```json
+{"baz": {"legacy-quark": true, "git": {"ref": "<git sha>", "url":  "<link-to-repo>"}}}
+```
+
+Sources (of binary packages) are represented via
+
+```json
+{"abi": "source", "platform": "any"}
+```
+
+Such an entry will be inserted by the index service as a single writer on this index and can be regenerated from the DB of the index.
+
+Additionally, each index needs to implement a `config.json` at the root which implements
+
+```json
+{"index-format": 1, "dl": "<url template>"}
+```
+
+such that updates to the index can be made and also the download url can be changed in one position in case the packages need to migrate to a different URL.
+The URL template needs to be configured in such a way that each artifacts results in a unique URL.
+The following pattern should be used such that people can download artifacts manually:
+
+```
+https://static.magnet.example/dl/{name}/{version}/{name}-{version}-{kind}-{abi}-{platform}.tar.gz
+```
+
+where `name` is the normalized name, `version` and `kind` are used from the chosen line and `abi` and `platform` from the selected artifact.
+
+Beyond that, the server also provides an API to obtain more information (e.g. summary, dl-count, authors, readme, tages) about a given package and its version.
+The git index stores the bare minimum for dependency resolution and how to obtain the downloadable artifact, such that the footprint of the local git index on each device is kept to a minimum.
+
+> Cargo is following a similar approach - take a look at their index which is located at https://github.com/rust-lang/crates.io-index
 
 ### Yanking
 
-Once an asset of a version has been published it is **not** possible to delete it since this would allow to break existing environments.
-The package index is therefore write only!
-Instead, it is possible to *yank* an asset - a yanked asset will be ignored during the resolving of future projects, but if a client requests this specific asset it will still be served (though with a warning and maybe manual intervention).
+Once an asset of a version has been published it is **not** possible for the user to delete it since this would allow to break existing environments.
+The package index is therefore append only!
+Instead, it is possible to *yank* a version - a yanked version will be ignored during the resolving of future projects, but if a client requests this specific asset it will still be served (though with a warning and maybe manual intervention).
 
-Also packages which violate the CoC will only by yanked from the index.
+Packages which violate the CoC though will be deleted from the index, but this is only an index-admin operation.
 
 ## Integration
 
