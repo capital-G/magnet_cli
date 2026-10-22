@@ -67,6 +67,9 @@ When creating a new magnet project the following folders will be created
     * `external/gluons`
 * `tests/` - code related to testing
 
+Each dependency is placed within the folder of its kind, e.g. `external/leptons/foo`, such that it is visible on a folder level which dependencies bring binaries and scsynth only needs to look into `external/leptons` for plugins.
+Legacy quarks and git dependencies are placed into `external/quarks`.
+
 Having this standardized approach allows easier packaging of the source code for releases, yet the exact location of the files can still be changed within the manifest file.
 
 ## Project manifest `magnet.toml`
@@ -179,10 +182,12 @@ lock-version = "1.0.0"
 index = "http://git.supercollider.online/magnet-index"
 
 [dependencies]
-foo = { version = "0.1.0", source = "index", checksum = "sha256" }
-bar = { version = "0.2.0", source = "git+<url>#<sha>", checksum = "sha256" }
-baz = { version = "0.3.0", source = "../baz", checksum = "sha256" }
+foo = { version = "0.1.0", kind = "quark", source = "index", checksum = "sha256" }
+bar = { version = "0.2.0", kind = "quark", source = "git+<url>#<sha>", checksum = "sha256" }
+baz = { version = "0.3.0", kind = "lepton", source = "../baz", checksum = "sha256" }
 ```
+
+The kind is stored in the lock file such that magnet knows the folder of each dependency within `external` without having to consult the index.
 
 ## `magnet` as local CLI
 
@@ -344,6 +349,9 @@ Each file while then have a one-lined JSON for each release, which covers
 ```json
 {"name": "foo", "version": "0.1.3", "kind": "quark", "dependencies": {"bar":  "<0.2.0"}, "yanked": false, "artifacts": [{"abi":  "any", "platform": "any", "sha256":  "abc"}]}
 ```
+
+The kind of a package is fixed by its first published version and can not be changed afterwards, so all lines of a package share the same kind.
+If e.g. a quark later also wants to ship a server plugin, the plugin needs to be published as a dedicated lepton package on which the quark depends.
 
 Legacy quarks can also be used as dependencies by providing
 
