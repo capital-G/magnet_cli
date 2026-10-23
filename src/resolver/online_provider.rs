@@ -93,11 +93,12 @@ impl DependencyProvider for GitClient {
             .into_iter()
             .find(|release| release.version == *version)
         {
-            Some(release) => {
-                let dependencies = dependency_list_to_hash_map(&release.dependencies).unwrap();
-
-                Ok(Dependencies::Available(dependencies))
-            }
+            Some(release) => match release.version_dependencies() {
+                Ok(dependencies) => Ok(Dependencies::Available(
+                    dependency_list_to_hash_map(&dependencies).unwrap(),
+                )),
+                Err(err) => Ok(Dependencies::Unavailable(err.to_string())),
+            },
             None => Ok(Dependencies::Unavailable(format!(
                 "No dependency for {package}"
             ))),

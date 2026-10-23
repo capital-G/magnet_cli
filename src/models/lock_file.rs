@@ -13,7 +13,9 @@ use toml_edit::DocumentMut;
 use tracing::{error, instrument, trace};
 use url::Url;
 
-use crate::git_client::models::{deserialize_semantic_version, serialize_semantic_version};
+use crate::git_client::models::{
+    deserialize_semantic_version, serialize_semantic_version, GitRelease,
+};
 use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
 use crate::resolver::online_provider::ROOT_PACKAGE;
 
@@ -98,6 +100,21 @@ impl TryFrom<String> for LockSource {
 impl From<LockSource> for String {
     fn from(value: LockSource) -> Self {
         value.to_string()
+    }
+}
+
+impl From<&GitRelease> for LockDependency {
+    fn from(release: &GitRelease) -> Self {
+        Self {
+            version: release.version,
+            kind: release.kind.clone(),
+            source: LockSource::Index,
+            checksums: release
+                .artifacts
+                .iter()
+                .map(|artifact| (artifact.key(), artifact.sha256.clone()))
+                .collect(),
+        }
     }
 }
 
@@ -256,6 +273,27 @@ mod tests {
         );
         assert!(!content.contains(ROOT_PACKAGE));
         assert_eq!(LockFile::from_string(&content).unwrap(), lock_file);
+    }
+
+    #[test]
+    fn test_from_git_release() {
+        let release: GitRelease = serde_json::from_str(
+            r#"{"name": "gamma", "version": "0.3.0", "kind": "lepton", "artifacts": [
+                {"abi": "api3", "platform": "linux_x86_64", "sha256": "abc"},
+                {"abi": "source", "platform": "any", "sha256": "def"}]}"#,
+        )
+        .unwrap();
+        let dependency = LockDependency::from(&release);
+        assert_eq!(dependency.version, SemanticVersion::new(0, 3, 0));
+        assert_eq!(dependency.kind, MagnetManifestV1PackageKind::Lepton);
+        assert_eq!(dependency.source, LockSource::Index);
+        assert_eq!(
+            dependency.checksums,
+            BTreeMap::from([
+                ("api3-linux_x86_64".to_string(), "abc".to_string()),
+                ("source-any".to_string(), "def".to_string()),
+            ])
+        );
     }
 
     #[test]

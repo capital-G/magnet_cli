@@ -1,12 +1,10 @@
 use std::{
-    fmt::Display,
     fs::{self, File},
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context};
 use pubgrub::{resolve, SemanticVersion};
-use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, trace};
 use url::Url;
 
@@ -18,38 +16,13 @@ use crate::{
     git_client::{client::GitClient, models::GitDependency},
     models::{
         directories::ProjectDirectory,
-        lock_file::{LockDependency, LockFile, LockSource},
+        lock_file::{LockDependency, LockFile},
         package::{BundleFormat, MagnetPackage, SourceBundle},
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
     resolver::online_provider::{RootProvider, ROOT_PACKAGE},
 };
-
-#[derive(Deserialize, Serialize, Debug)]
-pub enum ArchitectureEnum {}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub enum AssetFormatEnum {}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub enum ServerAbiVersionEnum {}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub enum ProjectTypeEnum {
-    Quark,
-    ServerExtension,
-}
-
-impl Display for ProjectTypeEnum {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            ProjectTypeEnum::Quark => "Quark",
-            ProjectTypeEnum::ServerExtension => "Lepton",
-        };
-        write!(f, "{}", name)
-    }
-}
 
 /// The Project struct is used to manage files of a project, such as
 /// adding a dependency, creating a lockfile or packaging up for release.
@@ -142,16 +115,14 @@ impl Project {
                     name: dependency.name,
                     dependency: magnet_dependency,
                 })?;
-                let index = root_provider.git_provider.url().clone();
-                // @todo: obtain kind and checksums of the release from the index
-                self.lock_file = LockFile::from_tree(index, &tree, |_name, version| {
-                    Ok(LockDependency {
-                        version: *version,
-                        kind: MagnetManifestV1PackageKind::Quark,
-                        source: LockSource::Index,
-                        checksums: Default::default(),
-                    })
-                })?;
+                let git_provider = &root_provider.git_provider;
+                self.lock_file =
+                    LockFile::from_tree(git_provider.url().clone(), &tree, |name, version| {
+                        git_provider
+                            .get_release(name, version)?
+                            .map(|release| LockDependency::from(&release))
+                            .with_context(|| format!("{name} {version} is missing in the index"))
+                    })?;
                 self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
             }
             Err(err) => {
