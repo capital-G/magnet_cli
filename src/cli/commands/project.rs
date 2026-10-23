@@ -36,7 +36,7 @@ pub struct ProjectInitArgs {
 }
 
 impl MagnetSubCommand for ProjectInitArgs {
-    async fn run(self, ctx: &CliContext) -> anyhow::Result<()> {
+    async fn run(self, _ctx: &CliContext) -> anyhow::Result<()> {
         if let Some(ref path) = self.path {
             if path.read_dir().iter().len() > 0 {
                 warn!(?path, "Specified project directory is not empty!");
@@ -92,11 +92,7 @@ impl MagnetSubCommand for ProjectInitArgs {
             project_kind,
         )?;
 
-        Project::create(
-            &project_path,
-            project_manifest,
-            ctx.global_args.git_index_url.clone(),
-        )?;
+        Project::create(&project_path, project_manifest)?;
 
         Ok(())
     }

@@ -4,6 +4,7 @@ mod logging;
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectBundleArgs, ProjectInitArgs, ProjectInstallArgs,
 };
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use magnet::{
     config::constants::{magnet_home, INDEX_DIR},
@@ -37,13 +38,9 @@ struct GlobalArgs {
     )]
     pub index_url: Url,
 
-    #[arg(
-        long,
-        env = "MAGNET_GIT_INDEX_URL",
-        default_value = "https://github.com/capital-G/slurm_rave.git",
-        help = "Package git index to use"
-    )]
-    pub git_index_url: Url,
+    // @todo add the official index as default once it exists
+    #[arg(long, env = "MAGNET_GIT_INDEX_URL", help = "Package git index to use")]
+    pub git_index_url: Option<Url>,
 
     // @todo make magnet config path configurable
     /// Increase verbosity level of log
@@ -72,10 +69,14 @@ pub struct CliContext {
 
 impl CliContext {
     pub fn git_client(&self) -> anyhow::Result<GitClient> {
-        GitClient::new(
-            self.global_args.git_index_url.clone(),
-            magnet_home()?.join(INDEX_DIR),
-        )
+        let url =
+            self.global_args.git_index_url.clone().context(
+                "No git index configured, set MAGNET_GIT_INDEX_URL or pass --git-index-url",
+            )?;
+        let local_destination = magnet_home()?
+            .join(INDEX_DIR)
+            .join(GitClient::cache_dir_name(&url));
+        GitClient::new(url, local_destination)
     }
     pub fn http_client(&self) -> MagnetClient<NoAuth> {
         MagnetClient::<NoAuth>::new(self.global_args.index_url.clone())

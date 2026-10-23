@@ -8,7 +8,6 @@ use anyhow::{bail, ensure, Context};
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{info, instrument, trace, warn};
-use url::Url;
 
 use crate::models::project_manifest::{
     MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
@@ -52,16 +51,13 @@ pub struct Project {
 
 impl Project {
     #[instrument(skip(magnet_manifest))]
-    pub fn create(
-        path: &Path,
-        magnet_manifest: MagnetManifestV1,
-        index: Url,
-    ) -> anyhow::Result<Self> {
+    /// The lock file gets created by the first `add` or `install`, since it needs an index
+    pub fn create(path: &Path, magnet_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
         let project_manifest =
             ProjectManifest::write_new(path.join(MAGNET_PROJECT_FILE), &magnet_manifest)?;
         let project = Self {
             project_manifest,
-            lock_file: Some(LockFile::create_empty(path.join(MAGNET_LOCK_FILE), index)?),
+            lock_file: None,
             path: path.into(),
         };
         project.generate_project_directories()?;
@@ -95,7 +91,8 @@ impl Project {
         ] {
             trace!(?directory, "Create project folder");
             let path = self.path.join(String::from(directory));
-            fs::create_dir_all(&path).context("Could not create folder {?:folder}")?;
+            fs::create_dir_all(&path)
+                .with_context(|| format!("Could not create folder {path:?}"))?;
         }
         Ok(())
     }
@@ -522,6 +519,7 @@ mod tests {
     use std::env;
 
     use super::*;
+    use url::Url;
 
     #[test]
     fn test_exclude_path() {

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, ensure, Context};
 use git2::Repository;
 use pubgrub::SemanticVersion;
+use sha2::{Digest, Sha256};
 use std::{fs::read_to_string, path::PathBuf};
 
 use tracing::{info, instrument, trace, warn};
@@ -25,7 +26,6 @@ impl GitClient {
         let client = match local_destination.exists() {
             true => {
                 let repo = Repository::open(&local_destination)?;
-                // @todo check if repo matches the designated URL - otherwise delete it and clone
                 let client = Self {
                     url,
                     local_destination,
@@ -69,6 +69,14 @@ impl GitClient {
         };
         client.config()?;
         Ok(client)
+    }
+
+    /// Directory name of the clone of an index, e.g. `github.com-1a2b3c4d5e6f7a8b`.
+    /// Each URL gets its own clone, so switching the index never resolves against
+    /// the clone of another one.
+    pub fn cache_dir_name(url: &Url) -> String {
+        let hash = format!("{:x}", Sha256::digest(url.as_str().as_bytes()));
+        format!("{}-{}", url.host_str().unwrap_or("local"), &hash[..16])
     }
 
     pub fn url(&self) -> &Url {
@@ -264,6 +272,24 @@ mod tests {
         let cache_dir = tempfile::tempdir().unwrap();
         let url = Url::from_directory_path(cache_dir.path().join("missing")).unwrap();
         assert!(GitClient::new(url, cache_dir.path().join("index")).is_err());
+    }
+
+    #[test]
+    fn test_cache_dir_name() {
+        let official: Url = "https://github.com/supercollider/magnet-index.git"
+            .parse()
+            .unwrap();
+        let testing: Url = "https://github.com/supercollider/magnet-index-testing.git"
+            .parse()
+            .unwrap();
+        let name = GitClient::cache_dir_name(&official);
+        assert!(name.starts_with("github.com-"), "{name}");
+        assert_eq!(name.len(), "github.com-".len() + 16);
+        assert_eq!(name, GitClient::cache_dir_name(&official));
+        assert_ne!(name, GitClient::cache_dir_name(&testing));
+
+        let local = Url::from_directory_path(std::env::temp_dir()).unwrap();
+        assert!(GitClient::cache_dir_name(&local).starts_with("local-"));
     }
 
     #[test]
