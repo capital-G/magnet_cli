@@ -3,8 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context};
-use pubgrub::{resolve, SemanticVersion};
+use anyhow::Context;
+use pubgrub::SemanticVersion;
 use tracing::{info, instrument, trace};
 use url::Url;
 
@@ -21,7 +21,7 @@ use crate::{
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
-    resolver::online_provider::{RootProvider, ROOT_PACKAGE},
+    resolver::online_provider::{resolve_dependencies, RootProvider},
 };
 
 /// The Project struct is used to manage files of a project, such as
@@ -97,38 +97,29 @@ impl Project {
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
-        match resolve(
-            &root_provider,
-            ROOT_PACKAGE.to_string(),
-            SemanticVersion::zero(),
-        ) {
-            Ok(tree) => {
-                info!("Successfully resolved the tree! {:?}", tree);
-                let magnet_dependency = MagnetManifestV1DependenciesValue::Object {
-                    git: None,
-                    index: None,
-                    legacy_quark: None,
-                    path: None,
-                    version: Some(dependency.constraint.to_string()),
-                };
-                self.project_manifest.add_dependency(NamedDependency {
-                    name: dependency.name,
-                    dependency: magnet_dependency,
-                })?;
-                let git_provider = &root_provider.git_provider;
-                self.lock_file =
-                    LockFile::from_tree(git_provider.url().clone(), &tree, |name, version| {
-                        git_provider
-                            .get_release(name, version)?
-                            .map(|release| LockDependency::from(&release))
-                            .with_context(|| format!("{name} {version} is missing in the index"))
-                    })?;
-                self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
-            }
-            Err(err) => {
-                bail!("Failed to add dependency: {:?}", err);
-            }
-        }
+        let tree = resolve_dependencies(&root_provider)
+            .with_context(|| format!("Failed to add dependency {}", dependency.name))?;
+        info!("Successfully resolved the tree! {:?}", tree);
+        let magnet_dependency = MagnetManifestV1DependenciesValue::Object {
+            git: None,
+            index: None,
+            legacy_quark: None,
+            path: None,
+            version: Some(dependency.constraint.to_string()),
+        };
+        self.project_manifest.add_dependency(NamedDependency {
+            name: dependency.name,
+            dependency: magnet_dependency,
+        })?;
+        let git_provider = &root_provider.git_provider;
+        self.lock_file =
+            LockFile::from_tree(git_provider.url().clone(), &tree, |name, version| {
+                git_provider
+                    .get_release(name, version)?
+                    .map(|release| LockDependency::from(&release))
+                    .with_context(|| format!("{name} {version} is missing in the index"))
+            })?;
+        self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
 
         self.reload_from_file()?;
 
