@@ -289,6 +289,57 @@ impl Project {
         Ok(())
     }
 
+    /// Removes a dependency (in any spelling) from the manifest, and the packages which are
+    /// not needed anymore from the lock file and `external`.
+    /// The manifest and the lock file are only written if the dependencies can be resolved.
+    pub fn remove_dependency(&mut self, provider: &GitClient, name: &str) -> anyhow::Result<()> {
+        let normalized_name = MagnetManifestV1::normalize_name(name);
+        let key = self
+            .project_manifest
+            .get_manifest()
+            .dependencies
+            .keys()
+            .find(|key| MagnetManifestV1::normalize_name(key) == normalized_name)
+            .cloned()
+            .with_context(|| format!("{name} is not a dependency of this project"))?;
+
+        let dependencies: Vec<GitDependency> = self
+            .manifest_dependencies()?
+            .into_iter()
+            .filter(|dependency| dependency.name != key)
+            .collect();
+        let tree = self
+            .resolve(provider, dependencies)
+            .with_context(|| format!("Failed to remove dependency {key}"))?;
+
+        let previous = self.lock_file.clone();
+        info!("Remove {key}");
+        self.project_manifest.remove_dependency(&key)?;
+        self.write_lock(provider, &tree)?;
+        self.reload_from_file()?;
+
+        let lock_file = self
+            .lock_file
+            .as_ref()
+            .context("A lock file should exist after resolving")?;
+        self.prune_external(lock_file)?;
+        self.write_language_config()?;
+
+        // removing a dependency only changes other versions if a locked one is gone
+        let changed = lock_file.dependencies.iter().any(|(name, dependency)| {
+            previous
+                .as_ref()
+                .and_then(|previous| previous.dependencies.get(name))
+                .is_some_and(|locked| locked.version != dependency.version)
+        });
+        if changed {
+            warn!(
+                "The versions of other dependencies changed, run `magnet install` to update them"
+            );
+        }
+        Ok(())
+    }
+
     /// The dependencies of the manifest, as requirements for the resolver
     fn manifest_dependencies(&self) -> anyhow::Result<Vec<GitDependency>> {
         self.project_manifest
@@ -1128,5 +1179,83 @@ beta = "^1"
             .run_entrypoint("hello", &[], || Ok(Some(sclang)))
             .unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err:#}");
+    }
+
+    fn installed_packages(dir: &tempfile::TempDir) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir.path().join("external/quarks"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn test_remove_dependency() {
+        let (dir, mut project) = project(&manifest_with_entrypoints(
+            "# my dependencies\n[dependencies]\n",
+        ));
+        project
+            .add_dependency(&fixture_index(), "alpha".into(), None)
+            .unwrap();
+        let mut project = install(&dir).await.unwrap();
+        assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);
+
+        project
+            .remove_dependency(&fixture_index(), "alpha")
+            .unwrap();
+
+        // the transitive dependencies are gone as well
+        assert!(locked_versions(&project).is_empty());
+        assert!(installed_packages(&dir).is_empty());
+        let manifest = read_manifest(&dir);
+        assert!(
+            manifest.contains("# my dependencies\n[dependencies]\n"),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("alpha"), "{manifest}");
+        let config = fs::read_to_string(dir.path().join(SCLANG_CONF_FILE)).unwrap();
+        assert!(config.contains("external"), "{config}");
+    }
+
+    #[tokio::test]
+    async fn test_remove_dependency_keeps_others() {
+        let (dir, mut project) = project(MANIFEST);
+        project
+            .add_dependency(&fixture_index(), "alpha".into(), None)
+            .unwrap();
+        let mut project = install(&dir).await.unwrap();
+
+        // any spelling of the name works
+        project
+            .remove_dependency(&fixture_index(), "ALPHA")
+            .unwrap();
+
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("beta".to_string(), "1.2.0".to_string()),
+                ("ddw-common".to_string(), "0.1.0".to_string()),
+            ]
+        );
+        assert_eq!(installed_packages(&dir), ["beta", "ddw-common"]);
+        let manifest = read_manifest(&dir);
+        assert!(
+            manifest.contains("# keep this comment\nbeta = \"^1\"\n"),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("alpha"), "{manifest}");
+    }
+
+    #[test]
+    fn test_remove_unknown_dependency() {
+        let (dir, mut project) = project(MANIFEST);
+        let lock = read_lock(&dir);
+        let err = project
+            .remove_dependency(&fixture_index(), "alpha")
+            .unwrap_err();
+        assert!(err.to_string().contains("not a dependency"), "{err:#}");
+        assert_eq!(read_manifest(&dir), MANIFEST);
+        assert_eq!(read_lock(&dir), lock);
     }
 }

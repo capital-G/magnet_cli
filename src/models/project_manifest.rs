@@ -136,6 +136,16 @@ impl ProjectManifest {
         Ok(())
     }
 
+    /// Removes the dependency with exactly this key, preserving the rest of the file
+    pub fn remove_dependency(&self, name: &str) -> anyhow::Result<()> {
+        let updated = Self::remove_dependency_preserving(
+            &std::fs::read_to_string(&self.path).context("Could not read file")?,
+            name,
+        )?;
+        self.write(&updated)?;
+        Ok(())
+    }
+
     pub fn get_manifest(&self) -> &MagnetManifestV1 {
         &self.manifest
     }
@@ -159,6 +169,16 @@ impl ProjectManifest {
             requirement.dependency.to_toml_edit_item(),
         );
 
+        Ok(doc.to_string())
+    }
+
+    /// the counterpart of [Self::add_dependency_preserving]
+    fn remove_dependency_preserving(contents: &str, name: &str) -> anyhow::Result<String> {
+        let mut doc: DocumentMut = contents.parse()?;
+        doc.get_mut("dependencies")
+            .and_then(|dependencies| dependencies.as_table_like_mut())
+            .and_then(|dependencies| dependencies.remove(name))
+            .with_context(|| format!("{name} is not a dependency in the manifest"))?;
         Ok(doc.to_string())
     }
 
@@ -330,6 +350,24 @@ baz = {}
         assert!(modified_manifest.dependencies.contains_key("bar"));
         assert!(modified_manifest.dependencies.contains_key("baz"));
         // @todo version is currently not parsed
+    }
+
+    #[test]
+    fn remove_dependency_keeps_comments() {
+        let raw_manifest = format!(
+            "{}\n[dependencies]\n# about foo\nfoo = \"1.2.0\"\n# about bar\nbar = \"^2\"\nbaz = {{ version = \"1.0\" }}\n",
+            sample_manifest()
+        );
+        let modified = ProjectManifest::remove_dependency_preserving(&raw_manifest, "bar").unwrap();
+        assert!(
+            modified.contains("# about foo\nfoo = \"1.2.0\"\nbaz = { version = \"1.0\" }\n"),
+            "{modified}"
+        );
+        // the comment of the removed entry goes with it
+        assert!(!modified.contains("about bar"), "{modified}");
+
+        assert!(ProjectManifest::remove_dependency_preserving(&raw_manifest, "missing").is_err());
+        assert!(ProjectManifest::remove_dependency_preserving(&sample_manifest(), "foo").is_err());
     }
 
     #[test]

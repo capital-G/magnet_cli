@@ -3,7 +3,7 @@ mod logging;
 
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectBundleArgs, ProjectInitArgs, ProjectInstallArgs,
-    ProjectRunArgs,
+    ProjectRemoveDependencyArgs, ProjectRunArgs,
 };
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -59,6 +59,8 @@ enum Commands {
     Init(ProjectInitArgs),
     /// Adds a new dependency to the current magnet project
     Add(ProjectAddDependencyArgs),
+    /// Removes a dependency from the current magnet project
+    Remove(ProjectRemoveDependencyArgs),
     /// Installs the dependencies of the current magnet project into `external`
     Install(ProjectInstallArgs),
     /// Runs an entrypoint of the current magnet project
@@ -99,6 +101,9 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Init(init_args) => init_args.run(&cli_context).await,
         Commands::Add(project_add_dependency_args) => {
             project_add_dependency_args.run(&cli_context).await
+        }
+        Commands::Remove(project_remove_dependency_args) => {
+            project_remove_dependency_args.run(&cli_context).await
         }
         Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,

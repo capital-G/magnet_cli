@@ -163,6 +163,31 @@ mod tests {
     }
 }
 
+/// Removes a dependency from the current magnet project
+#[derive(Debug, Parser)]
+pub struct ProjectRemoveDependencyArgs {
+    /// Path of the project.
+    /// If not provided, the current working directory is used.
+    #[arg(
+        long,
+        default_value = None,
+    )]
+    path: Option<PathBuf>,
+
+    dependency: String,
+}
+
+impl MagnetSubCommand for ProjectRemoveDependencyArgs {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
+        let project_path = match self.path {
+            Some(path) => path,
+            None => env::current_dir()?,
+        };
+        let mut project = Project::open(&project_path)?;
+        project.remove_dependency(&cli_context.git_client()?, &self.dependency)
+    }
+}
+
 /// Installs the locked dependencies of the current magnet project
 #[derive(Debug, Parser)]
 pub struct ProjectInstallArgs {
