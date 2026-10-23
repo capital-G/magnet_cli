@@ -7,3 +7,4 @@ pub mod http_client;
 pub mod models;
 pub mod packaging;
 pub mod resolver;
+pub mod sclang;

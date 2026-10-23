@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, ensure, Context};
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
-use tracing::{info, instrument, trace};
+use tracing::{info, instrument, trace, warn};
 use url::Url;
 
 use crate::models::project_manifest::{
@@ -18,6 +18,7 @@ use crate::{
     git_client::{client::GitClient, models::GitDependency},
     models::{
         directories::ProjectDirectory,
+        language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
         package::{BundleFormat, MagnetPackage, SourceBundle},
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
@@ -31,6 +32,7 @@ use crate::{
         online_provider::{resolve_dependencies, RootProvider, ToRanges},
         package_downloader::{Artifact, PackageDownloader},
     },
+    sclang::{Sclang, MAGNET_SCLANG_ENV},
 };
 
 /// number of artifacts which get downloaded at the same time
@@ -168,8 +170,29 @@ impl Project {
         self.write_lock(provider, &tree)?;
 
         self.reload_from_file()?;
+        self.write_language_config()?;
 
         Ok(())
+    }
+
+    /// Writes the `sclang_conf.yaml` for the current state of the project
+    /// Without a usable sclang, the config is still written, but without isolation
+    fn write_language_config(&self) -> anyhow::Result<()> {
+        let sclang = match Sclang::find() {
+            Ok(Some(sclang)) => Some(sclang),
+            Ok(None) => {
+                warn!("Could not find sclang, so {SCLANG_CONF_FILE} does not exclude globally installed extensions. Set {MAGNET_SCLANG_ENV} to fix this.");
+                None
+            }
+            Err(err) => {
+                warn!(
+                    "{err:#}, so {SCLANG_CONF_FILE} does not exclude globally installed extensions"
+                );
+                None
+            }
+        };
+        LanguageConfig::for_project(&self.path, self.project_manifest.get_manifest(), sclang)?
+            .write(&self.path)
     }
 
     /// The dependencies of the manifest, as requirements for the resolver
@@ -271,6 +294,7 @@ impl Project {
         }
 
         self.prune_external(lock_file)?;
+        self.write_language_config()?;
         info!("Installed {} packages", artifacts.len());
         Ok(())
     }
@@ -585,6 +609,8 @@ beta = "^1"
             )
             .unwrap();
 
+        assert!(dir.path().join(SCLANG_CONF_FILE).exists());
+
         let manifest = read_manifest(&dir);
         assert!(manifest.starts_with("# my project\n"), "{manifest}");
         assert!(
@@ -762,6 +788,15 @@ beta = "^1"
         );
         let alpha = &installed[&PathBuf::from("quarks/alpha/Classes/Alpha.sc")];
         assert!(String::from_utf8_lossy(alpha).contains("1.1.0"));
+
+        let config = fs::read_to_string(dir.path().join(SCLANG_CONF_FILE)).unwrap();
+        assert!(config.contains("excludeDefaultPaths: "));
+        assert!(config.contains(&format!(
+            "  - '{}'\n",
+            std::path::absolute(dir.path().join("external"))
+                .unwrap()
+                .display()
+        )));
 
         // a fresh clone contains no external directory
         fs::remove_dir_all(dir.path().join("external")).unwrap();
