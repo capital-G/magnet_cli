@@ -1,10 +1,12 @@
 use std::{
+    collections::HashMap,
     fs::{self, File},
     path::{Path, PathBuf},
 };
 
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use pubgrub::SemanticVersion;
+use semver::VersionReq;
 use tracing::{info, instrument, trace};
 use url::Url;
 
@@ -78,52 +80,113 @@ impl Project {
         self.path.join(String::from(directory))
     }
 
+    /// Adds a dependency from the index, or changes the version requirement of an existing one.
+    /// Without a `constraint`, the newest matching version is used as a caret requirement,
+    /// e.g. `^1.1.0`.
+    /// The manifest and the lock file are only written if the dependencies can be resolved.
     pub fn add_dependency(
         &mut self,
-        provider: GitClient,
-        dependency: GitDependency,
+        provider: &GitClient,
+        name: String,
+        constraint: Option<VersionReq>,
     ) -> anyhow::Result<()> {
-        let root_provider = RootProvider {
-            git_provider: provider,
-            dependencies: self
-                .project_manifest
-                .get_manifest()
-                .dependencies
-                .clone()
-                .into_iter()
-                .map(|(name, dependency)| {
-                    GitDependency::try_from(NamedDependency { name, dependency })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+        ensure!(
+            MagnetManifestV1::is_valid_name(&name),
+            "{name} is not a valid package name"
+        );
+        let normalized_name = MagnetManifestV1::normalize_name(&name);
+
+        // an existing entry keeps its spelling, so it gets replaced instead of duplicated
+        let existing = self
+            .project_manifest
+            .get_manifest()
+            .dependencies
+            .iter()
+            .find(|(key, _)| MagnetManifestV1::normalize_name(key) == normalized_name);
+        let name = match existing {
+            Some((key, dependency)) => {
+                ensure!(
+                    is_index_dependency(dependency),
+                    "{key} is already a git, path or legacy quark dependency, please edit it in {MAGNET_PROJECT_FILE}"
+                );
+                key.clone()
+            }
+            None => name,
         };
 
-        let tree = resolve_dependencies(&root_provider)
-            .with_context(|| format!("Failed to add dependency {}", dependency.name))?;
-        info!("Successfully resolved the tree! {:?}", tree);
-        let magnet_dependency = MagnetManifestV1DependenciesValue::Object {
-            git: None,
-            index: None,
-            legacy_quark: None,
-            path: None,
-            version: Some(dependency.constraint.to_string()),
+        let mut dependencies: Vec<GitDependency> = self
+            .manifest_dependencies()?
+            .into_iter()
+            .filter(|dependency| dependency.name != name)
+            .collect();
+        dependencies.push(GitDependency {
+            name: name.clone(),
+            constraint: constraint.clone().unwrap_or(VersionReq::STAR),
+        });
+
+        let tree = self
+            .resolve(provider, dependencies)
+            .with_context(|| format!("Failed to add dependency {name}"))?;
+
+        let constraint = match constraint {
+            Some(constraint) => constraint,
+            None => {
+                let version = tree
+                    .get(&normalized_name)
+                    .with_context(|| format!("{name} is missing in the resolved dependencies"))?;
+                format!("^{version}").parse()?
+            }
         };
+        info!("Add {name} {constraint}");
+
         self.project_manifest.add_dependency(NamedDependency {
-            name: dependency.name,
-            dependency: magnet_dependency,
+            name,
+            dependency: MagnetManifestV1DependenciesValue::String(constraint.to_string()),
         })?;
-        let git_provider = &root_provider.git_provider;
-        self.lock_file =
-            LockFile::from_tree(git_provider.url().clone(), &tree, |name, version| {
-                git_provider
-                    .get_release(name, version)?
-                    .map(|release| LockDependency::from(&release))
-                    .with_context(|| format!("{name} {version} is missing in the index"))
-            })?;
-        self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
+        self.write_lock(provider, &tree)?;
 
         self.reload_from_file()?;
 
         Ok(())
+    }
+
+    /// The dependencies of the manifest, as requirements for the resolver
+    fn manifest_dependencies(&self) -> anyhow::Result<Vec<GitDependency>> {
+        self.project_manifest
+            .get_manifest()
+            .dependencies
+            .clone()
+            .into_iter()
+            .map(|(name, dependency)| GitDependency::try_from(NamedDependency { name, dependency }))
+            .collect()
+    }
+
+    fn resolve(
+        &self,
+        provider: &GitClient,
+        dependencies: Vec<GitDependency>,
+    ) -> anyhow::Result<HashMap<String, SemanticVersion>> {
+        let tree = resolve_dependencies(&RootProvider {
+            git_provider: provider,
+            dependencies,
+        })?;
+        trace!(?tree, "Resolved dependencies");
+        Ok(tree.into_iter().collect())
+    }
+
+    /// Writes the lock file for a resolved tree, using the details of each release from the index
+    fn write_lock(
+        &mut self,
+        provider: &GitClient,
+        tree: &HashMap<String, SemanticVersion>,
+    ) -> anyhow::Result<()> {
+        self.lock_file = LockFile::from_tree(provider.url().clone(), tree, |name, version| {
+            provider
+                .get_release(name, version)?
+                .map(|release| LockDependency::from(&release))
+                .with_context(|| format!("{name} {version} is missing in the index"))
+        })?;
+        self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))
     }
 
     fn reload_from_file(&mut self) -> anyhow::Result<()> {
@@ -226,6 +289,20 @@ impl Project {
     }
 }
 
+/// `true` if the dependency is a plain version requirement against the index
+fn is_index_dependency(dependency: &MagnetManifestV1DependenciesValue) -> bool {
+    match dependency {
+        MagnetManifestV1DependenciesValue::String(_) => true,
+        MagnetManifestV1DependenciesValue::Object {
+            git,
+            index,
+            legacy_quark,
+            path,
+            ..
+        } => git.is_none() && index.is_none() && path.is_none() && !legacy_quark.unwrap_or(false),
+    }
+}
+
 static PROJECT_EXCLUDE_PATHS: &[&str] = &["build", ".git", ".vscode", ".DS_Store"];
 
 /// determines if a given path within the project directory gets ignored or not
@@ -249,5 +326,145 @@ mod tests {
             assert!(!exclude_path(&path, &path.join(non_reject)));
             assert!(!exclude_path(&path, &path.join("sub_idr").join(non_reject)));
         }
+    }
+
+    const MANIFEST: &str = r#"# my project
+magnet-version = 1
+
+[package]
+name = "my-project"
+version = "0.1.0"
+kind = "quark"
+
+[dependencies]
+# keep this comment
+beta = "^1"
+"#;
+
+    fn fixture_index() -> GitClient {
+        GitClient::open_local(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
+        )
+        .unwrap()
+    }
+
+    /// a project in a temporary directory with the given manifest and an empty lock file
+    fn project(manifest: &str) -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(MAGNET_PROJECT_FILE), manifest).unwrap();
+        LockFile::create_empty(
+            dir.path().join(MAGNET_LOCK_FILE),
+            fixture_index().url().clone(),
+        )
+        .unwrap();
+        let project = Project::open(dir.path()).unwrap();
+        (dir, project)
+    }
+
+    fn locked_versions(project: &Project) -> Vec<(String, String)> {
+        project
+            .lock_file
+            .dependencies
+            .iter()
+            .map(|(name, dependency)| (name.clone(), dependency.version.to_string()))
+            .collect()
+    }
+
+    fn read_manifest(dir: &tempfile::TempDir) -> String {
+        fs::read_to_string(dir.path().join(MAGNET_PROJECT_FILE)).unwrap()
+    }
+
+    #[test]
+    fn test_add_dependency() {
+        let (dir, mut project) = project(MANIFEST);
+        project
+            .add_dependency(
+                &fixture_index(),
+                "alpha".into(),
+                Some("^1".parse().unwrap()),
+            )
+            .unwrap();
+
+        let manifest = read_manifest(&dir);
+        assert!(manifest.starts_with("# my project\n"), "{manifest}");
+        assert!(
+            manifest.contains("# keep this comment\nbeta = \"^1\"\nalpha = \"^1\"\n"),
+            "{manifest}"
+        );
+
+        // includes the transitive dependencies
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("alpha".to_string(), "1.1.0".to_string()),
+                ("beta".to_string(), "1.2.0".to_string()),
+                ("ddw-common".to_string(), "0.1.0".to_string()),
+            ]
+        );
+        let lock = fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap();
+        assert!(lock.contains("checksums = { any-any = \"sha-alpha-1.1.0\" }"));
+    }
+
+    #[test]
+    fn test_add_dependency_without_version() {
+        let (dir, mut project) = project(MANIFEST);
+        project
+            .add_dependency(&fixture_index(), "alpha".into(), None)
+            .unwrap();
+        assert!(read_manifest(&dir).contains("alpha = \"^1.1.0\"\n"));
+    }
+
+    #[test]
+    fn test_add_existing_dependency_replaces_it() {
+        let (dir, mut project) = project(&format!("{MANIFEST}DDW_Common = \"*\"\n"));
+        project
+            .add_dependency(
+                &fixture_index(),
+                "ddw-common".into(),
+                Some("=0.1.0".parse().unwrap()),
+            )
+            .unwrap();
+        let manifest = read_manifest(&dir);
+        assert!(manifest.contains("DDW_Common = \"=0.1.0\"\n"));
+        assert!(!manifest.contains("ddw-common"));
+    }
+
+    #[test]
+    fn test_add_dependency_conflict_keeps_files() {
+        let original = format!("{MANIFEST}alpha = \"^1.1\"\n");
+        let (dir, mut project) = project(&original);
+        let lock = fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap();
+
+        let err = project
+            .add_dependency(
+                &fixture_index(),
+                "delta".into(),
+                Some("=0.1.0".parse().unwrap()),
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("beta"));
+        assert_eq!(read_manifest(&dir), original);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap(),
+            lock
+        );
+    }
+
+    #[test]
+    fn test_add_dependency_refuses_git_dependency() {
+        let (_dir, mut project) = project(&format!(
+            "{MANIFEST}alpha = {{ git = {{ url = \"https://github.com/foo/alpha.git\" }} }}\n"
+        ));
+        assert!(project
+            .add_dependency(&fixture_index(), "alpha".into(), None)
+            .is_err());
+    }
+
+    #[test]
+    fn test_add_dependency_invalid_name() {
+        let (_dir, mut project) = project(MANIFEST);
+        assert!(project
+            .add_dependency(&fixture_index(), "foo@bar".into(), None)
+            .is_err());
     }
 }

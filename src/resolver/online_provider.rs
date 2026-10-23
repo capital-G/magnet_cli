@@ -166,12 +166,12 @@ pub const ROOT_PACKAGE: &str = "root";
 /// we need for the project.
 /// The root package always uses semver 0.0.0!
 // Maybe use this pattern instead? https://pubgrub-rs-guide.pages.dev/pubgrub_crate/caching ?
-pub struct RootProvider {
-    pub git_provider: GitClient,
+pub struct RootProvider<'a> {
+    pub git_provider: &'a GitClient,
     pub dependencies: Vec<GitDependency>,
 }
 
-impl DependencyProvider for RootProvider {
+impl DependencyProvider for RootProvider<'_> {
     type P = String;
     type V = SemanticVersion;
     type VS = Ranges<Self::V>;
@@ -218,9 +218,9 @@ impl DependencyProvider for RootProvider {
 }
 
 /// Resolves the dependencies of the root package and turns a failure into a readable error
-pub fn resolve_dependencies(
-    provider: &RootProvider,
-) -> anyhow::Result<SelectedDependencies<RootProvider>> {
+pub fn resolve_dependencies<'a>(
+    provider: &RootProvider<'a>,
+) -> anyhow::Result<SelectedDependencies<RootProvider<'a>>> {
     match pubgrub::resolve(provider, ROOT_PACKAGE.to_string(), SemanticVersion::zero()) {
         Ok(selected) => Ok(selected),
         // no collapse_no_versions(): a cached index may lack versions, so
@@ -251,10 +251,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn resolve_fixture(dependencies: &[(&str, &str)]) -> anyhow::Result<Vec<(String, String)>> {
+        let index = GitClient::open_local(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
+        )?;
         let provider = RootProvider {
-            git_provider: GitClient::open_local(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
-            )?,
+            git_provider: &index,
             dependencies: dependencies
                 .iter()
                 .map(|(name, constraint)| GitDependency {

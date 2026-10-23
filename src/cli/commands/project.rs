@@ -8,12 +8,9 @@ use inquire::{
     Select, Text,
 };
 use magnet::models::package::{BundleFormat, Quark, QuarkAbiTag, SourcePlatformTag};
-use magnet::{
-    git_client::models::GitDependency,
-    models::{
-        project::Project,
-        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
-    },
+use magnet::models::{
+    project::Project,
+    project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
 };
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
@@ -116,12 +113,19 @@ pub struct ProjectAddDependencyArgs {
     dependency: String,
 }
 
-fn parse_dependency(input: String) -> anyhow::Result<GitDependency> {
-    // @todo parse optional version requirement
-    Ok(GitDependency {
-        name: input,
-        constraint: VersionReq::STAR,
-    })
+/// Parses `foo`, `foo@1.2` or `foo@^1.2` into a name and an optional version requirement
+fn parse_dependency(input: &str) -> anyhow::Result<(String, Option<VersionReq>)> {
+    match input.split_once('@') {
+        Some((name, constraint)) => Ok((
+            name.to_string(),
+            Some(
+                constraint
+                    .parse()
+                    .with_context(|| format!("Invalid version requirement {constraint}"))?,
+            ),
+        )),
+        None => Ok((input.to_string(), None)),
+    }
 }
 
 impl MagnetSubCommand for ProjectAddDependencyArgs {
@@ -131,9 +135,30 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
             None => env::current_dir()?,
         };
         let mut project_manager = Project::open(&project_path)?;
-        let dependency = parse_dependency(self.dependency)?;
+        let (name, constraint) = parse_dependency(&self.dependency)?;
 
-        project_manager.add_dependency(cli_context.git_client()?, dependency)
+        project_manager.add_dependency(&cli_context.git_client()?, name, constraint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dependency() {
+        assert_eq!(parse_dependency("foo").unwrap(), ("foo".to_string(), None));
+        for (input, constraint) in [
+            ("foo@1.2", "^1.2"),
+            ("foo@^1.2", "^1.2"),
+            ("foo@~1.2.3", "~1.2.3"),
+            ("foo@>=1.0, <2.0", ">=1.0, <2.0"),
+        ] {
+            let (name, parsed) = parse_dependency(input).unwrap();
+            assert_eq!(name, "foo");
+            assert_eq!(parsed.unwrap().to_string(), constraint);
+        }
+        assert!(parse_dependency("foo@latest").is_err());
     }
 }
 

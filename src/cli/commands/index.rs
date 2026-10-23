@@ -72,7 +72,7 @@ impl MagnetSubCommand for IndexArgs {
             }
             IndexCommand::Foobar => {
                 let root_provider = RootProvider {
-                    git_provider: git_client,
+                    git_provider: &git_client,
                     dependencies: vec![GitDependency {
                         name: "jitlib".to_string(),
                         constraint: "<2.0.0".to_string().parse()?,
