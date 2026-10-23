@@ -18,6 +18,7 @@ use crate::{
     git_client::{client::GitClient, models::GitDependency},
     models::{
         directories::ProjectDirectory,
+        gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
         package::{BundleFormat, MagnetPackage, SourceBundle},
@@ -65,6 +66,7 @@ impl Project {
             path: path.into(),
         };
         project.generate_project_directories()?;
+        write_gitignore(&project.path)?;
         info!("Created project");
         Ok(project)
     }
@@ -1257,5 +1259,32 @@ beta = "^1"
         assert!(err.to_string().contains("not a dependency"), "{err:#}");
         assert_eq!(read_manifest(&dir), MANIFEST);
         assert_eq!(read_lock(&dir), lock);
+    }
+
+    #[test]
+    fn test_create_project() {
+        let dir = tempfile::tempdir().unwrap();
+        // e.g. magnet init within an existing repository
+        fs::write(dir.path().join(".gitignore"), "*.bak\n").unwrap();
+        let manifest = MagnetManifestV1::new(
+            "my-project".to_string(),
+            None,
+            None,
+            SemanticVersion::new(0, 1, 0),
+            None,
+            MagnetManifestV1PackageKind::Quark,
+        )
+        .unwrap();
+        Project::create(dir.path(), manifest).unwrap();
+
+        assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
+        assert!(dir.path().join("classes").is_dir());
+        // the lock file gets created by the first add or install
+        assert!(!dir.path().join(MAGNET_LOCK_FILE).exists());
+        let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.starts_with("*.bak\n"), "{gitignore}");
+        for entry in ["/dist/", "/external/", "/sclang_conf.yaml"] {
+            assert!(gitignore.lines().any(|line| line == entry), "{gitignore}");
+        }
     }
 }
