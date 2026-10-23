@@ -1,7 +1,9 @@
 mod commands;
 mod logging;
 
-use crate::cli::commands::project::{ProjectAddDependencyArgs, ProjectBundleArgs, ProjectInitArgs};
+use crate::cli::commands::project::{
+    ProjectAddDependencyArgs, ProjectBundleArgs, ProjectInitArgs, ProjectInstallArgs,
+};
 use clap::{Parser, Subcommand};
 use magnet::{
     config::constants::{magnet_home, INDEX_DIR},
@@ -59,6 +61,8 @@ enum Commands {
     Init(ProjectInitArgs),
     /// Adds a new dependency to the current magnet project
     Add(ProjectAddDependencyArgs),
+    /// Installs the dependencies of the current magnet project into `external`
+    Install(ProjectInstallArgs),
     Bundle(ProjectBundleArgs),
 }
 
@@ -92,6 +96,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Add(project_add_dependency_args) => {
             project_add_dependency_args.run(&cli_context).await
         }
+        Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
         Commands::Bundle(project_bundle_args) => project_bundle_args.run(&cli_context).await,
     }
 }

@@ -46,7 +46,7 @@ impl GitClient {
     }
 
     fn clone(url: Url, local_destination: PathBuf) -> anyhow::Result<Self> {
-        info!("Cloning index repo {url:?} to {local_destination:?}");
+        info!("Cloning index repo {url} to {local_destination:?}");
         let repo = Repository::clone(url.as_str(), &local_destination)
             .with_context(|| format!("Could not clone the index {url}"))?;
         Ok(Self {

@@ -1,10 +1,10 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     path::{Path, PathBuf},
 };
 
-use anyhow::{ensure, Context};
+use anyhow::{bail, ensure, Context};
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{info, instrument, trace};
@@ -18,19 +18,33 @@ use crate::{
     git_client::{client::GitClient, models::GitDependency},
     models::{
         directories::ProjectDirectory,
-        lock_file::{LockDependency, LockFile},
+        lock_file::{LockDependency, LockFile, LockSource},
         package::{BundleFormat, MagnetPackage, SourceBundle},
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
-    packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
-    resolver::online_provider::{resolve_dependencies, RootProvider},
+    packaging::{
+        collect::CollectFiles,
+        compression::{self, MagnetArchive},
+        naming::PackageNaming,
+    },
+    resolver::{
+        online_provider::{resolve_dependencies, RootProvider, ToRanges},
+        package_downloader::{Artifact, PackageDownloader},
+    },
 };
+
+/// number of artifacts which get downloaded at the same time
+const PARALLEL_DOWNLOADS: usize = 4;
+
+/// prefix of the temporary directories used while extracting a package
+const STAGING_PREFIX: &str = ".magnet-";
 
 /// The Project struct is used to manage files of a project, such as
 /// adding a dependency, creating a lockfile or packaging up for release.
 pub struct Project {
     project_manifest: ProjectManifest,
-    lock_file: LockFile,
+    /// `None` if the project has no lock file yet
+    lock_file: Option<LockFile>,
     path: PathBuf,
 }
 
@@ -45,7 +59,7 @@ impl Project {
             ProjectManifest::write_new(path.join(MAGNET_PROJECT_FILE), &magnet_manifest)?;
         let project = Self {
             project_manifest,
-            lock_file: LockFile::create_empty(path.join(MAGNET_LOCK_FILE), index)?,
+            lock_file: Some(LockFile::create_empty(path.join(MAGNET_LOCK_FILE), index)?),
             path: path.into(),
         };
         project.generate_project_directories()?;
@@ -56,9 +70,17 @@ impl Project {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             project_manifest: ProjectManifest::open(path.join(MAGNET_PROJECT_FILE))?,
-            lock_file: LockFile::open(&path.join(MAGNET_LOCK_FILE))?,
+            lock_file: Self::open_lock_file(path)?,
             path: path.to_path_buf(),
         })
+    }
+
+    fn open_lock_file(path: &Path) -> anyhow::Result<Option<LockFile>> {
+        let lock_path = path.join(MAGNET_LOCK_FILE);
+        match lock_path.exists() {
+            true => Ok(Some(LockFile::open(&lock_path)?)),
+            false => Ok(None),
+        }
     }
 
     #[instrument(skip(self))]
@@ -169,8 +191,8 @@ impl Project {
         // keep the locked versions where possible, so only the necessary changes are made
         let preferred = self
             .lock_file
-            .dependencies
             .iter()
+            .flat_map(|lock_file| &lock_file.dependencies)
             .map(|(name, dependency)| (name.clone(), dependency.version))
             .collect();
         let tree = resolve_dependencies(&RootProvider {
@@ -188,18 +210,135 @@ impl Project {
         provider: &GitClient,
         tree: &HashMap<String, SemanticVersion>,
     ) -> anyhow::Result<()> {
-        self.lock_file = LockFile::from_tree(provider.url().clone(), tree, |name, version| {
+        let lock_file = LockFile::from_tree(provider.url().clone(), tree, |name, version| {
             provider
                 .get_release(name, version)?
                 .map(|release| LockDependency::from(&release))
                 .with_context(|| format!("{name} {version} is missing in the index"))
         })?;
-        self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))
+        lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
+        self.lock_file = Some(lock_file);
+        Ok(())
     }
 
     fn reload_from_file(&mut self) -> anyhow::Result<()> {
         self.project_manifest = ProjectManifest::open(self.path.join(MAGNET_PROJECT_FILE))?;
-        self.lock_file = LockFile::open(&self.path.join(MAGNET_LOCK_FILE))?;
+        self.lock_file = Self::open_lock_file(&self.path)?;
+        Ok(())
+    }
+
+    /// `true` if every dependency of the manifest is locked with a version which satisfies it
+    fn lock_covers_manifest(&self) -> anyhow::Result<bool> {
+        let Some(lock_file) = &self.lock_file else {
+            return Ok(false);
+        };
+        Ok(self.manifest_dependencies()?.iter().all(|dependency| {
+            lock_file
+                .dependencies
+                .get(&MagnetManifestV1::normalize_name(&dependency.name))
+                .is_some_and(|locked| dependency.constraint.to_ranges().contains(&locked.version))
+        }))
+    }
+
+    /// Installs the locked dependencies into `external/<kind>s/<name>`, and removes the
+    /// packages which are not locked (anymore).
+    /// The dependencies only get resolved if the lock file does not cover the manifest.
+    pub async fn install(
+        &mut self,
+        provider: &GitClient,
+        downloader: &PackageDownloader,
+    ) -> anyhow::Result<()> {
+        if !self.lock_covers_manifest()? {
+            info!("{MAGNET_LOCK_FILE} is missing or outdated, resolving the dependencies");
+            let tree = self.resolve(provider, self.manifest_dependencies()?)?;
+            self.write_lock(provider, &tree)?;
+        }
+        let lock_file = self
+            .lock_file
+            .as_ref()
+            .context("A lock file should exist after resolving")?;
+
+        let artifacts = lock_file
+            .dependencies
+            .iter()
+            .map(|(name, dependency)| locked_artifact(name, dependency))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let archives = downloader
+            .download_all(&artifacts, PARALLEL_DOWNLOADS)
+            .await?;
+        for (artifact, archive) in artifacts.iter().zip(archives) {
+            self.install_package(artifact, &archive)?;
+        }
+
+        self.prune_external(lock_file)?;
+        info!("Installed {} packages", artifacts.len());
+        Ok(())
+    }
+
+    /// `external/<kind>s/<name>`
+    fn package_dir(&self, kind: &MagnetManifestV1PackageKind, name: &str) -> PathBuf {
+        self.project_dir(ProjectDirectory::External)
+            .join(format!("{kind}s"))
+            .join(MagnetManifestV1::normalize_name(name))
+    }
+
+    /// Extracts the archive of a package next to its directory and swaps it in afterwards,
+    /// so a broken archive never replaces a working package
+    fn install_package(&self, artifact: &Artifact, archive: &Path) -> anyhow::Result<()> {
+        let target = self.package_dir(&artifact.kind, &artifact.name);
+        let kind_dir = target
+            .parent()
+            .context("A package directory has a parent")?;
+        fs::create_dir_all(kind_dir)
+            .with_context(|| format!("Could not create directory {kind_dir:?}"))?;
+
+        let staging = tempfile::Builder::new()
+            .prefix(STAGING_PREFIX)
+            .tempdir_in(kind_dir)?;
+        compression::extract(archive, staging.path())?;
+        if target.exists() {
+            fs::remove_dir_all(&target)
+                .with_context(|| format!("Could not remove old package {target:?}"))?;
+        }
+        fs::rename(staging.keep(), &target)
+            .with_context(|| format!("Could not move package to {target:?}"))?;
+        trace!(?target, "Installed package");
+        Ok(())
+    }
+
+    /// Removes the package directories within `external/<kind>s` which are not locked,
+    /// as well as left over staging directories. Other hidden directories, such as
+    /// `external/.dev`, are left alone.
+    fn prune_external(&self, lock_file: &LockFile) -> anyhow::Result<()> {
+        let locked: HashSet<PathBuf> = lock_file
+            .dependencies
+            .iter()
+            .map(|(name, dependency)| self.package_dir(&dependency.kind, name))
+            .collect();
+
+        for kind in [
+            MagnetManifestV1PackageKind::Quark,
+            MagnetManifestV1PackageKind::Lepton,
+            MagnetManifestV1PackageKind::Gluon,
+        ] {
+            let kind_dir = self
+                .project_dir(ProjectDirectory::External)
+                .join(format!("{kind}s"));
+            if !kind_dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&kind_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_hidden = name.starts_with('.') && !name.starts_with(STAGING_PREFIX);
+                if !entry.file_type()?.is_dir() || is_hidden || locked.contains(&path) {
+                    continue;
+                }
+                info!("Remove {path:?}, which is not locked");
+                fs::remove_dir_all(&path).with_context(|| format!("Could not remove {path:?}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -297,6 +436,40 @@ impl Project {
     }
 }
 
+/// The artifact of a locked package which gets installed
+fn locked_artifact(name: &str, dependency: &LockDependency) -> anyhow::Result<Artifact> {
+    if dependency.source != LockSource::Index {
+        bail!(
+            "{name} has the source {}, which can not be installed yet",
+            dependency.source
+        );
+    }
+    if dependency.kind != MagnetManifestV1PackageKind::Quark {
+        bail!(
+            "{name} is a {}, which can not be installed yet",
+            dependency.kind
+        );
+    }
+    let (abi, platform) = ("any", "any");
+    let sha256 = dependency
+        .checksums
+        .get(&format!("{abi}-{platform}"))
+        .with_context(|| {
+            format!(
+                "{name} {} has no {abi}-{platform} artifact in {MAGNET_LOCK_FILE}",
+                dependency.version
+            )
+        })?;
+    Ok(Artifact {
+        name: name.to_string(),
+        version: dependency.version,
+        kind: dependency.kind.clone(),
+        abi: abi.to_string(),
+        platform: platform.to_string(),
+        sha256: sha256.clone(),
+    })
+}
+
 /// `true` if the dependency is a plain version requirement against the index
 fn is_index_dependency(dependency: &MagnetManifestV1DependenciesValue) -> bool {
     match dependency {
@@ -372,10 +545,29 @@ beta = "^1"
     fn locked_versions(project: &Project) -> Vec<(String, String)> {
         project
             .lock_file
+            .as_ref()
+            .unwrap()
             .dependencies
             .iter()
             .map(|(name, dependency)| (name.clone(), dependency.version.to_string()))
             .collect()
+    }
+
+    /// writes a lock file with the given packages of the fixture index
+    fn write_lock_file(dir: &tempfile::TempDir, packages: &[(&str, &str)]) {
+        let index = fixture_index();
+        let tree: HashMap<String, SemanticVersion> = packages
+            .iter()
+            .map(|(name, version)| (name.to_string(), version.parse().unwrap()))
+            .collect();
+        LockFile::from_tree(index.url().clone(), &tree, |name, version| {
+            Ok(LockDependency::from(
+                &index.get_release(name, version)?.unwrap(),
+            ))
+        })
+        .unwrap()
+        .write(&dir.path().join(MAGNET_LOCK_FILE))
+        .unwrap();
     }
 
     fn read_manifest(dir: &tempfile::TempDir) -> String {
@@ -410,22 +602,21 @@ beta = "^1"
             ]
         );
         let lock = fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap();
-        assert!(lock.contains("checksums = { any-any = \"sha-alpha-1.1.0\" }"));
+        let alpha = fixture_index()
+            .get_release("alpha", &SemanticVersion::new(1, 1, 0))
+            .unwrap()
+            .unwrap();
+        assert!(lock.contains(&format!(
+            "checksums = {{ any-any = \"{}\" }}",
+            alpha.artifacts[0].sha256
+        )));
     }
 
     #[test]
     fn test_add_dependency_keeps_locked_versions() {
         let (dir, _) = project(MANIFEST);
         let index = fixture_index();
-        let tree = HashMap::from([("beta".to_string(), SemanticVersion::new(1, 0, 0))]);
-        LockFile::from_tree(index.url().clone(), &tree, |name, version| {
-            Ok(LockDependency::from(
-                &index.get_release(name, version)?.unwrap(),
-            ))
-        })
-        .unwrap()
-        .write(&dir.path().join(MAGNET_LOCK_FILE))
-        .unwrap();
+        write_lock_file(&dir, &[("beta", "1.0.0")]);
 
         let mut project = Project::open(dir.path()).unwrap();
         project
@@ -502,5 +693,157 @@ beta = "^1"
         assert!(project
             .add_dependency(&fixture_index(), "foo@bar".into(), None)
             .is_err());
+    }
+
+    /// downloads from the fixture tarballs, into a temporary cache
+    fn fixture_downloader(cache: &tempfile::TempDir) -> PackageDownloader {
+        let dl = Url::from_directory_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dl"),
+        )
+        .unwrap();
+        PackageDownloader::new(
+            cache.path().to_path_buf(),
+            format!("{dl}{{name}}-{{version}}-{{kind}}-{{abi}}-{{platform}}.tar.gz"),
+        )
+    }
+
+    async fn install(dir: &tempfile::TempDir) -> anyhow::Result<Project> {
+        let cache = tempfile::tempdir().unwrap();
+        let mut project = Project::open(dir.path()).unwrap();
+        project
+            .install(&fixture_index(), &fixture_downloader(&cache))
+            .await?;
+        Ok(project)
+    }
+
+    /// all files within `external`, with their content
+    fn external_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let external = dir.path().join("external");
+        walkdir::WalkDir::new(&external)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().strip_prefix(&external).unwrap().to_path_buf(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn read_lock(dir: &tempfile::TempDir) -> String {
+        fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_install_reproduces_external() {
+        let (dir, mut project) = project(MANIFEST);
+        project
+            .add_dependency(
+                &fixture_index(),
+                "alpha".into(),
+                Some("^1".parse().unwrap()),
+            )
+            .unwrap();
+        let lock = read_lock(&dir);
+
+        install(&dir).await.unwrap();
+        let installed = external_files(&dir);
+        assert_eq!(
+            installed.keys().cloned().collect::<Vec<_>>(),
+            [
+                "quarks/alpha/Classes/Alpha.sc",
+                "quarks/alpha/HelpSource/Classes/Alpha.schelp",
+                "quarks/beta/Classes/Beta.sc",
+                "quarks/ddw-common/DDWCommon.sc",
+            ]
+            .map(PathBuf::from)
+        );
+        let alpha = &installed[&PathBuf::from("quarks/alpha/Classes/Alpha.sc")];
+        assert!(String::from_utf8_lossy(alpha).contains("1.1.0"));
+
+        // a fresh clone contains no external directory
+        fs::remove_dir_all(dir.path().join("external")).unwrap();
+        install(&dir).await.unwrap();
+        assert_eq!(external_files(&dir), installed);
+        assert_eq!(read_lock(&dir), lock);
+    }
+
+    #[tokio::test]
+    async fn test_install_uses_lock_file() {
+        let (dir, _) = project(MANIFEST);
+        write_lock_file(&dir, &[("beta", "1.0.0")]);
+        let lock = read_lock(&dir);
+
+        install(&dir).await.unwrap();
+        // beta 1.2.0 would be newer, but the lock covers the manifest
+        let beta = &external_files(&dir)[&PathBuf::from("quarks/beta/Classes/Beta.sc")];
+        assert!(String::from_utf8_lossy(beta).contains("1.0.0"));
+        assert_eq!(read_lock(&dir), lock);
+    }
+
+    #[tokio::test]
+    async fn test_install_without_lock_file() {
+        let (dir, _) = project(MANIFEST);
+        fs::remove_file(dir.path().join(MAGNET_LOCK_FILE)).unwrap();
+
+        let project = install(&dir).await.unwrap();
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("beta".to_string(), "1.2.0".to_string()),
+                ("ddw-common".to_string(), "0.1.0".to_string()),
+            ]
+        );
+        assert!(dir.path().join(MAGNET_LOCK_FILE).exists());
+        assert_eq!(external_files(&dir).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_install_resolves_outdated_lock_file() {
+        // ddw-common was added to the manifest by hand
+        let (dir, _) = project(&format!("{MANIFEST}ddw-common = \"*\"\n"));
+        write_lock_file(&dir, &[("beta", "1.0.0")]);
+
+        let project = install(&dir).await.unwrap();
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("beta".to_string(), "1.0.0".to_string()),
+                ("ddw-common".to_string(), "0.1.0".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_prunes_external() {
+        let (dir, _) = project(MANIFEST);
+        let external = dir.path().join("external");
+        for path in [
+            "quarks/stale/Classes/Stale.sc",
+            "leptons/stale/plugins/Stale.scx",
+            "quarks/.magnet-leftover/Classes/Half.sc",
+            "quarks/.hidden/keep",
+            ".dev/my-lepton/plugins/Dev.scx",
+        ] {
+            fs::create_dir_all(external.join(path).parent().unwrap()).unwrap();
+            fs::write(external.join(path), b"").unwrap();
+        }
+
+        install(&dir).await.unwrap();
+        assert!(!external.join("quarks/stale").exists());
+        assert!(!external.join("leptons/stale").exists());
+        assert!(!external.join("quarks/.magnet-leftover").exists());
+        assert!(external.join("quarks/.hidden/keep").exists());
+        assert!(external.join(".dev/my-lepton/plugins/Dev.scx").exists());
+        assert!(external.join("quarks/beta").exists());
+    }
+
+    #[tokio::test]
+    async fn test_install_refuses_lepton() {
+        let (dir, _) = project(&format!("{MANIFEST}gamma = \"*\"\n"));
+        let err = install(&dir).await.err().unwrap();
+        assert!(err.to_string().contains("lepton"), "{err:#}");
     }
 }

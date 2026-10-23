@@ -1,2 +1,2 @@
-{"name": "beta", "version": "1.0.0", "kind": "quark", "dependencies": {}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "sha-beta-1.0.0"}]}
-{"name": "beta", "version": "1.2.0", "kind": "quark", "dependencies": {"DDW_Common": ">=0.1.0"}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "sha-beta-1.2.0"}]}
+{"name": "beta", "version": "1.0.0", "kind": "quark", "dependencies": {}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "9b4f17c678a0a8c6681b6e1ad00820fca2d379a38b65c84bf8d962c9504d5f19"}]}
+{"name": "beta", "version": "1.2.0", "kind": "quark", "dependencies": {"DDW_Common": ">=0.1.0"}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "20d67276b09c59f2d4d75f6471caf9cb519a155c5ddd56a6d8f985892117f9f8"}]}

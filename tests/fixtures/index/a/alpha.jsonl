@@ -1,3 +1,3 @@
-{"name": "alpha", "version": "1.0.0", "kind": "quark", "dependencies": {}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "sha-alpha-1.0.0"}]}
-{"name": "alpha", "version": "1.1.0", "kind": "quark", "dependencies": {"beta": "^1.0.0"}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "sha-alpha-1.1.0"}]}
-{"name": "alpha", "version": "2.0.0", "kind": "quark", "dependencies": {"beta": "^1.2.0"}, "yanked": true, "artifacts": [{"abi": "any", "platform": "any", "sha256": "sha-alpha-2.0.0"}]}
+{"name": "alpha", "version": "1.0.0", "kind": "quark", "dependencies": {}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "45f5bc7f9cc7312cd398270f9239f6a0c306b0e30a48ea5a5850179bb105dccf"}]}
+{"name": "alpha", "version": "1.1.0", "kind": "quark", "dependencies": {"beta": "^1.0.0"}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "de5baa9f2f62954446e1c2ebd5fb5a4959de4f40214ab05c8ee73a274558ade6"}]}
+{"name": "alpha", "version": "2.0.0", "kind": "quark", "dependencies": {"beta": "^1.2.0"}, "yanked": true, "artifacts": [{"abi": "any", "platform": "any", "sha256": "90e8e2108b9cc817281cfbed6afaf3a99900d2115ffe2a421d98d02aba564080"}]}

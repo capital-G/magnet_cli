@@ -8,9 +8,13 @@ use inquire::{
     Select, Text,
 };
 use magnet::models::package::{BundleFormat, Quark, QuarkAbiTag, SourcePlatformTag};
-use magnet::models::{
-    project::Project,
-    project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+use magnet::{
+    config::constants::{magnet_home, CACHE_DIR},
+    models::{
+        project::Project,
+        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+    },
+    resolver::package_downloader::PackageDownloader,
 };
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
@@ -159,6 +163,31 @@ mod tests {
             assert_eq!(parsed.unwrap().to_string(), constraint);
         }
         assert!(parse_dependency("foo@latest").is_err());
+    }
+}
+
+/// Installs the locked dependencies of the current magnet project
+#[derive(Debug, Parser)]
+pub struct ProjectInstallArgs {
+    /// Path of the project.
+    /// If not provided, the current working directory is used.
+    #[arg(
+        long,
+        default_value = None,
+    )]
+    path: Option<PathBuf>,
+}
+
+impl MagnetSubCommand for ProjectInstallArgs {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
+        let project_path = match self.path {
+            Some(path) => path,
+            None => env::current_dir()?,
+        };
+        let mut project = Project::open(&project_path)?;
+        let index = cli_context.git_client()?;
+        let downloader = PackageDownloader::new(magnet_home()?.join(CACHE_DIR), index.config()?.dl);
+        project.install(&index, &downloader).await
     }
 }
 
