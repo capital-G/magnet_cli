@@ -16,48 +16,55 @@ pub trait ToRanges {
 
 impl ToRanges for VersionReq {
     fn to_ranges(&self) -> Ranges<SemanticVersion> {
-        let mut boundaries = Ranges::<SemanticVersion>::full();
+        self.comparators
+            .iter()
+            .fold(Ranges::full(), |ranges, comparator| {
+                ranges.intersection(&comparator_to_ranges(comparator))
+            })
+    }
+}
 
-        for comperator in &self.comparators {
-            let semantic_version = SemanticVersion::new(
-                comperator.major.try_into().unwrap_or(0),
-                comperator.minor.unwrap_or(0).try_into().unwrap_or(0),
-                comperator.patch.unwrap_or(0).try_into().unwrap_or(0),
-            );
+/// Follows the semantics of the semver crate (and therefore Cargo), see
+/// https://docs.rs/semver/latest/semver/enum.Op.html.
+/// Pre-releases are not supported and get ignored.
+fn comparator_to_ranges(comparator: &semver::Comparator) -> Ranges<SemanticVersion> {
+    let number = |n: u64| -> u32 { n.try_into().unwrap_or(u32::MAX) };
+    let major = number(comparator.major);
+    let minor = comparator.minor.map(number);
+    let patch = comparator.patch.map(number);
 
-            let bound = match comperator.op {
-                semver::Op::Exact => Ranges::singleton(semantic_version),
-                semver::Op::Greater => Ranges::strictly_higher_than(semantic_version),
-                semver::Op::GreaterEq => Ranges::higher_than(semantic_version),
-                semver::Op::Less => Ranges::strictly_lower_than(semantic_version),
-                semver::Op::LessEq => Ranges::lower_than(semantic_version),
-                semver::Op::Caret => {
-                    // ^1.2.3 is equal to >= 1.2.3, <2.0.0
-                    let upper =
-                        SemanticVersion::new((comperator.major + 1).try_into().unwrap_or(0), 0, 0);
-                    Ranges::higher_than(semantic_version)
-                        .intersection(&Ranges::strictly_lower_than(upper))
-                }
-                semver::Op::Tilde => {
-                    // ~1.2.3 is equal to >= 1.2.3, <1.3.0
-                    let upper = SemanticVersion::new(
-                        comperator.major.try_into().unwrap_or(0),
-                        comperator.minor.unwrap_or(0).try_into().unwrap_or(0) + 1,
-                        0,
-                    );
-                    Ranges::higher_than(semantic_version)
-                        .intersection(&Ranges::strictly_lower_than(upper))
-                }
-                semver::Op::Wildcard => Ranges::full(),
-                _ => {
-                    error!("Unknown comperator");
-                    Ranges::full()
-                }
-            };
+    // a partial version stands for all versions it covers, e.g. `1.2` for `1.2.x`,
+    // so it spans from `lower` (1.2.0) to the first version after it, `next` (1.3.0)
+    let lower = SemanticVersion::new(major, minor.unwrap_or(0), patch.unwrap_or(0));
+    let next = match (minor, patch) {
+        (None, _) => SemanticVersion::new(major + 1, 0, 0),
+        (Some(minor), None) => SemanticVersion::new(major, minor + 1, 0),
+        (Some(minor), Some(patch)) => SemanticVersion::new(major, minor, patch + 1),
+    };
+    let up_to = |upper: SemanticVersion| Ranges::between(lower, upper);
 
-            boundaries = boundaries.intersection(&bound);
+    match comparator.op {
+        semver::Op::Exact | semver::Op::Wildcard => up_to(next),
+        semver::Op::Greater => Ranges::higher_than(next),
+        semver::Op::GreaterEq => Ranges::higher_than(lower),
+        semver::Op::Less => Ranges::strictly_lower_than(lower),
+        semver::Op::LessEq => Ranges::strictly_lower_than(next),
+        // ~1.2.3 := >=1.2.3, <1.3.0 and ~1 := >=1.0.0, <2.0.0
+        semver::Op::Tilde => match minor {
+            Some(minor) => up_to(SemanticVersion::new(major, minor + 1, 0)),
+            None => up_to(SemanticVersion::new(major + 1, 0, 0)),
+        },
+        // the left-most non-zero component must not change, e.g.
+        // ^1.2.3 := <2.0.0, ^0.2.3 := <0.3.0, ^0.0.3 := =0.0.3
+        semver::Op::Caret => match (major, minor) {
+            (0, Some(0)) => up_to(next),
+            (0, Some(minor)) => up_to(SemanticVersion::new(0, minor + 1, 0)),
+            _ => up_to(SemanticVersion::new(major + 1, 0, 0)),
+        },
+        _ => {
+            error!("Unknown comparator {comparator}");
+            Ranges::full()
         }
-        boundaries
     }
 }
 
@@ -317,6 +324,71 @@ mod tests {
             .to_string();
         println!("{err}");
         assert!(err.contains("legacy quark"));
+    }
+
+    /// the semver crate is the reference implementation of the version requirements
+    #[test]
+    fn test_ranges_match_semver() {
+        let requirements = [
+            "1.2.3",
+            "1.2",
+            "1",
+            "0.2.3",
+            "0.2",
+            "0.0.3",
+            "0.0",
+            "0",
+            "=1.2.3",
+            "=1.2",
+            "=1",
+            ">1.2.3",
+            ">1.2",
+            ">1",
+            ">=1.2.3",
+            ">=1.2",
+            "<1.2.3",
+            "<1.2",
+            "<1",
+            "<=1.2.3",
+            "<=1.2",
+            "<=1",
+            "~1.2.3",
+            "~1.2",
+            "~1",
+            "~0.2.3",
+            "^1.2.3",
+            "^1.2",
+            "^1",
+            "^0.2.3",
+            "^0.2",
+            "^0.0.3",
+            "^0.0",
+            "^0",
+            "1.*",
+            "1.2.*",
+            "*",
+            ">=1.2, <1.5",
+            "^1.2, <1.4",
+        ];
+        for requirement in requirements {
+            let req = VersionReq::parse(requirement).unwrap();
+            let ranges = req.to_ranges();
+            for major in 0..3 {
+                for minor in 0..4 {
+                    for patch in 0..5 {
+                        assert_eq!(
+                            ranges.contains(&SemanticVersion::new(major, minor, patch)),
+                            req.matches(&semver::Version::new(
+                                major.into(),
+                                minor.into(),
+                                patch.into()
+                            )),
+                            "{requirement} vs {major}.{minor}.{patch}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
