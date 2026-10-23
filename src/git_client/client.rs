@@ -19,16 +19,25 @@ pub struct GitClient {
 }
 
 impl GitClient {
+    /// Opens the index at `local_destination` and updates it, or clones it if it does not exist yet.
+    /// If the update fails (e.g. offline), the cached copy is used.
     pub fn new(url: Url, local_destination: PathBuf) -> anyhow::Result<Self> {
         let client = match local_destination.exists() {
             true => {
                 let repo = Repository::open(&local_destination)?;
                 // @todo check if repo matches the designated URL - otherwise delete it and clone
-                Self {
+                let client = Self {
                     url,
                     local_destination,
                     repo: Some(repo),
+                };
+                if let Err(err) = client.update() {
+                    warn!(
+                        "Could not update the index {}, using the cached copy: {err:#}",
+                        client.url
+                    );
                 }
+                client
             }
             false => Self::clone(url, local_destination)?,
         };
@@ -38,7 +47,8 @@ impl GitClient {
 
     fn clone(url: Url, local_destination: PathBuf) -> anyhow::Result<Self> {
         info!("Cloning index repo {url:?} to {local_destination:?}");
-        let repo = Repository::clone(url.as_str(), &local_destination)?;
+        let repo = Repository::clone(url.as_str(), &local_destination)
+            .with_context(|| format!("Could not clone the index {url}"))?;
         Ok(Self {
             url,
             local_destination,
@@ -82,9 +92,13 @@ impl GitClient {
         Ok(config)
     }
 
+    /// Fetches the index and resets it to the state of the remote
     pub fn update(&self) -> anyhow::Result<()> {
         match self.repo {
-            Some(_) => self.hard_reset_to_remote(),
+            Some(_) => {
+                self.fetch_origin()?;
+                self.hard_reset_to_remote()
+            }
             None => Ok(()),
         }
     }
@@ -96,16 +110,14 @@ impl GitClient {
     }
 
     fn fetch_origin(&self) -> anyhow::Result<()> {
-        let _ = self
-            .repo()?
+        self.repo()?
             .find_remote("origin")?
-            .fetch(&["main"], None, None);
+            .fetch(&["+refs/heads/main:refs/remotes/origin/main"], None, None)
+            .with_context(|| format!("Could not fetch the index {}", self.url))?;
         Ok(())
     }
 
     fn hard_reset_to_remote(&self) -> anyhow::Result<()> {
-        let _ = self.fetch_origin();
-
         let repo = self.repo()?;
         let oid = repo.refname_to_id("refs/remotes/origin/main")?;
         let object = repo.find_object(oid, None)?;
@@ -181,6 +193,77 @@ mod tests {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(INDEX_CONFIG_FILE), config)?;
         GitClient::open_local(dir.path().to_path_buf())
+    }
+
+    fn fixture_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/index")
+            .join(file)
+    }
+
+    /// copies the given fixture files into the repo and commits them on `main`
+    fn commit_fixtures(repo: &Repository, files: &[&str]) {
+        let workdir = repo.workdir().unwrap();
+        for file in files {
+            let destination = workdir.join(file);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(fixture_path(file), destination).unwrap();
+        }
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = git2::Signature::now("magnet", "magnet@localhost").unwrap();
+        let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "update",
+            &tree,
+            &parents,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_update_and_offline() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        let remote = Repository::init_opts(remote_dir.path(), &options).unwrap();
+        commit_fixtures(&remote, &["config.json", "a/alpha.jsonl"]);
+
+        let url = Url::from_directory_path(remote_dir.path()).unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let local_destination = cache_dir.path().join("index");
+
+        // clone
+        let index = GitClient::new(url.clone(), local_destination.clone()).unwrap();
+        assert!(index.get_releases("alpha").unwrap().is_some());
+        assert!(index.get_releases("beta").unwrap().is_none());
+
+        // a new release on the remote gets picked up on the next start
+        commit_fixtures(&remote, &["b/beta.jsonl"]);
+        let index = GitClient::new(url.clone(), local_destination.clone()).unwrap();
+        assert!(index.get_releases("beta").unwrap().is_some());
+
+        // offline: the update fails, but the cached copy can still be used
+        drop(remote);
+        remote_dir.close().unwrap();
+        assert!(index.update().is_err());
+        let index = GitClient::new(url, local_destination).unwrap();
+        assert!(index.get_releases("beta").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_clone_offline() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let url = Url::from_directory_path(cache_dir.path().join("missing")).unwrap();
+        assert!(GitClient::new(url, cache_dir.path().join("index")).is_err());
     }
 
     #[test]
