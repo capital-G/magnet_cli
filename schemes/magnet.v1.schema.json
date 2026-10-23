@@ -194,6 +194,7 @@
           "kind": {
             "type": "string",
             "enum": ["system", "sclang"],
+            "default": "sclang",
             "description": "Kind of entrypoint"
           }
         },

@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     path::{Path, PathBuf},
+    process::{Command, ExitStatus},
 };
 
 use anyhow::{bail, ensure, Context};
@@ -20,7 +21,10 @@ use crate::{
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
         package::{BundleFormat, MagnetPackage, SourceBundle},
-        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+        project_manifest::{
+            MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
+            MagnetManifestV1PackageKind,
+        },
     },
     packaging::{
         collect::CollectFiles,
@@ -188,8 +192,101 @@ impl Project {
                 None
             }
         };
+        self.write_language_config_for(sclang)
+    }
+
+    fn write_language_config_for(&self, sclang: Option<Sclang>) -> anyhow::Result<()> {
         LanguageConfig::for_project(&self.path, self.project_manifest.get_manifest(), sclang)?
             .write(&self.path)
+    }
+
+    /// The entrypoints of the project, which can be started via `magnet run`
+    pub fn entrypoints(&self) -> &[MagnetManifestV1EntrypointItem] {
+        &self.project_manifest.get_manifest().entrypoint
+    }
+
+    /// Runs an entrypoint of the project from the project root and returns its exit status.
+    /// `args` are passed on to the script or command.
+    /// `find_sclang` is only called for sclang entrypoints, which get started with a language
+    /// config written for exactly this sclang.
+    pub fn run_entrypoint(
+        &self,
+        name: &str,
+        args: &[String],
+        find_sclang: impl FnOnce() -> anyhow::Result<Option<Sclang>>,
+    ) -> anyhow::Result<ExitStatus> {
+        let entrypoint = self
+            .entrypoints()
+            .iter()
+            .find(|entrypoint| entrypoint.name == name)
+            .with_context(|| {
+                let names: Vec<&str> = self
+                    .entrypoints()
+                    .iter()
+                    .map(|entrypoint| entrypoint.name.as_str())
+                    .collect();
+                match names.is_empty() {
+                    true => {
+                        format!("Unknown entrypoint {name}, {MAGNET_PROJECT_FILE} defines none")
+                    }
+                    false => format!(
+                        "Unknown entrypoint {name}, available are: {}",
+                        names.join(", ")
+                    ),
+                }
+            })?;
+        self.ensure_installed()?;
+
+        let root = std::path::absolute(&self.path)?;
+        let mut command = match entrypoint.kind {
+            MagnetManifestV1EntrypointItemKind::Sclang => {
+                let sclang = find_sclang()?.with_context(|| {
+                    format!("Could not find sclang, set {MAGNET_SCLANG_ENV} to its path")
+                })?;
+                let script = root.join(&entrypoint.command);
+                ensure!(
+                    script.is_file(),
+                    "The script {} of the entrypoint {name} does not exist",
+                    entrypoint.command
+                );
+                // the config must match the class library of the sclang which gets started
+                self.write_language_config_for(Some(sclang.clone()))?;
+                let mut command = Command::new(&sclang.binary);
+                command
+                    .arg("-l")
+                    .arg(root.join(SCLANG_CONF_FILE))
+                    // otherwise sclang parses args like `--foo` as its own options
+                    .arg("--")
+                    .arg(&entrypoint.command)
+                    .args(args);
+                command
+            }
+            MagnetManifestV1EntrypointItemKind::System => shell_command(&entrypoint.command, args),
+        };
+        info!("Run {name}");
+        command
+            .current_dir(&root)
+            .status()
+            .with_context(|| format!("Could not start the entrypoint {name}"))
+    }
+
+    /// Fails if the locked dependencies are not installed, e.g. in a fresh clone
+    fn ensure_installed(&self) -> anyhow::Result<()> {
+        if self.manifest_dependencies()?.is_empty() {
+            return Ok(());
+        }
+        let installed = self.lock_covers_manifest()?
+            && self.lock_file.iter().all(|lock_file| {
+                lock_file
+                    .dependencies
+                    .iter()
+                    .all(|(name, dependency)| self.package_dir(&dependency.kind, name).is_dir())
+            });
+        ensure!(
+            installed,
+            "The dependencies are not installed, run `magnet install` first"
+        );
+        Ok(())
     }
 
     /// The dependencies of the manifest, as requirements for the resolver
@@ -454,6 +551,26 @@ impl Project {
             }
         }
         Ok(())
+    }
+}
+
+/// A shell command, which receives `args` as additional arguments
+fn shell_command(command: &str, args: &[String]) -> Command {
+    if cfg!(windows) {
+        let mut shell = Command::new("cmd");
+        shell
+            .arg("/C")
+            .arg([command.to_string(), args.join(" ")].join(" "));
+        shell
+    } else {
+        // the args become "$@", so the shell does not split or expand them again
+        let mut shell = Command::new("sh");
+        shell
+            .arg("-c")
+            .arg(format!("{command} \"$@\""))
+            .arg("magnet")
+            .args(args);
+        shell
     }
 }
 
@@ -878,5 +995,138 @@ beta = "^1"
         let (dir, _) = project(&format!("{MANIFEST}gamma = \"*\"\n"));
         let err = install(&dir).await.err().unwrap();
         assert!(err.to_string().contains("lepton"), "{err:#}");
+    }
+
+    /// a manifest without dependencies, with the given entrypoints
+    fn manifest_with_entrypoints(entrypoints: &str) -> String {
+        format!(
+            "magnet-version = 1\n\n[package]\nname = \"runner\"\nversion = \"0.1.0\"\nkind = \"quark\"\n\n{entrypoints}"
+        )
+    }
+
+    fn no_sclang() -> anyhow::Result<Option<Sclang>> {
+        Ok(None)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_system_entrypoint() {
+        let (dir, project) = project(&manifest_with_entrypoints(
+            "[[entrypoint]]\nname = \"hello\"\nkind = \"system\"\ncommand = \"printf '%s,' hello > out.txt\"\n",
+        ));
+        let status = project
+            .run_entrypoint("hello", &["a b".to_string(), "-x".to_string()], no_sclang)
+            .unwrap();
+        assert!(status.success());
+        // runs in the project root, and the args are passed on without being split
+        assert_eq!(
+            fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+            "hello,a b,-x,"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_returns_exit_code() {
+        let (_dir, project) = project(&manifest_with_entrypoints(
+            "[[entrypoint]]\nname = \"fail\"\nkind = \"system\"\ncommand = \"exit 3\"\n",
+        ));
+        let status = project.run_entrypoint("fail", &[], no_sclang).unwrap();
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn test_run_unknown_entrypoint() {
+        let (_dir, project) = project(&manifest_with_entrypoints(
+            "[[entrypoint]]\nname = \"hello\"\ncommand = \"hello.scd\"\n\n[[entrypoint]]\nname = \"test\"\ncommand = \"test.scd\"\n",
+        ));
+        let err = project
+            .run_entrypoint("missing", &[], no_sclang)
+            .unwrap_err();
+        assert!(err.to_string().contains("hello, test"), "{err:#}");
+    }
+
+    #[test]
+    fn test_run_requires_installed_dependencies() {
+        let (_dir, project) = project(&format!(
+            "{MANIFEST}\n[[entrypoint]]\nname = \"hello\"\nkind = \"system\"\ncommand = \"true\"\n"
+        ));
+        let err = project.run_entrypoint("hello", &[], no_sclang).unwrap_err();
+        assert!(err.to_string().contains("magnet install"), "{err:#}");
+    }
+
+    #[test]
+    fn test_run_sclang_entrypoint_without_sclang() {
+        let (dir, project) = project(&manifest_with_entrypoints(
+            "[[entrypoint]]\nname = \"hello\"\ncommand = \"hello.scd\"\n",
+        ));
+        fs::write(dir.path().join("hello.scd"), "").unwrap();
+        let err = project.run_entrypoint("hello", &[], no_sclang).unwrap_err();
+        assert!(err.to_string().contains(MAGNET_SCLANG_ENV), "{err:#}");
+    }
+
+    /// an sclang installation whose binary records its working directory and arguments
+    #[cfg(unix)]
+    fn fake_sclang(root: &Path) -> Sclang {
+        use std::os::unix::fs::PermissionsExt;
+        let binary = root.join("bin/sclang");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(
+            &binary,
+            "#!/bin/sh\npwd -P > sclang-call.txt\nfor arg in \"$@\"; do echo \"$arg\" >> sclang-call.txt; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let marker = root.join("share/SuperCollider/SCClassLibrary/Common/Core/Object.sc");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(marker, "Object {}").unwrap();
+        Sclang::from_binary(&binary).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_sclang_entrypoint() {
+        // the kind defaults to sclang
+        let (dir, project) = project(&manifest_with_entrypoints(
+            "[[entrypoint]]\nname = \"hello\"\ncommand = \"hello.scd\"\n",
+        ));
+        fs::write(dir.path().join("hello.scd"), "").unwrap();
+        let installation = tempfile::tempdir().unwrap();
+        let sclang = fake_sclang(installation.path());
+
+        let status = project
+            .run_entrypoint("hello", &["fast".to_string()], || Ok(Some(sclang.clone())))
+            .unwrap();
+        assert!(status.success());
+
+        let root = std::path::absolute(dir.path()).unwrap();
+        let call = fs::read_to_string(dir.path().join("sclang-call.txt")).unwrap();
+        assert_eq!(
+            call,
+            format!(
+                "{}\n-l\n{}\n--\nhello.scd\nfast\n",
+                dir.path().canonicalize().unwrap().display(),
+                root.join(SCLANG_CONF_FILE).display()
+            )
+        );
+        // the config got written for exactly this sclang
+        let config = fs::read_to_string(dir.path().join(SCLANG_CONF_FILE)).unwrap();
+        assert!(config.contains("excludeDefaultPaths: true"), "{config}");
+        assert!(config.contains(&sclang.class_library.display().to_string()));
+    }
+
+    #[test]
+    fn test_run_missing_script() {
+        let (_dir, project) = project(&manifest_with_entrypoints(
+            "[[entrypoint]]\nname = \"hello\"\ncommand = \"hello.scd\"\n",
+        ));
+        let sclang = Sclang {
+            binary: PathBuf::from("/bin/sclang"),
+            class_library: PathBuf::from("/share/SCClassLibrary"),
+        };
+        let err = project
+            .run_entrypoint("hello", &[], || Ok(Some(sclang)))
+            .unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err:#}");
     }
 }

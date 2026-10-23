@@ -15,6 +15,7 @@ use magnet::{
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     resolver::package_downloader::PackageDownloader,
+    sclang::Sclang,
 };
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
@@ -184,6 +185,51 @@ impl MagnetSubCommand for ProjectInstallArgs {
         let index = cli_context.git_client()?;
         let downloader = PackageDownloader::new(magnet_home()?.join(CACHE_DIR), index.config()?.dl);
         project.install(&index, &downloader).await
+    }
+}
+
+/// Runs an entrypoint of the current magnet project
+#[derive(Debug, Parser)]
+pub struct ProjectRunArgs {
+    /// Path of the project.
+    /// If not provided, the current working directory is used.
+    #[arg(
+        long,
+        default_value = None,
+    )]
+    path: Option<PathBuf>,
+
+    /// Name of the entrypoint. If not provided, the entrypoints get listed.
+    name: Option<String>,
+
+    /// Arguments which are passed on to the entrypoint
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+impl MagnetSubCommand for ProjectRunArgs {
+    async fn run(self, _cli_context: &CliContext) -> anyhow::Result<()> {
+        let project_path = match self.path {
+            Some(path) => path,
+            None => env::current_dir()?,
+        };
+        let project = Project::open(&project_path)?;
+        let Some(name) = self.name else {
+            for entrypoint in project.entrypoints() {
+                println!(
+                    "{} ({}): {}",
+                    entrypoint.name, entrypoint.kind, entrypoint.command
+                );
+            }
+            return Ok(());
+        };
+
+        let status = project.run_entrypoint(&name, &self.args, Sclang::find)?;
+        if !status.success() {
+            // exit with the code of the entrypoint, so scripts can rely on it
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        Ok(())
     }
 }
 
