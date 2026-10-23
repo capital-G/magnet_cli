@@ -37,18 +37,6 @@ pub struct GitDependency {
     pub constraint: VersionReq,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct LockDependency {
-    pub name: String,
-    #[serde(
-        deserialize_with = "deserialize_semantic_version",
-        serialize_with = "serialize_semantic_version"
-    )]
-    pub version: SemanticVersion,
-    // @todo add this
-    // pub sha256: String,
-}
-
 fn deserialize_constraint<'de, D>(deserializer: D) -> Result<VersionReq, D::Error>
 where
     D: Deserializer<'de>,

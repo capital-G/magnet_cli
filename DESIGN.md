@@ -212,16 +212,41 @@ While libraries should not publish such a file (since libraries are expected to 
 #### Example
 
 ```toml
-lock-version = "1.0.0"
-index = "http://git.supercollider.online/magnet-index"
+  lock-version = 1
+index = "https://git.supercollider.online/magnet-index"
 
 [dependencies]
-foo = { version = "0.1.0", kind = "quark", source = "index", checksum = "sha256" }
-bar = { version = "0.2.0", kind = "quark", source = "git+<url>#<sha>", checksum = "sha256" }
-baz = { version = "0.3.0", kind = "lepton", source = "../baz", checksum = "sha256" }
+
+[dependencies.foo]
+version = "0.1.0"
+kind = "quark"
+source = "index"
+checksums = { any-any = "abc" }
+
+[dependencies.bar]
+version = "0.2.0"
+kind = "quark"
+source = "git+https://git.com/favUser/someLegacyQuark.git#4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+[dependencies.baz]
+version = "0.3.0"
+kind = "lepton"
+source = "../baz"
+
+[dependencies.zoo]
+version = "1.4.2"
+kind = "lepton"
+source = "index"
+checksums = { api3-linux_x86_64 = "abc", api3-macos_arm64 = "def", source-any = "987" }
 ```
 
 The kind is stored in the lock file such that magnet knows the folder of each dependency within `external` without having to consult the index.
+
+##### Checksums
+
+`checksums` holds the sha256 of every artifact of that version known at lock time, keyed by `{abi}-{patform}`.
+This way the lock file can be shared and used across platforms.
+Only packages from the index have checksums: local dependencies can't be pinned and git dependencies are identified by their commit SHA.
 
 ## `magnet` as local CLI
 

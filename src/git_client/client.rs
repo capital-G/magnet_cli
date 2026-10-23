@@ -40,6 +40,10 @@ impl GitClient {
         })
     }
 
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
     pub fn update(&self) -> anyhow::Result<()> {
         self.hard_reset_to_remote()
     }

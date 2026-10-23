@@ -6,7 +6,7 @@ pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const CONFIG_PATH: &str = ".magnet";
 
 pub const MAGNET_PROJECT_FILE: &str = "magnet.toml";
-pub const MAGNET_LOCK_FILE: &str = "magnet.lock.json";
+pub const MAGNET_LOCK_FILE: &str = "magnet.lock";
 
 // client config
 pub const OAUTH_APP_PUBLIC_KEY: &str = "8bMJG5cTIk5gdINwQWbYHb0NAflBSr6dw57mANDn";

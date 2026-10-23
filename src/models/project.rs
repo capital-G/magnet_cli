@@ -8,6 +8,7 @@ use anyhow::{bail, Context};
 use pubgrub::{resolve, SemanticVersion};
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, trace};
+use url::Url;
 
 use crate::models::project_manifest::{
     MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
@@ -17,12 +18,12 @@ use crate::{
     git_client::{client::GitClient, models::GitDependency},
     models::{
         directories::ProjectDirectory,
-        lock_file::LockFile,
+        lock_file::{LockDependency, LockFile, LockSource},
         package::{BundleFormat, MagnetPackage, SourceBundle},
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     packaging::{collect::CollectFiles, compression::MagnetArchive, naming::PackageNaming},
-    resolver::online_provider::RootProvider,
+    resolver::online_provider::{RootProvider, ROOT_PACKAGE},
 };
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -60,12 +61,16 @@ pub struct Project {
 
 impl Project {
     #[instrument(skip(magnet_manifest))]
-    pub fn create(path: &Path, magnet_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
+    pub fn create(
+        path: &Path,
+        magnet_manifest: MagnetManifestV1,
+        index: Url,
+    ) -> anyhow::Result<Self> {
         let project_manifest =
             ProjectManifest::write_new(path.join(MAGNET_PROJECT_FILE), &magnet_manifest)?;
         let project = Self {
             project_manifest,
-            lock_file: LockFile::create_empty(path.join(MAGNET_LOCK_FILE))?,
+            lock_file: LockFile::create_empty(path.join(MAGNET_LOCK_FILE), index)?,
             path: path.into(),
         };
         project.generate_project_directories()?;
@@ -119,7 +124,11 @@ impl Project {
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
-        match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
+        match resolve(
+            &root_provider,
+            ROOT_PACKAGE.to_string(),
+            SemanticVersion::zero(),
+        ) {
             Ok(tree) => {
                 info!("Successfully resolved the tree! {:?}", tree);
                 let magnet_dependency = MagnetManifestV1DependenciesValue::Object {
@@ -133,7 +142,16 @@ impl Project {
                     name: dependency.name,
                     dependency: magnet_dependency,
                 })?;
-                self.lock_file = LockFile::from_tree(&tree)?;
+                let index = root_provider.git_provider.url().clone();
+                // @todo: obtain kind and checksums of the release from the index
+                self.lock_file = LockFile::from_tree(index, &tree, |_name, version| {
+                    Ok(LockDependency {
+                        version: *version,
+                        kind: MagnetManifestV1PackageKind::Quark,
+                        source: LockSource::Index,
+                        checksums: Default::default(),
+                    })
+                })?;
                 self.lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
             }
             Err(err) => {

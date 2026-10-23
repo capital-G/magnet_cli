@@ -142,6 +142,9 @@ impl DependencyProvider for GitClient {
     }
 }
 
+/// Name of the meta package which holds the dependencies of the project.
+pub const ROOT_PACKAGE: &str = "root";
+
 /// The RootProvider acts wraps the GitProvider sucht that the meta package `root` can
 /// be injected to the package index.
 /// The goal is to resolve the meta-package root which contains all the dependencies
@@ -178,7 +181,7 @@ impl DependencyProvider for RootProvider {
         package: &Self::P,
         range: &Self::VS,
     ) -> Result<Option<Self::V>, Self::Err> {
-        if package == "root" {
+        if package == ROOT_PACKAGE {
             return Ok(Some(SemanticVersion::zero()));
         }
         self.git_provider.choose_version(package, range)
@@ -189,7 +192,7 @@ impl DependencyProvider for RootProvider {
         package: &Self::P,
         version: &Self::V,
     ) -> Result<Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
-        if package == "root" {
+        if package == ROOT_PACKAGE {
             Ok(Dependencies::Available(
                 dependency_list_to_hash_map(&self.dependencies).unwrap(),
             ))
