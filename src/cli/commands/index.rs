@@ -77,6 +77,7 @@ impl MagnetSubCommand for IndexArgs {
                         name: "jitlib".to_string(),
                         constraint: "<2.0.0".to_string().parse()?,
                     }],
+                    preferred: Default::default(),
                 };
                 match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
                     Ok(dependencies) => {

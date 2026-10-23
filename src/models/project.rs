@@ -166,9 +166,17 @@ impl Project {
         provider: &GitClient,
         dependencies: Vec<GitDependency>,
     ) -> anyhow::Result<HashMap<String, SemanticVersion>> {
+        // keep the locked versions where possible, so only the necessary changes are made
+        let preferred = self
+            .lock_file
+            .dependencies
+            .iter()
+            .map(|(name, dependency)| (name.clone(), dependency.version))
+            .collect();
         let tree = resolve_dependencies(&RootProvider {
             git_provider: provider,
             dependencies,
+            preferred,
         })?;
         trace!(?tree, "Resolved dependencies");
         Ok(tree.into_iter().collect())
@@ -403,6 +411,34 @@ beta = "^1"
         );
         let lock = fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap();
         assert!(lock.contains("checksums = { any-any = \"sha-alpha-1.1.0\" }"));
+    }
+
+    #[test]
+    fn test_add_dependency_keeps_locked_versions() {
+        let (dir, _) = project(MANIFEST);
+        let index = fixture_index();
+        let tree = HashMap::from([("beta".to_string(), SemanticVersion::new(1, 0, 0))]);
+        LockFile::from_tree(index.url().clone(), &tree, |name, version| {
+            Ok(LockDependency::from(
+                &index.get_release(name, version)?.unwrap(),
+            ))
+        })
+        .unwrap()
+        .write(&dir.path().join(MAGNET_LOCK_FILE))
+        .unwrap();
+
+        let mut project = Project::open(dir.path()).unwrap();
+        project
+            .add_dependency(&index, "alpha".into(), None)
+            .unwrap();
+        // beta 1.2.0 would be newer, but beta 1.0.0 satisfies alpha as well
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("alpha".to_string(), "1.1.0".to_string()),
+                ("beta".to_string(), "1.0.0".to_string()),
+            ]
+        );
     }
 
     #[test]

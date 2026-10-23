@@ -4,7 +4,7 @@ use pubgrub::{
     Ranges, Reporter, SelectedDependencies, SemanticVersion,
 };
 use semver::VersionReq;
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 use tracing::error;
 
 use crate::git_client::{client::GitClient, models::GitDependency};
@@ -169,6 +169,9 @@ pub const ROOT_PACKAGE: &str = "root";
 pub struct RootProvider<'a> {
     pub git_provider: &'a GitClient,
     pub dependencies: Vec<GitDependency>,
+    /// versions which are chosen if they satisfy the requirements, e.g. those of the lock
+    /// file, so a resolve only changes what it must. Keyed by the normalized name.
+    pub preferred: HashMap<String, SemanticVersion>,
 }
 
 impl DependencyProvider for RootProvider<'_> {
@@ -198,6 +201,13 @@ impl DependencyProvider for RootProvider<'_> {
     ) -> Result<Option<Self::V>, Self::Err> {
         if package == ROOT_PACKAGE {
             return Ok(Some(SemanticVersion::zero()));
+        }
+        // a preferred version may also be yanked, as yanking must not break existing lock files
+        if let Some(version) = self.preferred.get(package) {
+            if range.contains(version) && self.git_provider.get_release(package, version)?.is_some()
+            {
+                return Ok(Some(*version));
+            }
         }
         self.git_provider.choose_version(package, range)
     }
@@ -251,6 +261,13 @@ mod tests {
     use std::path::PathBuf;
 
     fn resolve_fixture(dependencies: &[(&str, &str)]) -> anyhow::Result<Vec<(String, String)>> {
+        resolve_fixture_preferred(dependencies, &[])
+    }
+
+    fn resolve_fixture_preferred(
+        dependencies: &[(&str, &str)],
+        preferred: &[(&str, &str)],
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let index = GitClient::open_local(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
         )?;
@@ -262,6 +279,10 @@ mod tests {
                     name: name.to_string(),
                     constraint: constraint.parse().unwrap(),
                 })
+                .collect(),
+            preferred: preferred
+                .iter()
+                .map(|(name, version)| (name.to_string(), version.parse().unwrap()))
                 .collect(),
         };
         let mut selected: Vec<(String, String)> = resolve_dependencies(&provider)?
@@ -278,6 +299,39 @@ mod tests {
             .iter()
             .map(|(name, version)| (name.to_string(), version.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn test_resolve_prefers_locked_versions() {
+        // beta 1.0.0 is kept, although alpha 1.1.0 would also allow beta 1.2.0
+        assert_eq!(
+            resolve_fixture_preferred(&[("alpha", "^1.0.0")], &[("beta", "1.0.0")]).unwrap(),
+            pairs(&[("alpha", "1.1.0"), ("beta", "1.0.0")])
+        );
+    }
+
+    #[test]
+    fn test_resolve_preferred_yanked_version() {
+        // alpha 2.0.0 is yanked, but already locked
+        let selected = resolve_fixture_preferred(&[("alpha", "*")], &[("alpha", "2.0.0")]).unwrap();
+        assert!(selected.contains(&("alpha".to_string(), "2.0.0".to_string())));
+    }
+
+    #[test]
+    fn test_resolve_ignores_unsuitable_preferred_versions() {
+        // out of range, and missing in the index
+        assert_eq!(
+            resolve_fixture_preferred(
+                &[("alpha", "^1.1.0"), ("ddw-common", "*")],
+                &[("alpha", "1.0.0"), ("ddw-common", "0.9.0")]
+            )
+            .unwrap(),
+            pairs(&[
+                ("alpha", "1.1.0"),
+                ("beta", "1.2.0"),
+                ("ddw-common", "0.1.0")
+            ])
+        );
     }
 
     #[test]
