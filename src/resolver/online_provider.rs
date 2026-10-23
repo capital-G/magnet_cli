@@ -4,6 +4,7 @@ use std::convert::Infallible;
 use tracing::error;
 
 use crate::git_client::{client::GitClient, models::GitDependency};
+use crate::models::project_manifest::MagnetManifestV1;
 
 pub trait ToRanges {
     fn to_ranges(&self) -> Ranges<SemanticVersion>;
@@ -61,7 +62,13 @@ fn dependency_list_to_hash_map(
 ) -> anyhow::Result<DependencyConstraints<String, Ranges<SemanticVersion>>> {
     let map = dependencies
         .iter()
-        .map(|d| (d.name.clone(), d.constraint.to_ranges()))
+        // normalized, so differently spelled references resolve to the same package
+        .map(|d| {
+            (
+                MagnetManifestV1::normalize_name(&d.name),
+                d.constraint.to_ranges(),
+            )
+        })
         .collect();
     Ok(map)
 }

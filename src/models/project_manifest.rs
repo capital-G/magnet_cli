@@ -219,6 +219,13 @@ impl MagnetManifestV1 {
         re.is_match(name)
     }
 
+    /// The canonical form of a package name, used for index lookups and lock entries,
+    /// i.e. `DDW_Common` and `ddw-common` refer to the same package.
+    /// This is in place in order to avoid typo squatting.
+    pub fn normalize_name(name: &str) -> String {
+        name.to_lowercase().replace('_', "-")
+    }
+
     fn from_string(content: &str) -> anyhow::Result<Self> {
         let value = toml::from_str(content);
         match value {
@@ -334,6 +341,18 @@ baz = {}
         for name in ["foo@bar", "42hello", "_hello"] {
             assert!(!MagnetManifestV1::is_valid_name(name))
         }
+    }
+
+    #[test]
+    fn test_normalize_name() {
+        let normalized = MagnetManifestV1::normalize_name("ddwCommon");
+        assert_eq!(normalized, "ddwcommon");
+        assert_eq!(normalized, MagnetManifestV1::normalize_name("ddwcommon"));
+
+        let normalized = MagnetManifestV1::normalize_name("ddw_common");
+        assert_eq!(normalized, "ddw-common");
+        assert_eq!(normalized, MagnetManifestV1::normalize_name("DDW-common"));
+        assert_eq!(normalized, MagnetManifestV1::normalize_name("DDW_Common"));
     }
 
     #[test]

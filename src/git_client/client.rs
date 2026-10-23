@@ -6,6 +6,7 @@ use tracing::{info, instrument, trace};
 use url::Url;
 
 use crate::git_client::models::GitRelease;
+use crate::models::project_manifest::MagnetManifestV1;
 
 pub struct GitClient {
     url: Url,
@@ -62,13 +63,14 @@ impl GitClient {
 
     #[instrument(skip(self), fields(release_path=tracing::field::Empty))]
     pub fn get_releases(&self, name: &String) -> anyhow::Result<Option<Vec<GitRelease>>> {
+        let name = MagnetManifestV1::normalize_name(name);
         let release_path = self
             .local_destination
             .join(
                 name.get(0..1)
                     .with_context(|| "A dependency name must have at least two characters")?,
             )
-            .join(name);
+            .join(&name);
 
         tracing::Span::current().record("release_path", release_path.to_str());
 

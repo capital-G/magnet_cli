@@ -7,6 +7,7 @@ use serde_json::to_writer_pretty;
 use tracing::{error, instrument, trace};
 
 use crate::git_client::models::LockDependency;
+use crate::models::project_manifest::MagnetManifestV1;
 
 #[derive(Serialize, Deserialize)]
 pub struct LockFile {
@@ -43,7 +44,7 @@ impl LockFile {
         let dependencies: Vec<LockDependency> = full_tree
             .iter()
             .map(|(name, version)| LockDependency {
-                name: name.to_string(),
+                name: MagnetManifestV1::normalize_name(name),
                 version: *version,
             })
             .collect();
