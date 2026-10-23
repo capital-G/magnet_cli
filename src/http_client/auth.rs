@@ -1,5 +1,4 @@
 use std::{
-    env::home_dir,
     fmt::Debug,
     fs::{self, File},
     io::{self, ErrorKind, Read, Write},
@@ -16,7 +15,7 @@ use tracing::{debug, error, instrument, trace};
 use url::Url;
 
 use crate::{
-    config::constants::{CONFIG_PATH, OAUTH_APP_PUBLIC_KEY, OAUTH_TOKEN_FILE_NAME},
+    config::constants::{magnet_home, OAUTH_APP_PUBLIC_KEY, OAUTH_TOKEN_FILE_NAME},
     http_client::basic::{MagnetClient, NoAuth, OAuthToken},
 };
 
@@ -66,8 +65,7 @@ impl OAuthToken {
 
     /// Gets default path of local token
     pub fn local_token_path() -> anyhow::Result<PathBuf> {
-        let home_path = home_dir().with_context(|| "OS is missing home directory!")?;
-        Ok(home_path.join(CONFIG_PATH).join(OAUTH_TOKEN_FILE_NAME))
+        Ok(magnet_home()?.join(OAUTH_TOKEN_FILE_NAME))
     }
 
     #[instrument]

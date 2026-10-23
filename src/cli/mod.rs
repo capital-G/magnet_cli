@@ -4,12 +4,11 @@ mod logging;
 use crate::cli::commands::project::{ProjectAddDependencyArgs, ProjectBundleArgs, ProjectInitArgs};
 use clap::{Parser, Subcommand};
 use magnet::{
+    config::constants::{magnet_home, INDEX_DIR},
     git_client::client::GitClient,
     http_client::basic::{MagnetClient, NoAuth},
 };
 use url::Url;
-
-use std::env;
 
 pub trait MagnetSubCommand {
     async fn run(self, ctx: &CliContext) -> anyhow::Result<()>;
@@ -71,7 +70,7 @@ impl CliContext {
     pub fn git_client(&self) -> anyhow::Result<GitClient> {
         GitClient::new(
             self.global_args.git_index_url.clone(),
-            env::home_dir().unwrap().join(".magnet").join("index"),
+            magnet_home()?.join(INDEX_DIR),
         )
     }
     pub fn http_client(&self) -> MagnetClient<NoAuth> {
