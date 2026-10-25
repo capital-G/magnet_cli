@@ -1,6 +1,7 @@
 mod commands;
 mod logging;
 
+use crate::cli::commands::auth::{LoginArgs, LogoutArgs};
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
     ProjectRemoveDependencyArgs, ProjectRunArgs,
@@ -8,10 +9,14 @@ use crate::cli::commands::project::{
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use magnet::{
-    config::constants::{magnet_home, INDEX_DIR},
+    config::constants::{magnet_home, INDEX_DIR, MAGNET_TOKEN_ENV},
     git_client::client::GitClient,
-    http_client::basic::{MagnetClient, NoAuth},
+    http_client::{
+        auth::credentials_path,
+        basic::{AuthToken, MagnetClient, NoAuth},
+    },
 };
+use std::path::PathBuf;
 use url::Url;
 
 pub trait MagnetSubCommand {
@@ -30,15 +35,6 @@ struct Cli {
 
 #[derive(Debug, Parser)]
 struct GlobalArgs {
-    /// URL of the Index
-    #[arg(
-        long,
-        env = "MAGNET_INDEX_URL",
-        default_value = "http://127.0.0.1:8000",
-        help = "Package index to use"
-    )]
-    pub index_url: Url,
-
     // @todo add the official index as default once it exists
     #[arg(long, env = "MAGNET_GIT_INDEX_URL", help = "Package git index to use")]
     pub git_index_url: Option<Url>,
@@ -50,6 +46,10 @@ struct GlobalArgs {
         help = "Static HTTP mirror of the index"
     )]
     pub http_index_url: Option<Url>,
+
+    /// replaces the `api` announced by the index, e.g. for a local test server
+    #[arg(long, env = "MAGNET_API_URL", help = "URL of the magnet server")]
+    pub api_url: Option<Url>,
 
     // @todo make magnet config path configurable
     /// Increase verbosity level of log
@@ -75,6 +75,10 @@ enum Commands {
     Run(ProjectRunArgs),
     /// Packages the current magnet project into `dist/` for publishing
     Package(ProjectPackageArgs),
+    /// Logs in to the magnet server of the index
+    Login(LoginArgs),
+    /// Logs out of the magnet server of the index
+    Logout(LogoutArgs),
 }
 
 pub struct CliContext {
@@ -93,8 +97,33 @@ impl CliContext {
         Ok(GitClient::new(url, local_destination)?
             .with_http_url(self.global_args.http_index_url.clone()))
     }
-    pub fn http_client(&self) -> MagnetClient<NoAuth> {
-        MagnetClient::<NoAuth>::new(self.global_args.index_url.clone())
+
+    /// The magnet server: `--api-url`, otherwise the `api` of the index's `config.json`
+    pub fn api_url(&self) -> anyhow::Result<Url> {
+        if let Some(url) = &self.global_args.api_url {
+            return Ok(url.clone());
+        }
+        self.git_client()?.config()?.api.context(
+            "The index names no magnet server (`api` in config.json), set MAGNET_API_URL or pass --api-url",
+        )
+    }
+
+    pub fn http_client(&self) -> anyhow::Result<MagnetClient<NoAuth>> {
+        Ok(MagnetClient::<NoAuth>::new(self.api_url()?))
+    }
+
+    /// Where the login to the magnet server is stored
+    pub fn credentials_path(&self, client: &MagnetClient<NoAuth>) -> anyhow::Result<PathBuf> {
+        Ok(credentials_path(&magnet_home()?, &client.base_url))
+    }
+
+    /// A client which is logged in via `MAGNET_TOKEN` or `magnet login`
+    pub async fn authenticated_client(&self) -> anyhow::Result<MagnetClient<AuthToken>> {
+        let client = self.http_client()?;
+        let path = self.credentials_path(&client)?;
+        client
+            .authenticate(std::env::var(MAGNET_TOKEN_ENV).ok(), &path)
+            .await
     }
 }
 
@@ -118,5 +147,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,
         Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
+        Commands::Login(login_args) => login_args.run(&cli_context).await,
+        Commands::Logout(logout_args) => logout_args.run(&cli_context).await,
     }
 }

@@ -25,6 +25,9 @@ pub struct GitIndexConfig {
     /// base URL of the static HTTP mirror of this index, for clients without git
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<Url>,
+    /// URL of the magnet server of this index, used to log in and publish
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<Url>,
 }
 
 /// abi and platform are kept as plain strings, so an index line which

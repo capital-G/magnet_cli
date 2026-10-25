@@ -1,59 +1,59 @@
-use clap::{command, Parser, Subcommand};
-use magnet::http_client::basic::OAuthToken;
-use tracing::{error, info};
+use clap::Parser;
+use magnet::{
+    config::constants::MAGNET_TOKEN_ENV,
+    http_client::basic::{AuthToken, OAuthToken},
+};
+use tracing::{info, warn};
 
 use crate::cli::{CliContext, MagnetSubCommand};
 
+/// Logs in to the magnet server of the index via OAuth2
 #[derive(Parser, Debug)]
-#[command(name = "auth", about = "Authentication on Magnet Package Index Server")]
-pub struct AuthArgs {
-    #[command(subcommand)]
-    command: AuthCommand,
-}
+pub struct LoginArgs {}
 
-#[derive(Subcommand, Debug)]
-pub enum AuthCommand {
-    /// Login to the package index using OAuth2
-    Login,
-    /// Logout of the package index by removing local OAuth2 token
-    Logout,
-}
+/// Logs out of the magnet server of the index by revoking the stored login
+#[derive(Parser, Debug)]
+pub struct LogoutArgs {}
 
-impl MagnetSubCommand for AuthArgs {
+impl MagnetSubCommand for LoginArgs {
     async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
-        match self.command {
-            AuthCommand::Login => match OAuthToken::local_token_path()?.exists() {
-                true => {
-                    info!("Already authenticated");
-                    Ok(())
-                }
-                false => match cli_context
-                    .http_client()
-                    .authenticate(&OAuthToken::local_token_path()?)
-                    .await
-                {
-                    Ok(_) => {
-                        info!("Successfully authenticated");
-                        anyhow::Ok(())
-                    }
-                    Err(err) => {
-                        error!("Could not authenticate: {err:?}");
-                        Err(err)
-                    }
-                },
-            },
-            AuthCommand::Logout => match OAuthToken::delete_token(&OAuthToken::local_token_path()?)
-            {
-                Ok(actually_deleted) => {
-                    if actually_deleted {
-                        info!("Logged out");
-                    } else {
-                        info!("Could not find existing auth token file - already logged out");
-                    }
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            },
+        if std::env::var_os(MAGNET_TOKEN_ENV).is_some() {
+            warn!("{MAGNET_TOKEN_ENV} is set and takes precedence over this login");
         }
+        let client = cli_context.http_client()?;
+        let path = cli_context.credentials_path(&client)?;
+        // a stored login is reused, and refreshed if it is expired
+        if OAuthToken::load(&path).is_some() {
+            match client.authenticate(None, &path).await {
+                Ok(_) => {
+                    info!("Already logged in to {}", client.base_url);
+                    return Ok(());
+                }
+                Err(err) => warn!("{err:#}"),
+            }
+        }
+        client.login(&path).await?;
+        info!("Logged in to {}", client.base_url);
+        Ok(())
+    }
+}
+
+impl MagnetSubCommand for LogoutArgs {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
+        let client = cli_context.http_client()?;
+        let path = cli_context.credentials_path(&client)?;
+        let Some(token) = OAuthToken::load(&path) else {
+            info!("Not logged in to {}", client.base_url);
+            return Ok(());
+        };
+        client
+            .with_state(AuthToken::Login { token, path })
+            .logout()
+            .await?;
+        info!("Logged out of {}", client.base_url);
+        if std::env::var_os(MAGNET_TOKEN_ENV).is_some() {
+            warn!("{MAGNET_TOKEN_ENV} is still set and gets used instead of a login");
+        }
+        Ok(())
     }
 }

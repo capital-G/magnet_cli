@@ -1,7 +1,7 @@
 use tracing::trace;
 use url::Url;
 
-use crate::http_client::basic::{MagnetClient, OAuthToken};
+use crate::http_client::basic::{AuthToken, MagnetClient};
 
 pub trait TokenRefresh {
     fn with_auto_refresh<T, F, Fut>(
@@ -24,14 +24,14 @@ pub fn is_auth_error(err: &anyhow::Error) -> bool {
     false
 }
 
-impl TokenRefresh for MagnetClient<OAuthToken> {
+impl TokenRefresh for MagnetClient<AuthToken> {
     async fn with_auto_refresh<T, F, Fut>(&mut self, request_fn: F) -> anyhow::Result<T>
     where
         F: Fn(&reqwest::Client, &Url, &str) -> Fut + Send,
         Fut: std::future::Future<Output = anyhow::Result<T>> + Send,
         T: Send,
     {
-        let token = &self.state.access_token;
+        let token = self.state.access_token();
 
         match request_fn(&self.client, &self.base_url, token).await {
             Ok(res) => Ok(res),
@@ -39,7 +39,7 @@ impl TokenRefresh for MagnetClient<OAuthToken> {
                 trace!("Token got invalid - try to obtain a new one");
 
                 self.refresh_token().await?;
-                let new_token = &self.state.access_token;
+                let new_token = self.state.access_token();
                 request_fn(&self.client, &self.base_url, new_token).await
             }
             Err(err) => Err(err),

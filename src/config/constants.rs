@@ -16,7 +16,10 @@ pub const MAGNET_LOCK_FILE: &str = "magnet.lock";
 
 // client config
 pub const OAUTH_APP_PUBLIC_KEY: &str = "8bMJG5cTIk5gdINwQWbYHb0NAflBSr6dw57mANDn";
-pub const OAUTH_TOKEN_FILE_NAME: &str = ".token.json";
+/// login tokens within the magnet home directory, one file per API URL
+pub const CREDENTIALS_DIR: &str = "credentials";
+/// a token (e.g. for CI) which takes precedence over `magnet login`
+pub const MAGNET_TOKEN_ENV: &str = "MAGNET_TOKEN";
 
 pub const CLIENT_NAME: &str = "magnet_cli";
 

@@ -1,7 +1,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::http_client::{
-    basic::{NoAuth, OAuthToken},
+    basic::{AuthToken, NoAuth},
     models::{MagnetServerVersion, Project, ProjectDetail as ApiProjectDetail},
 };
 
@@ -9,8 +9,8 @@ pub trait NoAuthNecessary {}
 pub trait AuthNecessary: NoAuthNecessary {}
 
 impl NoAuthNecessary for NoAuth {}
-impl NoAuthNecessary for OAuthToken {}
-impl AuthNecessary for OAuthToken {}
+impl NoAuthNecessary for AuthToken {}
+impl AuthNecessary for AuthToken {}
 
 pub trait Endpoint {
     type Response: DeserializeOwned + Send + 'static;
