@@ -22,6 +22,18 @@ pub struct Artifact {
     pub sha256: String,
 }
 
+/// An artifact which got deleted from the index
+#[derive(Debug)]
+struct Deleted;
+
+impl std::fmt::Display for Deleted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "The artifact was deleted")
+    }
+}
+
+impl std::error::Error for Deleted {}
+
 /// Downloads artifacts into a cache directory and verifies their checksums.
 /// Files which are already in the cache are not downloaded again.
 pub struct PackageDownloader {
@@ -108,10 +120,16 @@ impl PackageDownloader {
         // download next to the final location, so a partial download never ends up in the cache
         let temp_file = tempfile::NamedTempFile::new_in(&self.cache_dir)?;
         let url = self.artifact_url(artifact)?;
-        let sha256 = self
-            .fetch(&url, temp_file.path(), progress_bar)
-            .await
-            .with_context(|| format!("Could not download {url}"))?;
+        let sha256 = match self.fetch(&url, temp_file.path(), progress_bar).await {
+            Ok(sha256) => sha256,
+            Err(err) if err.is::<Deleted>() => bail!(
+                "{} {} was deleted from the index ({url} answers 410 Gone). Run `magnet update {}` to resolve it again",
+                artifact.name,
+                artifact.version,
+                artifact.name
+            ),
+            Err(err) => return Err(err.context(format!("Could not download {url}"))),
+        };
         ensure!(
             sha256 == artifact.sha256.to_lowercase(),
             "Checksum mismatch for {} {} from {url}: expected {}, got {sha256}",
@@ -155,12 +173,12 @@ impl PackageDownloader {
                 progress_bar.inc(read as u64);
             }
         } else {
-            let response = self
-                .client
-                .get(url.clone())
-                .send()
-                .await?
-                .error_for_status()?;
+            let response = self.client.get(url.clone()).send().await?;
+            // the server answers deleted artifacts with 410 (DESIGN.md "Deletion")
+            if response.status() == reqwest::StatusCode::GONE {
+                return Err(Deleted.into());
+            }
+            let response = response.error_for_status()?;
             if let Some(length) = response.content_length() {
                 progress_bar.set_length(length);
             }
@@ -392,6 +410,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"served via http");
+    }
+
+    #[tokio::test]
+    async fn test_http_gone() {
+        let template = http_server("410 Gone", b"").await;
+        let cache = tempfile::tempdir().unwrap();
+        let downloader = PackageDownloader::new(cache.path().to_path_buf(), template);
+        let err = downloader
+            .download(&artifact("foo", b"foo"), &ProgressBar::hidden())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("deleted") && err.contains("magnet update foo"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ mod logging;
 use crate::cli::commands::auth::{LoginArgs, LogoutArgs};
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
-    ProjectRemoveDependencyArgs, ProjectRunArgs,
+    ProjectRemoveDependencyArgs, ProjectRunArgs, ProjectUpdateArgs,
 };
 use crate::cli::commands::publish::PublishArgs;
 use crate::cli::commands::server_info::ServerInfoArgs;
@@ -73,6 +73,8 @@ enum Commands {
     Remove(ProjectRemoveDependencyArgs),
     /// Installs the dependencies of the current magnet project into `external`
     Install(ProjectInstallArgs),
+    /// Moves locked dependencies to the newest versions their requirements allow
+    Update(ProjectUpdateArgs),
     /// Runs an entrypoint of the current magnet project
     Run(ProjectRunArgs),
     /// Packages the current magnet project into `dist/` for publishing
@@ -151,6 +153,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
             project_remove_dependency_args.run(&cli_context).await
         }
         Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
+        Commands::Update(project_update_args) => project_update_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,
         Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
         Commands::Publish(publish_args) => publish_args.run(&cli_context).await,

@@ -208,6 +208,45 @@ impl MagnetSubCommand for ProjectRemoveDependencyArgs {
     }
 }
 
+/// Moves locked dependencies to the newest versions their requirements allow
+#[derive(Debug, Parser)]
+pub struct ProjectUpdateArgs {
+    /// Path of the project.
+    /// If not provided, the current working directory is used.
+    #[arg(
+        long,
+        default_value = None,
+    )]
+    path: Option<PathBuf>,
+
+    /// Packages to update, all if none are given
+    names: Vec<String>,
+}
+
+impl MagnetSubCommand for ProjectUpdateArgs {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
+        let project_path = match self.path {
+            Some(path) => path,
+            None => env::current_dir()?,
+        };
+        let mut project = Project::open(&project_path)?;
+        let changes = project.update(&cli_context.git_client()?, &self.names)?;
+        if changes.is_empty() {
+            println!("All dependencies are up to date");
+            return Ok(());
+        }
+        let version = |version: Option<SemanticVersion>| match version {
+            Some(version) => version.to_string(),
+            None => "-".to_string(),
+        };
+        for (name, old, new) in changes {
+            println!("{name} {} -> {}", version(old), version(new));
+        }
+        println!("Run `magnet install` to install the new versions");
+        Ok(())
+    }
+}
+
 /// Installs the locked dependencies of the current magnet project
 #[derive(Debug, Parser)]
 pub struct ProjectInstallArgs {

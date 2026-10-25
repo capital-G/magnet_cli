@@ -370,10 +370,21 @@ impl Project {
         dependencies: Vec<GitDependency>,
     ) -> anyhow::Result<HashMap<String, SemanticVersion>> {
         // keep the locked versions where possible, so only the necessary changes are made
+        self.resolve_preferring(provider, dependencies, |_| true)
+    }
+
+    /// Like [Self::resolve], but only prefers the locked versions of the packages `keep` accepts
+    fn resolve_preferring(
+        &self,
+        provider: &GitClient,
+        dependencies: Vec<GitDependency>,
+        keep: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<HashMap<String, SemanticVersion>> {
         let preferred = self
             .lock_file
             .iter()
             .flat_map(|lock_file| &lock_file.dependencies)
+            .filter(|(name, _)| keep(name))
             .map(|(name, dependency)| (name.clone(), dependency.version))
             .collect();
         let tree: HashMap<String, SemanticVersion> = resolve_dependencies(&RootProvider {
@@ -448,6 +459,96 @@ impl Project {
         Ok(())
     }
 
+    /// Resolves the dependencies again without the locked versions of `names` (in any spelling),
+    /// or of all packages if `names` is empty, so they move to the newest versions the
+    /// requirements allow. Writes the lock file, but installs nothing. Returns the changes as
+    /// `(name, locked version, new version)`, sorted by name.
+    pub fn update(
+        &mut self,
+        provider: &GitClient,
+        names: &[String],
+    ) -> anyhow::Result<Vec<(String, Option<SemanticVersion>, Option<SemanticVersion>)>> {
+        let names: HashSet<String> = names
+            .iter()
+            .map(|name| MagnetManifestV1::normalize_name(name))
+            .collect();
+        let locked: BTreeMap<String, SemanticVersion> = self
+            .lock_file
+            .iter()
+            .flat_map(|lock_file| &lock_file.dependencies)
+            .map(|(name, dependency)| (name.clone(), dependency.version))
+            .collect();
+        let mut unknown: Vec<&str> = names
+            .iter()
+            .map(|name| name.as_str())
+            .filter(|name| !locked.contains_key(*name))
+            .collect();
+        unknown.sort();
+        ensure!(
+            unknown.is_empty(),
+            "Not in {MAGNET_LOCK_FILE}: {}",
+            unknown.join(", ")
+        );
+
+        let tree = self.resolve_preferring(provider, self.manifest_dependencies()?, |name| {
+            !names.is_empty() && !names.contains(name)
+        })?;
+        self.write_lock(provider, &tree)?;
+        self.write_language_config()?;
+
+        let updated: BTreeMap<String, SemanticVersion> = self
+            .lock_file
+            .iter()
+            .flat_map(|lock_file| &lock_file.dependencies)
+            .map(|(name, dependency)| (name.clone(), dependency.version))
+            .collect();
+        let all: std::collections::BTreeSet<&String> =
+            locked.keys().chain(updated.keys()).collect();
+        Ok(all
+            .into_iter()
+            .filter_map(|name| {
+                let (old, new) = (locked.get(name).copied(), updated.get(name).copied());
+                (old != new).then(|| (name.clone(), old, new))
+            })
+            .collect())
+    }
+
+    /// Warns about yanked locked versions, which still get installed, and fails for locked
+    /// versions which are not in the index anymore (DESIGN.md "Deletion")
+    fn check_locked_versions(
+        &self,
+        provider: &GitClient,
+        lock_file: &LockFile,
+    ) -> anyhow::Result<()> {
+        let mut missing = vec![];
+        for (name, dependency) in &lock_file.dependencies {
+            if dependency.source != LockSource::Index {
+                continue;
+            }
+            match provider.get_release(name, &dependency.version)? {
+                Some(release) if release.yanked => warn!(
+                    "{name} {} is yanked, it gets installed since it is locked. Run `magnet update {name}` to move to another version",
+                    dependency.version
+                ),
+                Some(_) => {}
+                None => missing.push((name.as_str(), dependency.version)),
+            }
+        }
+        if !missing.is_empty() {
+            let versions: Vec<String> = missing
+                .iter()
+                .map(|(name, version)| format!("{name} {version}"))
+                .collect();
+            let names: Vec<&str> = missing.iter().map(|(name, _)| *name).collect();
+            bail!(
+                "Not in the index anymore: {}. They were deleted, or the local copy of the index is outdated. Run `magnet update {}` to resolve them again",
+                versions.join(", "),
+                names.join(" ")
+            );
+        }
+        Ok(())
+    }
+
     /// Writes the lock file for a resolved tree, using the details of each release from the index
     fn write_lock(
         &mut self,
@@ -513,6 +614,7 @@ impl Project {
             .lock_file
             .as_ref()
             .context("A lock file should exist after resolving")?;
+        self.check_locked_versions(provider, lock_file)?;
 
         let artifacts = lock_file
             .dependencies
@@ -1505,5 +1607,117 @@ beta = "^1"
             .create_package(&ArtifactTags::new("api3", "macos_arm64").unwrap())
             .unwrap_err();
         assert!(err.to_string().contains("plugins/Foo.scx"), "{err}");
+    }
+    const ALPHA_BETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\nalpha = \"^1\"\nbeta = \"^1\"\n";
+
+    fn version(version: &str) -> Option<SemanticVersion> {
+        Some(version.parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_install_keeps_yanked_locked_version() {
+        let (dir, _) = project("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\nalpha = \"*\"\n");
+        // alpha 2.0.0 is yanked
+        write_lock_file(
+            &dir,
+            &[
+                ("alpha", "2.0.0"),
+                ("beta", "1.2.0"),
+                ("ddw-common", "0.1.0"),
+            ],
+        );
+        install(&dir).await.unwrap();
+        assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);
+        let alpha =
+            fs::read_to_string(dir.path().join("external/quarks/alpha/Classes/Alpha.sc")).unwrap();
+        assert!(alpha.contains("2.0.0"), "{alpha}");
+    }
+
+    #[tokio::test]
+    async fn test_install_refuses_deleted_locked_version() {
+        let (dir, _) = project(MANIFEST);
+        write_lock_file(&dir, &[("beta", "1.2.0"), ("ddw-common", "0.1.0")]);
+        // ddw-common 0.9.0 is not in the index
+        let lock = read_lock(&dir).replace("version = \"0.1.0\"", "version = \"0.9.0\"");
+        fs::write(dir.path().join(MAGNET_LOCK_FILE), lock).unwrap();
+
+        let err = install(&dir).await.err().unwrap().to_string();
+        assert!(err.contains("ddw-common 0.9.0"), "{err}");
+        assert!(err.contains("magnet update ddw-common"), "{err}");
+        assert!(!dir.path().join("external").exists());
+
+        // updating resolves it again
+        let mut project = Project::open(dir.path()).unwrap();
+        let changes = project
+            .update(&fixture_index(), &["DDW_Common".to_string()])
+            .unwrap();
+        assert_eq!(
+            changes,
+            [("ddw-common".to_string(), version("0.9.0"), version("0.1.0"))]
+        );
+    }
+
+    #[test]
+    fn test_update_single_package() {
+        let (dir, _) = project(ALPHA_BETA);
+        write_lock_file(&dir, &[("alpha", "1.0.0"), ("beta", "1.0.0")]);
+        let mut project = Project::open(dir.path()).unwrap();
+
+        let changes = project
+            .update(&fixture_index(), &["Beta".to_string()])
+            .unwrap();
+        // alpha 1.1.0 would be newer, but only beta (and its new dependency) changes
+        assert_eq!(
+            changes,
+            [
+                ("beta".to_string(), version("1.0.0"), version("1.2.0")),
+                ("ddw-common".to_string(), None, version("0.1.0")),
+            ]
+        );
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("alpha".to_string(), "1.0.0".to_string()),
+                ("beta".to_string(), "1.2.0".to_string()),
+                ("ddw-common".to_string(), "0.1.0".to_string()),
+            ]
+        );
+        assert!(project
+            .update(&fixture_index(), &["beta".to_string()])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_update_all_packages() {
+        let (dir, _) = project(ALPHA_BETA);
+        write_lock_file(&dir, &[("alpha", "1.0.0"), ("beta", "1.0.0")]);
+        let mut project = Project::open(dir.path()).unwrap();
+
+        project.update(&fixture_index(), &[]).unwrap();
+        // alpha 2.0.0 is yanked and out of range
+        assert_eq!(
+            locked_versions(&project),
+            [
+                ("alpha".to_string(), "1.1.0".to_string()),
+                ("beta".to_string(), "1.2.0".to_string()),
+                ("ddw-common".to_string(), "0.1.0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_update_unknown_package() {
+        let (dir, _) = project(ALPHA_BETA);
+        write_lock_file(&dir, &[("alpha", "1.0.0"), ("beta", "1.0.0")]);
+        let mut project = Project::open(dir.path()).unwrap();
+        let err = project
+            .update(
+                &fixture_index(),
+                &["gamma".to_string(), "delta".to_string()],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("delta, gamma"), "{err}");
     }
 }
