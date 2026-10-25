@@ -129,7 +129,8 @@ name = "magnet-test"
 version = "0.1.0"
 # can either be quark or lepton (a server plugin)
 kind = "quark"
-min-sclang-version="3.13.0"
+# supported versions of SuperCollider
+sclang = ">=3.13"
 
 [[entrypoint]]
 name = "hello"
@@ -202,6 +203,21 @@ Written | Comment
 
 Pre-releases are not supported yet.
 
+#### SuperCollider version
+
+The `sclang` entry of `[package]` states which versions of SuperCollider a package works with, using the version ranges from above, e.g. `sclang = ">=3.13"`.
+This applies to every kind of package, since leptons and gluons also ship `.sc` classes.
+
+While resolving, a version of a dependency is only chosen if its `sclang` range allows the lower bound of the project's `sclang` range, so the lock file holds for the whole range of the project, like it holds across platforms.
+Older versions of a dependency are tried if a newer one requires a more recent SuperCollider.
+Like [uv](https://docs.astral.sh/uv/) does for `requires-python`, upper bounds of dependencies are ignored, since defensive caps would block the resolution, so packages should only declare a lower bound.
+An upper bound only counts on the root project.
+
+If the project declares no `sclang` range, the dependencies are resolved without it and magnet warns if a locked package requires a newer version than the sclang found on the system.
+`magnet init` writes `>=<major>.<minor>` of the found sclang.
+
+The SuperCollider version belongs to a package version and not to its artifacts, so it is not part of the filename of an artifact (see Packaging): the resolver picks versions and the artifacts are only picked afterwards, so a tag would fail at install instead of falling back to an older compatible version.
+
 ### Lock file`magnet.lock`
 
 Magnet will also create a lock file which stores the exact version of every installed dependency.
@@ -212,8 +228,9 @@ While libraries should not publish such a file (since libraries are expected to 
 #### Example
 
 ```toml
-  lock-version = 1
+lock-version = 1
 index = "https://git.supercollider.online/magnet-index"
+index-http = "https://static.magnet.example/index"
 
 [dependencies]
 
@@ -241,6 +258,8 @@ checksums = { api3-linux_x86_64 = "abc", api3-macos_arm64 = "def", source-any = 
 ```
 
 The kind is stored in the lock file such that magnet knows the folder of each dependency within `external` without having to consult the index.
+
+`index-http` is copied from the `http` field of the index's `config.json` (if present), such that clients without git (e.g. a browser) can install from the lock file (see `magnet-index`).
 
 ##### Checksums
 
@@ -271,26 +290,47 @@ magnet package
 
 Since magnet knows via the package manifest which files make up the package, it will be put into a `.tar.gz` file and exported into the `dist` folder.
 
+The files of a package are selected by the globs of the `[artifact]` table of the manifest, relative to the project root, and not by a `.gitignore` file:
+
+* `global-paths` - files of every artifact, e.g. the `.sc` classes and `HelpSource`
+* `platform-paths` - the binaries of a lepton or gluon for a given platform
+* `source-paths` - the files of the source package of a lepton or gluon, e.g. the C++ sources and the `CMakeLists.txt`, required for these kinds
+* `exclude` - files which are never packaged, even if a glob above selects them
+
+The folders `.git`, `dist` and `external` are never packaged.
+A package keeps the relative layout of the selected files, so it mirrors the project (see Contents of package folders), since legacy quarks load resources relative to their class files and SCDoc relies on the folder structure of `HelpSource`.
+Only the binaries of `platform-paths` are moved into `plugins/`.
+A file which is selected by multiple globs of `global-paths` is only packaged once, but packaging fails if a file is selected by `global-paths` and `platform-paths`, or if a glob does not select any file, since this is probably a typo and a published artifact can never be replaced.
+
+Every artifact also contains the `magnet.toml` of the project at its root, such that the server reads the manifest from the uploaded artifact (see Publishing a package), and the readme file of `[metadata]` (if set) at its path.
+A quark has no dedicated source package, since its artifact already is the source.
+
 The naming convention for the `.tar.gz` file follows
 
 ```
-{package name}-{semantic version}-{quark/lepton}-{abi tag}-{platform tag}.tar.gz
+{name}-{version}-{kind}-{abi}-{platform}.tar.gz
 ```
+
+where `name` is the normalized package name, `kind` the kind of the package (`quark`, `lepton` or `gluon`) and `abi` and `platform` the tags of the artifact.
+These filenames are only ever built from the fields of the index (see `config.json` of `magnet-index`) and never parsed, so a `-` within a name is not a problem.
+Tags use `_` instead of `-` and are taken from a fixed list of URL-safe values.
 
 For platform-dependent binary packages, so Leptons and Gluons, magnet will guess the platform and architecture, but it is possible to specify this explicitly through CLI flags and environment variables for cross-compilation.
 The ABI tag needs to be specified, but defaults to the latest ABI version.
-Leptons and Gluons will also upload a package of the source code to the index and will consist of everything that is not excluded via a `.gitignore` file.
+Leptons and Gluons will also upload a package of the source code to the index, which consists of the files selected by `source-paths`.
 
 ```
-{package name}-{semantic version}-{quark/lepton}-source.tar.gz
+{name}-{version}-{kind}-source-any.tar.gz
 ```
 
-Since Quarks are not bound to a platform, it will follow the [Python wheels convention](https://peps.python.org/pep-0491/#file-name-convention) of using `any` for `platform tag` and the minimum supported version of sclang as abi tag, so e.g. `sclang3-10-0` which will be deduced from the `magnet.toml` file.
+Since Quarks are not bound to a platform or a binary interface, they use `any` for both tags, e.g. `foo-bar-1.2.0-quark-any-any.tar.gz`.
+The supported SuperCollider versions are not a tag but the `sclang` range of the manifest (see SuperCollider version), like Python wheels keep `Requires-Python` in their metadata.
 
-For binary packages, the abi tag depends on the convention of scsynth/supernova/sclang.
+For binary packages, the abi tag only describes the binary compatibility, i.e. the plugin API version of scsynth/supernova for leptons and the plugin ABI of sclang for gluons.
 
-* `scsynth`
-* `supernova`
+The archive is a gzip compressed tar file in the plain *ustar* format without GNU or pax extensions, such that a small reader is enough to unpack it, e.g. within a browser.
+Long paths use the `prefix` field of ustar (155 characters for the directory in addition to the 100 characters of the name), and packaging fails for longer paths.
+It only contains regular files and directories, and its entries are sorted and written with a fixed modification time, uid/gid 0 and mode 0644 (0755 for directories and executables), such that packaging the same files always results in the same archive.
 
 The platform tag is one of the following values
 
@@ -337,7 +377,7 @@ Packages which refer to packages via local paths can not be published via the in
 After the magnet package has successfully been created, it can be uploaded to the package index via the client or the website.
 
 ```bash
-magnet publish dist/mypackage-0.1.0-quark-none-any.tar.gz
+magnet publish dist/mypackage-0.1.0-quark-any-any.tar.gz
 ```
 
 The client will send the projects `magnet.toml` file to the server which will inspect if it is valid in context of the index and will, if valid, register it as a new project (if applicable) and add the new version (if applicable).
@@ -406,8 +446,10 @@ This uses the normalized name of the package as a basis, i.e. the normalized rep
 Each file while then have a one-lined JSON for each release, which covers
 
 ```json
-{"name": "foo", "version": "0.1.3", "kind": "quark", "dependencies": {"bar":  "<0.2.0"}, "yanked": false, "artifacts": [{"abi":  "any", "platform": "any", "sha256":  "abc"}]}
+{"name": "foo", "version": "0.1.3", "kind": "quark", "sclang": ">=3.13", "dependencies": {"bar":  "<0.2.0"}, "yanked": false, "artifacts": [{"abi":  "any", "platform": "any", "sha256":  "abc"}]}
 ```
+
+`sclang` is the range of the package's manifest and is omitted if the manifest has none.
 
 The kind of a package is fixed by its first published version and can not be changed afterwards, so all lines of a package share the same kind.
 If e.g. a quark later also wants to ship a server plugin, the plugin needs to be published as a dedicated lepton package on which the quark depends.
@@ -429,11 +471,12 @@ Such an entry will be inserted by the index service as a single writer on this i
 Additionally, each index needs to implement a `config.json` at the root which implements
 
 ```json
-{"index-format": 1, "dl": "<url template>"}
+{"index-format": 1, "dl": "<url template>", "http": "<base url>"}
 ```
 
 such that updates to the index can be made and also the download url can be changed in one position in case the packages need to migrate to a different URL.
-The URL template needs to be configured in such a way that each artifacts results in a unique URL.
+The URL template needs to be configured in such a way that each artifacts results in a unique and stable URL: a package has only one kind, a version has at most one artifact per abi and platform, and artifacts are never replaced.
+If the template changes, the old URLs are redirected to the new ones.
 The following pattern should be used such that people can download artifacts manually:
 
 ```
@@ -441,6 +484,10 @@ https://static.magnet.example/dl/{name}/{version}/{name}-{version}-{kind}-{abi}-
 ```
 
 where `name` is the normalized name, `version` and `kind` are used from the chosen line and `abi` and `platform` from the selected artifact.
+
+A browser can not clone a git repository, so the server also publishes the files of the index as static files (`config.json` and `<letter>/<name>.jsonl`), similar to the sparse index of Cargo.
+The optional `http` field points to the base URL of this mirror, and can be overridden via `MAGNET_HTTP_INDEX_URL` / `--http-index-url`, e.g. for a local test server.
+The git repository stays the source of truth, and if the mirror moves, its old URLs are redirected like the ones of `dl`.
 
 Beyond that, the server also provides an API to obtain more information (e.g. summary, dl-count, authors, readme, tages) about a given package and its version.
 The git index stores the bare minimum for dependency resolution and how to obtain the downloadable artifact, such that the footprint of the local git index on each device is kept to a minimum.

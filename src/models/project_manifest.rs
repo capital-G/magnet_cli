@@ -98,8 +98,8 @@ impl ProjectManifest {
         package["name"] = toml_edit::value(manifest.package.name.as_str());
         package["version"] = toml_edit::value(manifest.package.version.to_string());
         package["kind"] = toml_edit::value(manifest.package.kind.to_string());
-        if let Some(min_sclang_version) = &manifest.package.min_sclang_version {
-            package["min-sclang-version"] = toml_edit::value(min_sclang_version.to_string());
+        if let Some(sclang) = &manifest.package.sclang {
+            package["sclang"] = toml_edit::value(sclang.as_str());
         }
         package.decor_mut().set_prefix("\n");
         doc["package"] = toml_edit::Item::Table(package);
@@ -194,7 +194,7 @@ impl MagnetManifestV1 {
         description: Option<String>,
         license: Option<String>,
         version: SemanticVersion,
-        min_sclang_version: Option<SemanticVersion>,
+        sclang: Option<String>,
         project_kind: MagnetManifestV1PackageKind,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -202,12 +202,6 @@ impl MagnetManifestV1 {
             format!("{} is not a valid project name!", name)
         );
 
-        let min_sclang_version = match min_sclang_version {
-            Some(version) => Some(MagnetManifestV1PackageMinSclangVersion::from_str(
-                &version.to_string(),
-            )?),
-            None => None,
-        };
         let version = MagnetManifestV1PackageVersion::from_str(&version.to_string())?;
 
         let metadata = MagnetManifestV1Metadata {
@@ -227,8 +221,8 @@ impl MagnetManifestV1 {
             metadata: Some(metadata),
             package: MagnetManifestV1Package {
                 kind: project_kind,
-                min_sclang_version,
                 name,
+                sclang,
                 version,
             },
         })
@@ -433,7 +427,7 @@ baz = {}
                 name: "bar".to_string(),
                 version: MagnetManifestV1PackageVersion::from_str("0.1.0").unwrap(),
                 kind: MagnetManifestV1PackageKind::Quark,
-                min_sclang_version: None,
+                sclang: None,
             },
             metadata: Some(MagnetManifestV1Metadata {
                 authors: vec![],
