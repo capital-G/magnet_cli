@@ -95,8 +95,11 @@ pub struct BundleFormat<P: MagnetPackage> {
     pub platform: P::Platform,
 }
 
+/// Which archive of a package gets built, see DESIGN.md "Packaging"
 #[derive(Debug, Clone)]
 pub enum BundleType {
+    /// source package of a lepton or gluon, selected by `source-paths`
     SourceBundle,
-    ArtifactBundle(MagnetManifestV1PackageKind),
+    /// artifact selected by `global-paths` (+ `platform-paths`)
+    ArtifactBundle,
 }

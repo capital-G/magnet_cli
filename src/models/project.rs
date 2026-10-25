@@ -21,14 +21,14 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{BundleFormat, MagnetPackage, SourceBundle},
+        package::{BundleFormat, BundleType, MagnetPackage, SourceBundle},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             MagnetManifestV1PackageKind,
         },
     },
     packaging::{
-        collect::CollectFiles,
+        collect::collect_files,
         compression::{self, MagnetArchive},
         naming::PackageNaming,
     },
@@ -526,7 +526,9 @@ impl Project {
     ) -> anyhow::Result<PathBuf> {
         // create tar file outside of directory and move it later back in to avoid recursive problems
         // while scanning the project directory
-        self.create_source_package()?;
+        if self.project_manifest.get_manifest().package.kind != MagnetManifestV1PackageKind::Quark {
+            self.create_source_package()?;
+        }
 
         let temp_tar = tempfile::NamedTempFile::new()?;
         let temp_tar_path = temp_tar.path();
@@ -560,9 +562,15 @@ impl Project {
         );
         let archive_path = self.project_dir(ProjectDirectory::Dist).join(source_name);
 
-        let files = self
-            .path
-            .get_package_files(super::package::BundleType::SourceBundle)?;
+        let files: Vec<PathBuf> = collect_files(
+            &self.path,
+            self.project_manifest.get_manifest(),
+            &BundleType::SourceBundle,
+        )?
+        .files
+        .iter()
+        .map(|file| self.path.join(file))
+        .collect();
 
         self.compress(&files, &self.path, &archive_path)?;
 

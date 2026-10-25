@@ -176,6 +176,20 @@
           },
           "required": ["platform", "paths"],
           "additionalProperties": false
+        },
+        "source-paths": {
+          "type": "array",
+          "description": "Paths of the source package of a lepton or gluon, e.g. C++ sources and CMakeLists.txt - supports glob wildcards",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Paths which are never packaged, even if selected by another glob - supports glob wildcards",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

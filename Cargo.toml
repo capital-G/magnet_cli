@@ -35,6 +35,7 @@ regress = "0.10.5"
 walkdir = "2.5.0"
 toml = "1.1.2"
 toml_edit = "0.25.12"
+globset = "0.4.20"
 
 [build-dependencies]
 typify = "0.5.0"

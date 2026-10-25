@@ -241,7 +241,7 @@ impl MagnetManifestV1 {
         name.to_lowercase().replace('_', "-")
     }
 
-    fn from_string(content: &str) -> anyhow::Result<Self> {
+    pub(crate) fn from_string(content: &str) -> anyhow::Result<Self> {
         let value = toml::from_str(content);
         match value {
             Ok(project) => Ok(project),
@@ -443,6 +443,8 @@ baz = {}
             artifact: Some(MagnetManifestV1Artifact {
                 global_paths: vec!["classes/**/*.sc".to_string()],
                 platform_paths: None,
+                source_paths: vec![],
+                exclude: vec![],
             }),
             entrypoint: vec![],
         };
