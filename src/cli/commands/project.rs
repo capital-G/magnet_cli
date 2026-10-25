@@ -9,6 +9,7 @@ use inquire::{
 };
 use magnet::{
     config::constants::{magnet_home, CACHE_DIR},
+    git_client::client::GitClient,
     models::{
         project::Project,
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
@@ -131,6 +132,10 @@ pub struct ProjectAddDependencyArgs {
     )]
     path: Option<PathBuf>,
 
+    /// Only update magnet.toml and magnet.lock, don't install into `external/`
+    #[arg(long)]
+    no_install: bool,
+
     dependency: String,
 }
 
@@ -155,10 +160,15 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
             Some(path) => path,
             None => env::current_dir()?,
         };
-        let mut project_manager = Project::open(&project_path)?;
+        let mut project = Project::open(&project_path)?;
         let (name, constraint) = parse_dependency(&self.dependency)?;
 
-        project_manager.add_dependency(&cli_context.git_client()?, name, constraint)
+        let index = cli_context.git_client()?;
+        project.add_dependency(&index, name, constraint)?;
+        if !self.no_install {
+            install_locked(&project, &index).await?;
+        }
+        Ok(())
     }
 }
 
@@ -194,6 +204,10 @@ pub struct ProjectRemoveDependencyArgs {
     )]
     path: Option<PathBuf>,
 
+    /// Only update magnet.toml and magnet.lock, don't install changed versions
+    #[arg(long)]
+    no_install: bool,
+
     dependency: String,
 }
 
@@ -204,7 +218,18 @@ impl MagnetSubCommand for ProjectRemoveDependencyArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
-        project.remove_dependency(&cli_context.git_client()?, &self.dependency)
+        let index = cli_context.git_client()?;
+        // removed packages are pruned right away, other versions only change if one vanished
+        let changed = project.remove_dependency(&index, &self.dependency)?;
+        if changed {
+            match self.no_install {
+                true => warn!(
+                    "The versions of other dependencies changed, run `magnet install` to update them"
+                ),
+                false => install_locked(&project, &index).await?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -219,6 +244,10 @@ pub struct ProjectUpdateArgs {
     )]
     path: Option<PathBuf>,
 
+    /// Only update magnet.lock, don't install the new versions
+    #[arg(long)]
+    no_install: bool,
+
     /// Packages to update, all if none are given
     names: Vec<String>,
 }
@@ -230,7 +259,8 @@ impl MagnetSubCommand for ProjectUpdateArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
-        let changes = project.update(&cli_context.git_client()?, &self.names)?;
+        let index = cli_context.git_client()?;
+        let changes = project.update(&index, &self.names)?;
         if changes.is_empty() {
             println!("All dependencies are up to date");
             return Ok(());
@@ -242,7 +272,10 @@ impl MagnetSubCommand for ProjectUpdateArgs {
         for (name, old, new) in changes {
             println!("{name} {} -> {}", version(old), version(new));
         }
-        println!("Run `magnet install` to install the new versions");
+        match self.no_install {
+            true => println!("Run `magnet install` to install the new versions"),
+            false => install_locked(&project, &index).await?,
+        }
         Ok(())
     }
 }
@@ -267,9 +300,23 @@ impl MagnetSubCommand for ProjectInstallArgs {
         };
         let mut project = Project::open(&project_path)?;
         let index = cli_context.git_client()?;
-        let downloader = PackageDownloader::new(magnet_home()?.join(CACHE_DIR), index.config()?.dl);
-        project.install(&index, &downloader).await
+        project.install(&index, &downloader(&index)?).await
     }
+}
+
+fn downloader(index: &GitClient) -> anyhow::Result<PackageDownloader> {
+    Ok(PackageDownloader::new(
+        magnet_home()?.join(CACHE_DIR),
+        index.config()?.dl,
+    ))
+}
+
+/// Installs the lock file which `add`, `remove` or `update` just wrote
+async fn install_locked(project: &Project, index: &GitClient) -> anyhow::Result<()> {
+    project
+        .install_locked(index, &downloader(index)?)
+        .await
+        .context("magnet.toml and magnet.lock are updated, but installing failed. Run `magnet install` to try again")
 }
 
 /// Runs an entrypoint of the current magnet project

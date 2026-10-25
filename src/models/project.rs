@@ -305,7 +305,9 @@ impl Project {
     /// Removes a dependency (in any spelling) from the manifest, and the packages which are
     /// not needed anymore from the lock file and `external`.
     /// The manifest and the lock file are only written if the dependencies can be resolved.
-    pub fn remove_dependency(&mut self, provider: &GitClient, name: &str) -> anyhow::Result<()> {
+    /// Returns `true` if the locked versions of other packages changed, which then need to be
+    /// installed.
+    pub fn remove_dependency(&mut self, provider: &GitClient, name: &str) -> anyhow::Result<bool> {
         let normalized_name = MagnetManifestV1::normalize_name(name);
         let key = self
             .project_manifest
@@ -345,12 +347,7 @@ impl Project {
                 .and_then(|previous| previous.dependencies.get(name))
                 .is_some_and(|locked| locked.version != dependency.version)
         });
-        if changed {
-            warn!(
-                "The versions of other dependencies changed, run `magnet install` to update them"
-            );
-        }
-        Ok(())
+        Ok(changed)
     }
 
     /// The dependencies of the manifest, as requirements for the resolver
@@ -610,6 +607,16 @@ impl Project {
                 .collect();
             self.warn_about_sclang(provider, &locked)?;
         }
+        self.install_locked(provider, downloader).await
+    }
+
+    /// Installs exactly what the lock file holds into `external/` and removes what it doesn't,
+    /// without resolving. `add`, `remove` and `update` call this after writing the lock.
+    pub async fn install_locked(
+        &self,
+        provider: &GitClient,
+        downloader: &PackageDownloader,
+    ) -> anyhow::Result<()> {
         let lock_file = self
             .lock_file
             .as_ref()
@@ -1719,5 +1726,19 @@ beta = "^1"
             .unwrap_err()
             .to_string();
         assert!(err.contains("delta, gamma"), "{err}");
+    }
+    #[tokio::test]
+    async fn test_install_locked_after_add() {
+        let (dir, mut project) = project(MANIFEST);
+        let index = fixture_index();
+        project
+            .add_dependency(&index, "alpha".into(), Some("^1".parse().unwrap()))
+            .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        project
+            .install_locked(&index, &fixture_downloader(&cache))
+            .await
+            .unwrap();
+        assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);
     }
 }
