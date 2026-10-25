@@ -283,6 +283,9 @@ The magnet client mainly is used to
 * bundle packages for release
 * publishing packages on the index
 
+`magnet add`, `remove` and `update` change the manifest and the lock file and install the resulting dependencies into `magnet_packages/` right away, which can be skipped via `--no-install` such that only the files get written.
+`magnet install` sets up an existing project, e.g. after cloning it, by installing the dependencies of its lock file.
+
 ### Packaging
 
 Once a project should be published it needs to be packaged and sent to the server for indexing.
@@ -300,7 +303,8 @@ The files of a package are selected by the globs of the `[artifact]` table of th
 * `source-paths` - the files of the source package of a lepton or gluon, e.g. the C++ sources and the `CMakeLists.txt`, required for these kinds
 * `exclude` - files which are never packaged, even if a glob above selects them
 
-The folders `.git`, `dist` and `magnet_packages` are never packaged.
+Globs work like in `.gitignore`: `*` matches within a folder and `**` across folders, e.g. `Classes/**.sc` selects all `.sc` files within `Classes`.
+Hidden files and folders (e.g. `.git`), as well as `dist`, `magnet_packages` and `sclang_conf.yaml` of the project root are never packaged.
 A package keeps the relative layout of the selected files, so it mirrors the project (see Contents of package folders), since legacy quarks load resources relative to their class files and SCDoc relies on the folder structure of `HelpSource`.
 Only the binaries of `platform-paths` are moved into `plugins/`.
 A file which is selected by multiple globs of `global-paths` is only packaged once, but packaging fails if a file is selected by `global-paths` and `platform-paths`, or if a glob does not select any file, since this is probably a typo and a published artifact can never be replaced.
@@ -380,6 +384,8 @@ Packages which refer to packages via local paths can not be published via the in
 After the magnet package has successfully been created, it can be uploaded to the package index via the client or the website.
 
 ```bash
+magnet publish [FILES]...
+# e.g.
 magnet publish dist/mypackage-0.1.0-quark-any-any.tar.gz
 ```
 
@@ -398,7 +404,7 @@ All steps can be repeated, such that e.g. each job of a CI matrix can publish it
 Artifacts can be added to a finalised version later on, e.g. binaries for an additional platform, but they can never be replaced.
 The first published version fixes the kind of the package, and versions of a different kind are rejected (an admin can override this).
 
-Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, or git or legacy quark dependencies which are pinned to a branch, since others could not reproduce them, or packages from a different index.
+Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, packages from a different index, or git or legacy quark dependencies which are not pinned via a tag or ref, since others could not reproduce them.
 The client checks this before uploading, and the server checks it again.
 
 #### Checks of the server
