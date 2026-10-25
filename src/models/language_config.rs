@@ -53,7 +53,7 @@ pub struct LanguageConfig {
 }
 
 impl LanguageConfig {
-    /// Includes the base directories of the global paths of the project, `external`,
+    /// Includes the base directories of the global paths of the project, `magnet_packages`,
     /// and the base directories of the global paths of its `path` dependencies.
     /// All paths are absolute and exact duplicates are dropped.
     /// Overlapping directories are fine, since sclang compiles a directory only once.
@@ -66,7 +66,7 @@ impl LanguageConfig {
             .with_context(|| format!("Could not obtain the absolute path of {root:?}"))?;
 
         let mut include_paths = source_dirs(&root, manifest);
-        include_paths.push(root.join(String::from(ProjectDirectory::External)));
+        include_paths.push(root.join(String::from(ProjectDirectory::Packages)));
 
         let mut path_dependencies: Vec<(&String, &String)> = manifest
             .dependencies
@@ -215,7 +215,10 @@ mod tests {
         let config = LanguageConfig::for_project(root.path(), &manifest(""), None).unwrap();
         assert_eq!(
             config.include_paths,
-            [root.path().join("classes"), root.path().join("external")]
+            [
+                root.path().join("classes"),
+                root.path().join("magnet_packages")
+            ]
         );
     }
 
@@ -232,7 +235,7 @@ mod tests {
             [
                 root.path().to_path_buf(),
                 root.path().join("Classes"),
-                root.path().join("external")
+                root.path().join("magnet_packages")
             ]
         );
     }
@@ -262,7 +265,7 @@ mod tests {
             config.include_paths,
             [
                 root.join("classes"),
-                root.join("external"),
+                root.join("magnet_packages"),
                 root.join("../bar").join("lib"),
                 root.join("../baz"),
             ]
@@ -281,7 +284,7 @@ mod tests {
             sclang: None,
             include_paths: vec![
                 PathBuf::from("/home/me/my project/classes"),
-                PathBuf::from("/home/me/it's/external"),
+                PathBuf::from("/home/me/it's/magnet_packages"),
             ],
         };
         assert_eq!(
@@ -293,7 +296,7 @@ mod tests {
              \n\
              includePaths:\n  \
              - '/home/me/my project/classes'\n  \
-             - '/home/me/it''s/external'\n"
+             - '/home/me/it''s/magnet_packages'\n"
         );
 
         config.sclang = Some(Sclang {
@@ -309,7 +312,7 @@ mod tests {
              includePaths:\n  \
              - '/opt/sc/share/SuperCollider/SCClassLibrary'\n  \
              - '/home/me/my project/classes'\n  \
-             - '/home/me/it''s/external'\n"
+             - '/home/me/it''s/magnet_packages'\n"
         );
     }
 }

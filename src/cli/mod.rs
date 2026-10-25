@@ -71,7 +71,7 @@ enum Commands {
     Add(ProjectAddDependencyArgs),
     /// Removes a dependency from the current magnet project
     Remove(ProjectRemoveDependencyArgs),
-    /// Installs the dependencies of the current magnet project into `external`
+    /// Installs the dependencies of the current magnet project into `magnet_packages`
     Install(ProjectInstallArgs),
     /// Moves locked dependencies to the newest versions their requirements allow
     Update(ProjectUpdateArgs),

@@ -91,7 +91,7 @@ impl Project {
             ProjectDirectory::Classes,
             ProjectDirectory::Tests,
             ProjectDirectory::Docs,
-            ProjectDirectory::External,
+            ProjectDirectory::Packages,
         ] {
             trace!(?directory, "Create project folder");
             let path = self.path.join(String::from(directory));
@@ -303,7 +303,7 @@ impl Project {
     }
 
     /// Removes a dependency (in any spelling) from the manifest, and the packages which are
-    /// not needed anymore from the lock file and `external`.
+    /// not needed anymore from the lock file and `magnet_packages`.
     /// The manifest and the lock file are only written if the dependencies can be resolved.
     /// Returns `true` if the locked versions of other packages changed, which then need to be
     /// installed.
@@ -337,7 +337,7 @@ impl Project {
             .lock_file
             .as_ref()
             .context("A lock file should exist after resolving")?;
-        self.prune_external(lock_file)?;
+        self.prune_packages(lock_file)?;
         self.write_language_config()?;
 
         // removing a dependency only changes other versions if a locked one is gone
@@ -587,7 +587,7 @@ impl Project {
         }))
     }
 
-    /// Installs the locked dependencies into `external/<kind>s/<name>`, and removes the
+    /// Installs the locked dependencies into `magnet_packages/<kind>s/<name>`, and removes the
     /// packages which are not locked (anymore).
     /// The dependencies only get resolved if the lock file does not cover the manifest.
     pub async fn install(
@@ -610,7 +610,7 @@ impl Project {
         self.install_locked(provider, downloader).await
     }
 
-    /// Installs exactly what the lock file holds into `external/` and removes what it doesn't,
+    /// Installs exactly what the lock file holds into `magnet_packages/` and removes what it doesn't,
     /// without resolving. `add`, `remove` and `update` call this after writing the lock.
     pub async fn install_locked(
         &self,
@@ -635,15 +635,15 @@ impl Project {
             self.install_package(artifact, &archive)?;
         }
 
-        self.prune_external(lock_file)?;
+        self.prune_packages(lock_file)?;
         self.write_language_config()?;
         info!("Installed {} packages", artifacts.len());
         Ok(())
     }
 
-    /// `external/<kind>s/<name>`
+    /// `magnet_packages/<kind>s/<name>`
     fn package_dir(&self, kind: &MagnetManifestV1PackageKind, name: &str) -> PathBuf {
-        self.project_dir(ProjectDirectory::External)
+        self.project_dir(ProjectDirectory::Packages)
             .join(format!("{kind}s"))
             .join(MagnetManifestV1::normalize_name(name))
     }
@@ -672,10 +672,10 @@ impl Project {
         Ok(())
     }
 
-    /// Removes the package directories within `external/<kind>s` which are not locked,
+    /// Removes the package directories within `magnet_packages/<kind>s` which are not locked,
     /// as well as left over staging directories. Other hidden directories, such as
-    /// `external/.dev`, are left alone.
-    fn prune_external(&self, lock_file: &LockFile) -> anyhow::Result<()> {
+    /// `magnet_packages/.dev`, are left alone.
+    fn prune_packages(&self, lock_file: &LockFile) -> anyhow::Result<()> {
         let locked: HashSet<PathBuf> = lock_file
             .dependencies
             .iter()
@@ -688,7 +688,7 @@ impl Project {
             MagnetManifestV1PackageKind::Gluon,
         ] {
             let kind_dir = self
-                .project_dir(ProjectDirectory::External)
+                .project_dir(ProjectDirectory::Packages)
                 .join(format!("{kind}s"));
             if !kind_dir.is_dir() {
                 continue;
@@ -1122,16 +1122,16 @@ beta = "^1"
         Ok(project)
     }
 
-    /// all files within `external`, with their content
-    fn external_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
-        let external = dir.path().join("external");
-        walkdir::WalkDir::new(&external)
+    /// all files within `magnet_packages`, with their content
+    fn installed_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let packages = dir.path().join("magnet_packages");
+        walkdir::WalkDir::new(&packages)
             .into_iter()
             .map(|entry| entry.unwrap())
             .filter(|entry| entry.file_type().is_file())
             .map(|entry| {
                 (
-                    entry.path().strip_prefix(&external).unwrap().to_path_buf(),
+                    entry.path().strip_prefix(&packages).unwrap().to_path_buf(),
                     fs::read(entry.path()).unwrap(),
                 )
             })
@@ -1143,7 +1143,7 @@ beta = "^1"
     }
 
     #[tokio::test]
-    async fn test_install_reproduces_external() {
+    async fn test_install_reproduces_packages() {
         let (dir, mut project) = project(MANIFEST);
         project
             .add_dependency(
@@ -1155,7 +1155,7 @@ beta = "^1"
         let lock = read_lock(&dir);
 
         install(&dir).await.unwrap();
-        let installed = external_files(&dir);
+        let installed = installed_files(&dir);
         assert_eq!(
             installed.keys().cloned().collect::<Vec<_>>(),
             [
@@ -1173,15 +1173,15 @@ beta = "^1"
         assert!(config.contains("excludeDefaultPaths: "));
         assert!(config.contains(&format!(
             "  - '{}'\n",
-            std::path::absolute(dir.path().join("external"))
+            std::path::absolute(dir.path().join("magnet_packages"))
                 .unwrap()
                 .display()
         )));
 
-        // a fresh clone contains no external directory
-        fs::remove_dir_all(dir.path().join("external")).unwrap();
+        // a fresh clone contains no magnet_packages directory
+        fs::remove_dir_all(dir.path().join("magnet_packages")).unwrap();
         install(&dir).await.unwrap();
-        assert_eq!(external_files(&dir), installed);
+        assert_eq!(installed_files(&dir), installed);
         assert_eq!(read_lock(&dir), lock);
     }
 
@@ -1193,7 +1193,7 @@ beta = "^1"
 
         install(&dir).await.unwrap();
         // beta 1.2.0 would be newer, but the lock covers the manifest
-        let beta = &external_files(&dir)[&PathBuf::from("quarks/beta/Classes/Beta.sc")];
+        let beta = &installed_files(&dir)[&PathBuf::from("quarks/beta/Classes/Beta.sc")];
         assert!(String::from_utf8_lossy(beta).contains("1.0.0"));
         assert_eq!(read_lock(&dir), lock);
     }
@@ -1212,7 +1212,7 @@ beta = "^1"
             ]
         );
         assert!(dir.path().join(MAGNET_LOCK_FILE).exists());
-        assert_eq!(external_files(&dir).len(), 2);
+        assert_eq!(installed_files(&dir).len(), 2);
     }
 
     #[tokio::test]
@@ -1232,9 +1232,9 @@ beta = "^1"
     }
 
     #[tokio::test]
-    async fn test_install_prunes_external() {
+    async fn test_install_prunes_packages() {
         let (dir, _) = project(MANIFEST);
-        let external = dir.path().join("external");
+        let packages = dir.path().join("magnet_packages");
         for path in [
             "quarks/stale/Classes/Stale.sc",
             "leptons/stale/plugins/Stale.scx",
@@ -1242,17 +1242,17 @@ beta = "^1"
             "quarks/.hidden/keep",
             ".dev/my-lepton/plugins/Dev.scx",
         ] {
-            fs::create_dir_all(external.join(path).parent().unwrap()).unwrap();
-            fs::write(external.join(path), b"").unwrap();
+            fs::create_dir_all(packages.join(path).parent().unwrap()).unwrap();
+            fs::write(packages.join(path), b"").unwrap();
         }
 
         install(&dir).await.unwrap();
-        assert!(!external.join("quarks/stale").exists());
-        assert!(!external.join("leptons/stale").exists());
-        assert!(!external.join("quarks/.magnet-leftover").exists());
-        assert!(external.join("quarks/.hidden/keep").exists());
-        assert!(external.join(".dev/my-lepton/plugins/Dev.scx").exists());
-        assert!(external.join("quarks/beta").exists());
+        assert!(!packages.join("quarks/stale").exists());
+        assert!(!packages.join("leptons/stale").exists());
+        assert!(!packages.join("quarks/.magnet-leftover").exists());
+        assert!(packages.join("quarks/.hidden/keep").exists());
+        assert!(packages.join(".dev/my-lepton/plugins/Dev.scx").exists());
+        assert!(packages.join("quarks/beta").exists());
     }
 
     #[tokio::test]
@@ -1396,7 +1396,7 @@ beta = "^1"
     }
 
     fn installed_packages(dir: &tempfile::TempDir) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(dir.path().join("external/quarks"))
+        let mut names: Vec<String> = fs::read_dir(dir.path().join("magnet_packages/quarks"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect();
@@ -1429,7 +1429,7 @@ beta = "^1"
         );
         assert!(!manifest.contains("alpha"), "{manifest}");
         let config = fs::read_to_string(dir.path().join(SCLANG_CONF_FILE)).unwrap();
-        assert!(config.contains("external"), "{config}");
+        assert!(config.contains("magnet_packages"), "{config}");
     }
 
     #[tokio::test]
@@ -1495,7 +1495,7 @@ beta = "^1"
         assert!(!dir.path().join(MAGNET_LOCK_FILE).exists());
         let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gitignore.starts_with("*.bak\n"), "{gitignore}");
-        for entry in ["/dist/", "/external/", "/sclang_conf.yaml"] {
+        for entry in ["/dist/", "/magnet_packages/", "/sclang_conf.yaml"] {
             assert!(gitignore.lines().any(|line| line == entry), "{gitignore}");
         }
     }
@@ -1635,8 +1635,11 @@ beta = "^1"
         );
         install(&dir).await.unwrap();
         assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);
-        let alpha =
-            fs::read_to_string(dir.path().join("external/quarks/alpha/Classes/Alpha.sc")).unwrap();
+        let alpha = fs::read_to_string(
+            dir.path()
+                .join("magnet_packages/quarks/alpha/Classes/Alpha.sc"),
+        )
+        .unwrap();
         assert!(alpha.contains("2.0.0"), "{alpha}");
     }
 
@@ -1651,7 +1654,7 @@ beta = "^1"
         let err = install(&dir).await.err().unwrap().to_string();
         assert!(err.contains("ddw-common 0.9.0"), "{err}");
         assert!(err.contains("magnet update ddw-common"), "{err}");
-        assert!(!dir.path().join("external").exists());
+        assert!(!dir.path().join("magnet_packages").exists());
 
         // updating resolves it again
         let mut project = Project::open(dir.path()).unwrap();

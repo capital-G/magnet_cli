@@ -6,8 +6,9 @@ pub enum ProjectDirectory {
     Dist,
     /// help files for project
     Docs,
-    /// dependencies of the project.
-    External,
+    /// dependencies of the project, installed by magnet. Named after magnet, so it doesn't
+    /// clash with e.g. an `external/` folder holding the C++ dependencies of a lepton.
+    Packages,
     /// Test classes and test scd files.
     /// .scd files will be assumed to be unit tests for automated testing purposes
     Tests,
@@ -20,7 +21,7 @@ impl From<ProjectDirectory> for String {
             ProjectDirectory::Dist => "dist",
             ProjectDirectory::Docs => "docs",
             ProjectDirectory::Tests => "tests",
-            ProjectDirectory::External => "external",
+            ProjectDirectory::Packages => "magnet_packages",
         }
         .to_string()
     }

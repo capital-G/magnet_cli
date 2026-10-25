@@ -132,7 +132,7 @@ pub struct ProjectAddDependencyArgs {
     )]
     path: Option<PathBuf>,
 
-    /// Only update magnet.toml and magnet.lock, don't install into `external/`
+    /// Only update magnet.toml and magnet.lock, don't install into `magnet_packages/`
     #[arg(long)]
     no_install: bool,
 

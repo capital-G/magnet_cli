@@ -32,7 +32,7 @@ pub struct PackageFiles {
 
 /// Selects the files of a package via the globs of the manifest's `[artifact]` table,
 /// see DESIGN.md "Packaging".
-/// Hidden files, `dist/`, `external/` and `sclang_conf.yaml` are never selected, while
+/// Hidden files, `dist/`, `magnet_packages/` and `sclang_conf.yaml` are never selected, while
 /// `magnet.toml` and the readme are always part of the package.
 #[instrument(skip(manifest))]
 pub fn collect_files(
@@ -79,7 +79,7 @@ pub fn collect_files(
     let binaries = select(&candidates, &binary_globs, &exclude, &mut unmatched)?;
     ensure!(
         unmatched.is_empty(),
-        "The globs {} don't select any file (hidden files, dist/, external/ and {SCLANG_CONF_FILE} are never packaged)",
+        "The globs {} don't select any file (hidden files, dist/, magnet_packages/ and {SCLANG_CONF_FILE} are never packaged)",
         unmatched.join(", ")
     );
     if let Some(path) = files.intersection(&binaries).next() {
@@ -111,7 +111,7 @@ pub fn collect_files(
 fn project_files(root: &Path) -> anyhow::Result<Vec<String>> {
     let never_packaged = [
         String::from(ProjectDirectory::Dist),
-        String::from(ProjectDirectory::External),
+        String::from(ProjectDirectory::Packages),
         SCLANG_CONF_FILE.to_string(),
     ];
     let walker = WalkDir::new(root).sort_by_file_name().into_iter();
@@ -340,16 +340,23 @@ mod tests {
                 "Classes/.DS_Store",
                 ".github/workflows/ci.yml",
                 "dist/foo-0.1.0-quark-any-any.tar.gz",
-                "external/quarks/bar/Bar.sc",
+                "magnet_packages/quarks/bar/Bar.sc",
                 "sclang_conf.yaml",
-                // only the project's own dist/ and external/ are skipped
-                "Classes/external/Baz.sc",
+                // only the project's own dist/ and magnet_packages/ are skipped
+                "Classes/magnet_packages/Baz.sc",
+                // e.g. the C++ dependencies of a lepton
+                "external/libfoo/foo.cpp",
             ],
         );
         let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
         assert_eq!(
             files.files,
-            paths(&["Classes/external/Baz.sc", "Foo.sc", "magnet.toml"])
+            paths(&[
+                "Classes/magnet_packages/Baz.sc",
+                "Foo.sc",
+                "external/libfoo/foo.cpp",
+                "magnet.toml"
+            ])
         );
     }
 

@@ -43,7 +43,7 @@ pub struct LockDependency {
         serialize_with = "serialize_semantic_version"
     )]
     pub version: SemanticVersion,
-    /// determines the folder within `external`, so no index lookup is necessary on install
+    /// determines the folder within `magnet_packages`, so no index lookup is necessary on install
     pub kind: MagnetManifestV1PackageKind,
     pub source: LockSource,
     /// sha256 of every artifact of this version, keyed by `{abi}-{platform}`,
