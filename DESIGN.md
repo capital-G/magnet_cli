@@ -360,6 +360,17 @@ In the future it would be possible to extend this e.g. with *gluon*, which would
 The kind of package does not take part in the dependency resolution, there can only be one kind of package for a given name.
 In case a future *gluon* package also requires a *lepton* package, these should be two separate magnet projects which depend on each other.
 
+#### Lepton artifacts
+
+A version of a lepton has one artifact per plugin API version and platform, each containing the files of its `global-paths` (e.g. the `.sc` classes and help files) as well as its binaries for scsynth and, if available, supernova within `plugins/`.
+Once installed into `magnet_packages/leptons/<name>`, sclang picks up its classes like the ones of a quark, and scsynth/supernova load the binaries of its `plugins/` folder.
+
+A version may lack binaries for some platforms, e.g. because nobody built them yet.
+These can be added to the published version later on (see Publishing a package), and a missing binary is handled during the installation (see Missing binary).
+
+If only the classes are needed, e.g. because sclang talks to an scsynth on another machine or the platform can not load plugins, magnet installs any binary artifact of the version without its `plugins/` folder, since the classes are the same in every artifact.
+This requires that the version has at least one binary artifact.
+
 #### Valid package names
 
 Package names are
