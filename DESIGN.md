@@ -522,8 +522,28 @@ The git index stores the bare minimum for dependency resolution and how to obtai
 Once an asset of a version has been published it is **not** possible for the user to delete it since this would allow to break existing environments.
 The package index is therefore append only!
 Instead, it is possible to *yank* a version - a yanked version will be ignored during the resolving of future projects, but if a client requests this specific asset it will still be served (though with a warning and maybe manual intervention).
+The owners of a package can yank a version, and undo this, via the website.
+Projects which already have a yanked version in their lock file keep it, and `magnet install` warns about it.
 
-Packages which violate the CoC though will be deleted from the index, but this is only an index-admin operation.
+### Deletion
+
+Yanking is the normal way to retract a version, but some cases require to actually delete a version or a whole package:
+
+* violations of the CoC
+* malware
+* legal takedowns
+* leaked secrets
+
+This is only an index-admin operation.
+A deletion removes the version from the DB of the server, since otherwise regenerating the index from the DB would bring it back, and its artifacts from the storage.
+The version number (or the name of a deleted package) can never be used again, unless an admin frees the name, such that a lock file can never refer to different contents under the same version.
+Downloads of a deleted artifact answer with `410 Gone`, so lock files which refer to a deleted version fail to install with a clear error and need to be resolved again via `magnet update <name>`.
+
+### Trust
+
+The checks of the server (see Publishing a package) only make sure that a package is well-formed.
+Installing a package means trusting its authors: the classes of a quark are executed by sclang (e.g. within `*initClass`), and the binaries of leptons and gluons are arbitrary native code which runs with the permissions of the user.
+Signing artifacts and trusted publishing (i.e. publishing only from a CI of the package's repository, without long-lived tokens) are not covered yet.
 
 ## Integration
 
