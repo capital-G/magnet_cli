@@ -380,11 +380,34 @@ After the magnet package has successfully been created, it can be uploaded to th
 magnet publish dist/mypackage-0.1.0-quark-any-any.tar.gz
 ```
 
-The client will send the projects `magnet.toml` file to the server which will inspect if it is valid in context of the index and will, if valid, register it as a new project (if applicable) and add the new version (if applicable).
+Without a file, all artifacts of the current version within `dist` are published.
 
-Once this version has been registered it is possible to add assets to this version.
-The client will upload the referenced asset and also calculate its sha256 checksum which the server will verify and also add it to the package index.
-If it is a binary package it is mandatory to first upload the `source` package - but the client will implicitly take care of this.
+Publishing a version consists of three steps, such that the index never contains a version which was only uploaded halfway:
+
+1. The client creates a *draft* of the version, which also registers the package if it does not exist yet.
+2. The client uploads the artifacts to the draft, each with its sha256 checksum. For a lepton or gluon, the client also uploads the source package.
+3. The client *finalises* the version, which is only possible once a quark has its `any-any` artifact and a lepton or gluon its `source-any` artifact.
+
+Only finalised versions are written into the index.
+A draft which never gets finalised (e.g. because a CI run failed) is only visible to the owners of the package and stays until they delete it, after which its version can be drafted again.
+All steps can be repeated, such that e.g. each job of a CI matrix can publish its own binaries: an existing draft or finalised version is re-used, and uploading an identical artifact again is not an error.
+
+Artifacts can be added to a finalised version later on, e.g. binaries for an additional platform, but they can never be replaced.
+The first published version fixes the kind of the package, and versions of a different kind are rejected (an admin can override this).
+
+Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, or git or legacy quark dependencies which are pinned to a branch, since others could not reproduce them.
+The client checks this before uploading, and the server checks it again.
+
+#### Checks of the server
+
+The client packages the artifacts, but the server does not trust anything the client claims:
+
+* The server computes the sha256 checksum of an artifact itself, and the index uses this value. The checksum sent by the client only guards the transfer and needs to match.
+* The manifest is read from the `magnet.toml` within the artifact (see Packaging), not from a separately sent copy, so the index and the contents of an artifact can not disagree. All artifacts of a version need to agree on the fields which are written into the index, i.e. name, version, kind, `sclang` and dependencies, and dependencies on magnet packages need to exist in the index.
+* The archive is inspected but never extracted: the server streams through the tar headers without writing any files, and checks the archive format (see Packaging), that all paths are relative and unique (also when ignoring the case), and that they are selected by the globs of the manifest.
+* Against gzip bombs, the size of an upload is limited, and while streaming, the unpacked size, the number of entries and the length of the paths are counted, such that the inspection stops as soon as a limit is reached.
+
+These checks only make sure that a package is well-formed, its contents, e.g. code within `*initClass` or the binaries, are not checked.
 
 ### Why not sclang
 
