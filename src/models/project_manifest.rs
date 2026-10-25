@@ -210,6 +210,7 @@ impl MagnetManifestV1 {
             license,
             readme: None,
             repository: None,
+            summary: None,
             tags: vec![],
         };
 
@@ -435,6 +436,7 @@ baz = {}
                 license: None,
                 readme: None,
                 repository: None,
+                summary: None,
                 tags: vec![],
             }),
             dependencies: HashMap::new(),

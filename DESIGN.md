@@ -163,6 +163,8 @@ global-paths = ["Classes/**.sc", "examples/*"]
 [metadata]
 license = "GPL-3.0"
 tags = ["awesome", "jitlib"]
+# a single line which is shown in lists and search results
+summary = "An awesome extension for JITLib"
 description = """
 This is a long description
 """
@@ -302,7 +304,7 @@ A package keeps the relative layout of the selected files, so it mirrors the pro
 Only the binaries of `platform-paths` are moved into `plugins/`.
 A file which is selected by multiple globs of `global-paths` is only packaged once, but packaging fails if a file is selected by `global-paths` and `platform-paths`, or if a glob does not select any file, since this is probably a typo and a published artifact can never be replaced.
 
-Every artifact also contains the `magnet.toml` of the project at its root, such that the server reads the manifest from the uploaded artifact (see Publishing a package), and the readme file of `[metadata]` (if set) at its path.
+Every artifact also contains the `magnet.toml` of the project at its root, such that the server reads the manifest from the uploaded artifact (see Publishing a package), and the readme file of `[metadata]` (`README.md` by default, if it exists) at its path.
 A quark has no dedicated source package, since its artifact already is the source.
 
 The naming convention for the `.tar.gz` file follows
@@ -445,9 +447,11 @@ Since MinIO has become unusable, I settled for [Garage](https://garagehq.deuxfle
 
 ### Authentication
 
-Social logins (i.e. login via e.g. GitHub) may be available.
+Social logins will likely not be made available.
 OAuth2 will be used to authenticate CLI clients.
-It will be possible to generate longer lasting tokens for a CI environment which will be passed via environment variables.
+`magnet login` opens the authorization flow (with PKCE, since the CLI can not keep a client secret), stores the token in the magnet home folder for each server and refreshes it when it expires, and `magnet logout` revokes it.
+It will be possible to generate longer lasting tokens for a CI environment on the website, which are limited to publishing and will be passed via the `MAGNET_TOKEN` environment variable.
+Such a token is sent like any other OAuth2 token and is never written to disk by the client.
 
 The website of the index itself also allows to administrate packages, but since a simple frontend is used we can get away with using a session/cookie based approach.
 
@@ -494,8 +498,11 @@ Such an entry will be inserted by the index service as a single writer on this i
 Additionally, each index needs to implement a `config.json` at the root which implements
 
 ```json
-{"index-format": 1, "dl": "<url template>", "http": "<base url>"}
+{"index-format": 1, "dl": "<url template>", "http": "<base url>", "api": "<server url>"}
 ```
+
+`api` is the URL of the `magnet-server` which belongs to this index, used to log in and publish, such that the URL of the index is the only thing which needs to be configured.
+It can be overridden via `MAGNET_API_URL` / `--api-url`, e.g. for a local test server.
 
 such that updates to the index can be made and also the download url can be changed in one position in case the packages need to migrate to a different URL.
 The URL template needs to be configured in such a way that each artifacts results in a unique and stable URL: a package has only one kind, a version has at most one artifact per abi and platform, and artifacts are never replaced.

@@ -42,6 +42,10 @@
           "type": "string",
           "description": "License used for this project"
         },
+        "summary": {
+          "type": "string",
+          "description": "Single line describing the project, shown in lists and search results"
+        },
         "description": {
           "type": "string",
           "description": "Description of the project"
