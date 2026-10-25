@@ -43,6 +43,14 @@ struct GlobalArgs {
     #[arg(long, env = "MAGNET_GIT_INDEX_URL", help = "Package git index to use")]
     pub git_index_url: Option<Url>,
 
+    /// replaces the `http` mirror announced by the index, which gets written into the lock file
+    #[arg(
+        long,
+        env = "MAGNET_HTTP_INDEX_URL",
+        help = "Static HTTP mirror of the index"
+    )]
+    pub http_index_url: Option<Url>,
+
     // @todo make magnet config path configurable
     /// Increase verbosity level of log
     #[arg(
@@ -81,7 +89,8 @@ impl CliContext {
         let local_destination = magnet_home()?
             .join(INDEX_DIR)
             .join(GitClient::cache_dir_name(&url));
-        GitClient::new(url, local_destination)
+        Ok(GitClient::new(url, local_destination)?
+            .with_http_url(self.global_args.http_index_url.clone()))
     }
     pub fn http_client(&self) -> MagnetClient<NoAuth> {
         MagnetClient::<NoAuth>::new(self.global_args.index_url.clone())

@@ -89,7 +89,7 @@ impl MagnetSubCommand for ProjectInitArgs {
             None,
             None,
             SemanticVersion::new(0, 1, 0),
-            None,
+            default_sclang_requirement(),
             project_kind,
         )?;
 
@@ -97,6 +97,27 @@ impl MagnetSubCommand for ProjectInitArgs {
 
         Ok(())
     }
+}
+
+/// `>=<major>.<minor>` of the found sclang, or `None` without one (DESIGN.md
+/// "SuperCollider version")
+fn default_sclang_requirement() -> Option<String> {
+    let version = match Sclang::find().and_then(|sclang| match sclang {
+        Some(sclang) => sclang.version().map(Some),
+        None => Ok(None),
+    }) {
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            warn!("Could not find sclang, so the manifest gets no `sclang` range");
+            return None;
+        }
+        Err(err) => {
+            warn!("{err:#}, so the manifest gets no `sclang` range");
+            return None;
+        }
+    };
+    let (major, minor, _) = version.into();
+    Some(format!(">={major}.{minor}"))
 }
 
 /// Adds a dependency to the current magnet project

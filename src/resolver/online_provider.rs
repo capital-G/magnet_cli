@@ -4,7 +4,7 @@ use pubgrub::{
     Ranges, Reporter, SelectedDependencies, SemanticVersion,
 };
 use semver::VersionReq;
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, ops::Bound};
 use tracing::error;
 
 use crate::git_client::{client::GitClient, models::GitDependency};
@@ -65,6 +65,28 @@ fn comparator_to_ranges(comparator: &semver::Comparator) -> Ranges<SemanticVersi
             error!("Unknown comparator {comparator}");
             Ranges::full()
         }
+    }
+}
+
+/// The versions of SuperCollider a dependency's `sclang` range allows while resolving: its upper
+/// bounds are ignored, since defensive caps would block the resolution (DESIGN.md
+/// "SuperCollider version"), e.g. `>=3.13, <3.14` and `^3.13` both become `>=3.13.0`.
+pub fn sclang_lower_bound(requirement: &VersionReq) -> Ranges<SemanticVersion> {
+    match requirement.to_ranges().bounding_range() {
+        Some((Bound::Included(lower), _)) => Ranges::higher_than(*lower),
+        Some((Bound::Excluded(lower), _)) => Ranges::strictly_higher_than(*lower),
+        Some((Bound::Unbounded, _)) => Ranges::full(),
+        None => Ranges::empty(),
+    }
+}
+
+/// The lowest version of SuperCollider a project's `sclang` range allows, for which the
+/// dependencies get resolved, so the lock file holds for the whole range
+fn lowest_sclang_version(requirement: &VersionReq) -> SemanticVersion {
+    match requirement.to_ranges().bounding_range() {
+        Some((Bound::Included(lower), _)) => *lower,
+        Some((Bound::Excluded(lower), _)) => lower.bump_patch(),
+        _ => SemanticVersion::zero(),
     }
 }
 
@@ -160,6 +182,11 @@ impl DependencyProvider for GitClient {
 /// Name of the meta package which holds the dependencies of the project.
 pub const ROOT_PACKAGE: &str = "root";
 
+/// Name of the virtual package for the version of SuperCollider, like `Python` in uv.
+/// Its only version is the lowest one the project allows. Upper case, so it can't clash with
+/// the normalized name of a package.
+pub const SCLANG_PACKAGE: &str = "SuperCollider";
+
 /// The RootProvider acts wraps the GitProvider sucht that the meta package `root` can
 /// be injected to the package index.
 /// The goal is to resolve the meta-package root which contains all the dependencies
@@ -172,6 +199,9 @@ pub struct RootProvider<'a> {
     /// versions which are chosen if they satisfy the requirements, e.g. those of the lock
     /// file, so a resolve only changes what it must. Keyed by the normalized name.
     pub preferred: HashMap<String, SemanticVersion>,
+    /// the `sclang` range of the project. Without one, the `sclang` ranges of the
+    /// dependencies are ignored (DESIGN.md "SuperCollider version").
+    pub sclang: Option<VersionReq>,
 }
 
 impl DependencyProvider for RootProvider<'_> {
@@ -202,6 +232,13 @@ impl DependencyProvider for RootProvider<'_> {
         if package == ROOT_PACKAGE {
             return Ok(Some(SemanticVersion::zero()));
         }
+        if package == SCLANG_PACKAGE {
+            return Ok(self
+                .sclang
+                .as_ref()
+                .map(lowest_sclang_version)
+                .filter(|version| range.contains(version)));
+        }
         // a preferred version may also be yanked, as yanking must not break existing lock files
         if let Some(version) = self.preferred.get(package) {
             if range.contains(version) && self.git_provider.get_release(package, version)?.is_some()
@@ -218,11 +255,29 @@ impl DependencyProvider for RootProvider<'_> {
         version: &Self::V,
     ) -> Result<Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
         if package == ROOT_PACKAGE {
-            Ok(Dependencies::Available(dependency_list_to_hash_map(
-                &self.dependencies,
-            )))
-        } else {
-            self.git_provider.get_dependencies(package, version)
+            let mut dependencies = dependency_list_to_hash_map(&self.dependencies);
+            if let Some(sclang) = &self.sclang {
+                dependencies.insert(SCLANG_PACKAGE.to_string(), sclang.to_ranges());
+            }
+            return Ok(Dependencies::Available(dependencies));
+        }
+        if package == SCLANG_PACKAGE {
+            return Ok(Dependencies::Available(DependencyConstraints::default()));
+        }
+        let dependencies = self.git_provider.get_dependencies(package, version)?;
+        match (dependencies, &self.sclang) {
+            (Dependencies::Available(mut dependencies), Some(_)) => {
+                let release_sclang = self
+                    .git_provider
+                    .get_release(package, version)?
+                    .and_then(|release| release.sclang);
+                if let Some(requirement) = release_sclang {
+                    dependencies
+                        .insert(SCLANG_PACKAGE.to_string(), sclang_lower_bound(&requirement));
+                }
+                Ok(Dependencies::Available(dependencies))
+            }
+            (dependencies, _) => Ok(dependencies),
         }
     }
 }
@@ -268,6 +323,14 @@ mod tests {
         dependencies: &[(&str, &str)],
         preferred: &[(&str, &str)],
     ) -> anyhow::Result<Vec<(String, String)>> {
+        resolve_fixture_with(dependencies, preferred, None)
+    }
+
+    fn resolve_fixture_with(
+        dependencies: &[(&str, &str)],
+        preferred: &[(&str, &str)],
+        sclang: Option<&str>,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let index = GitClient::open_local(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
         )?;
@@ -284,10 +347,11 @@ mod tests {
                 .iter()
                 .map(|(name, version)| (name.to_string(), version.parse().unwrap()))
                 .collect(),
+            sclang: sclang.map(|sclang| sclang.parse().unwrap()),
         };
         let mut selected: Vec<(String, String)> = resolve_dependencies(&provider)?
             .into_iter()
-            .filter(|(name, _)| name != ROOT_PACKAGE)
+            .filter(|(name, _)| name != ROOT_PACKAGE && name != SCLANG_PACKAGE)
             .map(|(name, version)| (name, version.to_string()))
             .collect();
         selected.sort();
@@ -379,6 +443,80 @@ mod tests {
             .to_string();
         println!("{err}");
         assert!(err.contains("legacy quark"));
+    }
+
+    // epsilon 1.0.0 needs sclang >=3.10, 1.1.0 >=3.13, <3.14 and 1.2.0 >=3.15
+
+    #[test]
+    fn test_resolve_falls_back_to_older_sclang_versions() {
+        // 1.2.0 needs a newer sclang, 1.1.0's upper bound is ignored
+        assert_eq!(
+            resolve_fixture_with(&[("epsilon", "*")], &[], Some(">=3.14")).unwrap(),
+            pairs(&[("epsilon", "1.1.0")])
+        );
+        assert_eq!(
+            resolve_fixture_with(&[("epsilon", "*")], &[], Some(">=3.10, <3.13")).unwrap(),
+            pairs(&[("epsilon", "1.0.0")])
+        );
+        assert_eq!(
+            resolve_fixture_with(&[("epsilon", "*")], &[], Some(">=3.15")).unwrap(),
+            pairs(&[("epsilon", "1.2.0")])
+        );
+    }
+
+    #[test]
+    fn test_resolve_without_sclang_range() {
+        assert_eq!(
+            resolve_fixture_with(&[("epsilon", "*")], &[], None).unwrap(),
+            pairs(&[("epsilon", "1.2.0")])
+        );
+    }
+
+    #[test]
+    fn test_resolve_sclang_conflict() {
+        let err = resolve_fixture_with(&[("epsilon", "^1.2")], &[], Some(">=3.14"))
+            .unwrap_err()
+            .to_string();
+        println!("{err}");
+        assert!(err.contains(SCLANG_PACKAGE), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_sclang_ignores_preferred_unsupported_version() {
+        assert_eq!(
+            resolve_fixture_with(&[("epsilon", "*")], &[("epsilon", "1.2.0")], Some(">=3.13"))
+                .unwrap(),
+            pairs(&[("epsilon", "1.1.0")])
+        );
+    }
+
+    #[test]
+    fn test_sclang_lower_bound() {
+        for (requirement, lower) in [
+            (">=3.13", "3.13.0"),
+            (">=3.13, <3.14", "3.13.0"),
+            ("^3.13", "3.13.0"),
+            ("~3.13.2", "3.13.2"),
+            (">3.13", "3.14.0"),
+            ("=3.14.1", "3.14.1"),
+        ] {
+            let requirement: VersionReq = requirement.parse().unwrap();
+            let lower: SemanticVersion = lower.parse().unwrap();
+            assert_eq!(
+                sclang_lower_bound(&requirement),
+                Ranges::higher_than(lower),
+                "{requirement}"
+            );
+            assert_eq!(lowest_sclang_version(&requirement), lower, "{requirement}");
+        }
+        assert_eq!(
+            sclang_lower_bound(&"<3.15".parse().unwrap()),
+            Ranges::full()
+        );
+        assert_eq!(
+            lowest_sclang_version(&"<3.15".parse().unwrap()),
+            SemanticVersion::zero()
+        );
     }
 
     /// the semver crate is the reference implementation of the version requirements

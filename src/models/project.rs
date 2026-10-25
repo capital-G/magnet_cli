@@ -29,7 +29,9 @@ use crate::{
     },
     packaging::{collect::collect_files, compression, naming::artifact_file_name},
     resolver::{
-        online_provider::{resolve_dependencies, RootProvider, ToRanges},
+        online_provider::{
+            resolve_dependencies, sclang_lower_bound, RootProvider, ToRanges, SCLANG_PACKAGE,
+        },
         package_downloader::{Artifact, PackageDownloader},
     },
     sclang::{Sclang, MAGNET_SCLANG_ENV},
@@ -365,13 +367,76 @@ impl Project {
             .flat_map(|lock_file| &lock_file.dependencies)
             .map(|(name, dependency)| (name.clone(), dependency.version))
             .collect();
-        let tree = resolve_dependencies(&RootProvider {
+        let tree: HashMap<String, SemanticVersion> = resolve_dependencies(&RootProvider {
             git_provider: provider,
             dependencies,
             preferred,
-        })?;
+            sclang: self.sclang_requirement()?,
+        })?
+        .into_iter()
+        .filter(|(name, _)| name != SCLANG_PACKAGE)
+        .collect();
         trace!(?tree, "Resolved dependencies");
-        Ok(tree.into_iter().collect())
+        self.warn_about_sclang(provider, &tree)?;
+        Ok(tree)
+    }
+
+    /// The `sclang` range of `[package]`
+    fn sclang_requirement(&self) -> anyhow::Result<Option<VersionReq>> {
+        self.project_manifest
+            .get_manifest()
+            .package
+            .sclang
+            .as_ref()
+            .map(|sclang| {
+                sclang.parse().with_context(|| {
+                    format!("`sclang = \"{sclang}\"` in {MAGNET_PROJECT_FILE} is not a valid version range")
+                })
+            })
+            .transpose()
+    }
+
+    /// Warns if the found sclang is outside of the project's `sclang` range, or, if the project
+    /// has none, if a resolved version requires a newer sclang (DESIGN.md "SuperCollider version")
+    fn warn_about_sclang(
+        &self,
+        provider: &GitClient,
+        tree: &HashMap<String, SemanticVersion>,
+    ) -> anyhow::Result<()> {
+        // a missing sclang gets reported by write_language_config
+        let Ok(Some(sclang)) = Sclang::find() else {
+            return Ok(());
+        };
+        let version = match sclang.version() {
+            Ok(version) => version,
+            Err(err) => {
+                warn!("{err:#}");
+                return Ok(());
+            }
+        };
+        if let Some(requirement) = self.sclang_requirement()? {
+            if !requirement.to_ranges().contains(&version) {
+                warn!(
+                    "The project requires sclang {requirement}, but the found sclang {:?} is {version}",
+                    sclang.binary
+                );
+            }
+            return Ok(());
+        }
+        let sorted: BTreeMap<&String, &SemanticVersion> = tree.iter().collect();
+        for (name, locked) in sorted {
+            let requirement = provider
+                .get_release(name, locked)?
+                .and_then(|release| release.sclang);
+            if let Some(requirement) = requirement {
+                if !sclang_lower_bound(&requirement).contains(&version) {
+                    warn!(
+                        "{name} {locked} requires sclang {requirement}, but the found sclang is {version}. Set `sclang` in [package] of {MAGNET_PROJECT_FILE} to resolve versions which support it"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Writes the lock file for a resolved tree, using the details of each release from the index
@@ -380,12 +445,17 @@ impl Project {
         provider: &GitClient,
         tree: &HashMap<String, SemanticVersion>,
     ) -> anyhow::Result<()> {
-        let lock_file = LockFile::from_tree(provider.url().clone(), tree, |name, version| {
-            provider
-                .get_release(name, version)?
-                .map(|release| LockDependency::from(&release))
-                .with_context(|| format!("{name} {version} is missing in the index"))
-        })?;
+        let lock_file = LockFile::from_tree(
+            provider.url().clone(),
+            provider.http_url()?,
+            tree,
+            |name, version| {
+                provider
+                    .get_release(name, version)?
+                    .map(|release| LockDependency::from(&release))
+                    .with_context(|| format!("{name} {version} is missing in the index"))
+            },
+        )?;
         lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
         self.lock_file = Some(lock_file);
         Ok(())
@@ -422,6 +492,13 @@ impl Project {
             info!("{MAGNET_LOCK_FILE} is missing or outdated, resolving the dependencies");
             let tree = self.resolve(provider, self.manifest_dependencies()?)?;
             self.write_lock(provider, &tree)?;
+        } else if let Some(lock_file) = &self.lock_file {
+            let locked = lock_file
+                .dependencies
+                .iter()
+                .map(|(name, dependency)| (name.clone(), dependency.version))
+                .collect();
+            self.warn_about_sclang(provider, &locked)?;
         }
         let lock_file = self
             .lock_file
@@ -708,7 +785,7 @@ beta = "^1"
             .iter()
             .map(|(name, version)| (name.to_string(), version.parse().unwrap()))
             .collect();
-        LockFile::from_tree(index.url().clone(), &tree, |name, version| {
+        LockFile::from_tree(index.url().clone(), None, &tree, |name, version| {
             Ok(LockDependency::from(
                 &index.get_release(name, version)?.unwrap(),
             ))
@@ -760,6 +837,52 @@ beta = "^1"
             "checksums = {{ any-any = \"{}\" }}",
             alpha.artifacts[0].sha256
         )));
+    }
+
+    #[test]
+    fn test_add_respects_sclang_range() {
+        let with_sclang = |sclang: &str| {
+            MANIFEST.replace(
+                "kind = \"quark\"\n",
+                &format!("kind = \"quark\"\nsclang = \"{sclang}\"\n"),
+            )
+        };
+
+        let (dir, mut supported) = project(&with_sclang(">=3.14"));
+        supported
+            .add_dependency(&fixture_index(), "epsilon".into(), None)
+            .unwrap();
+        // epsilon 1.2.0 needs sclang >=3.15
+        assert!(locked_versions(&supported).contains(&("epsilon".to_string(), "1.1.0".to_string())));
+        assert!(read_manifest(&dir).contains("epsilon = \"^1.1.0\""));
+
+        let (_dir, mut invalid) = project(&with_sclang("three"));
+        let err = invalid
+            .add_dependency(&fixture_index(), "epsilon".into(), None)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a valid version range"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn test_lock_file_has_index_http() {
+        let (dir, mut announced) = project(MANIFEST);
+        announced
+            .add_dependency(&fixture_index(), "alpha".into(), None)
+            .unwrap();
+        // from the config.json of the fixture index
+        assert!(read_lock(&dir)
+            .contains("index-http = \"https://magnet.supercollider.online/index/\"\n"));
+
+        let (dir, mut overridden) = project(MANIFEST);
+        let index =
+            fixture_index().with_http_url(Some("http://localhost:8000/index/".parse().unwrap()));
+        overridden
+            .add_dependency(&index, "alpha".into(), None)
+            .unwrap();
+        assert!(read_lock(&dir).contains("index-http = \"http://localhost:8000/index/\"\n"));
     }
 
     #[test]

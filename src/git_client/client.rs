@@ -17,6 +17,8 @@ pub struct GitClient {
     local_destination: PathBuf,
     /// `None` if the index is a plain local directory, which is never updated
     repo: Option<Repository>,
+    /// replaces the `http` mirror announced by the index, e.g. for a local test server
+    http_url: Option<Url>,
 }
 
 impl GitClient {
@@ -30,6 +32,7 @@ impl GitClient {
                     url,
                     local_destination,
                     repo: Some(repo),
+                    http_url: None,
                 };
                 if let Err(err) = client.update() {
                     warn!(
@@ -53,6 +56,7 @@ impl GitClient {
             url,
             local_destination,
             repo: Some(repo),
+            http_url: None,
         })
     }
 
@@ -66,6 +70,7 @@ impl GitClient {
                 .map_err(|_| anyhow!("Could not convert {path:?} to an URL"))?,
             local_destination: path,
             repo: None,
+            http_url: None,
         };
         client.config()?;
         Ok(client)
@@ -81,6 +86,20 @@ impl GitClient {
 
     pub fn url(&self) -> &Url {
         &self.url
+    }
+
+    /// Replaces the `http` mirror of `config.json`, see [Self::http_url]
+    pub fn with_http_url(mut self, http_url: Option<Url>) -> Self {
+        self.http_url = http_url;
+        self
+    }
+
+    /// The static HTTP mirror of this index, which gets written into the lock file
+    pub fn http_url(&self) -> anyhow::Result<Option<Url>> {
+        match &self.http_url {
+            Some(url) => Ok(Some(url.clone())),
+            None => Ok(self.config()?.http),
+        }
     }
 
     /// Reads the `config.json` of the index and refuses an unknown `index-format`

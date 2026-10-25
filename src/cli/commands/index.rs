@@ -78,6 +78,7 @@ impl MagnetSubCommand for IndexArgs {
                         constraint: "<2.0.0".to_string().parse()?,
                     }],
                     preferred: Default::default(),
+                    sclang: None,
                 };
                 match resolve(&root_provider, "root".to_string(), SemanticVersion::zero()) {
                     Ok(dependencies) => {

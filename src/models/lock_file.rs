@@ -17,7 +17,7 @@ use crate::git_client::models::{
     deserialize_semantic_version, serialize_semantic_version, GitRelease,
 };
 use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
-use crate::resolver::online_provider::ROOT_PACKAGE;
+use crate::resolver::online_provider::{ROOT_PACKAGE, SCLANG_PACKAGE};
 
 pub const LOCK_VERSION: u32 = 1;
 
@@ -27,6 +27,9 @@ pub struct LockFile {
     pub lock_version: u32,
     /// URL of the git index the dependencies were resolved against
     pub index: Url,
+    /// static HTTP mirror of the index (its `config.json`'s `http`), for clients without git
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_http: Option<Url>,
     /// keyed by the normalized package name - a BTreeMap keeps the entries
     /// sorted, so diffs of the lock file stay stable
     #[serde(default)]
@@ -124,6 +127,7 @@ impl LockFile {
         let lock_file = Self {
             lock_version: LOCK_VERSION,
             index,
+            index_http: None,
             dependencies: BTreeMap::new(),
         };
         lock_file.write(&path)?;
@@ -159,12 +163,13 @@ impl LockFile {
     /// `lookup` provides the details of a resolved package version from the index.
     pub fn from_tree<S: BuildHasher>(
         index: Url,
+        index_http: Option<Url>,
         full_tree: &HashMap<String, SemanticVersion, S>,
         lookup: impl Fn(&str, &SemanticVersion) -> anyhow::Result<LockDependency>,
     ) -> anyhow::Result<Self> {
         let dependencies = full_tree
             .iter()
-            .filter(|(name, _)| name.as_str() != ROOT_PACKAGE)
+            .filter(|(name, _)| ![ROOT_PACKAGE, SCLANG_PACKAGE].contains(&name.as_str()))
             .map(|(name, version)| {
                 Ok((
                     MagnetManifestV1::normalize_name(name),
@@ -175,6 +180,7 @@ impl LockFile {
         Ok(Self {
             lock_version: LOCK_VERSION,
             index,
+            index_http,
             dependencies,
         })
     }
@@ -243,14 +249,22 @@ mod tests {
             ("foo".to_string(), SemanticVersion::new(0, 1, 0)),
             ("bar".to_string(), SemanticVersion::new(0, 2, 0)),
             ("DDW_Common".to_string(), SemanticVersion::new(1, 2, 3)),
+            (SCLANG_PACKAGE.to_string(), SemanticVersion::new(3, 13, 0)),
         ]);
-        let lock_file = LockFile::from_tree(index(), &tree, lookup).unwrap();
+        let lock_file = LockFile::from_tree(
+            index(),
+            Some("https://magnet.example/index/".parse().unwrap()),
+            &tree,
+            lookup,
+        )
+        .unwrap();
         let content = lock_file.to_string().unwrap();
 
         assert_eq!(
             content,
             "lock-version = 1\n\
              index = \"https://github.com/supercollider/magnet-index.git\"\n\
+             index-http = \"https://magnet.example/index/\"\n\
              \n\
              [dependencies]\n\
              \n\
@@ -272,6 +286,7 @@ mod tests {
              checksums = { any-any = \"abc\" }\n"
         );
         assert!(!content.contains(ROOT_PACKAGE));
+        assert!(!content.contains(SCLANG_PACKAGE));
         assert_eq!(LockFile::from_string(&content).unwrap(), lock_file);
     }
 
@@ -298,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_empty_round_trip() {
-        let lock_file = LockFile::from_tree(index(), &HashMap::new(), lookup).unwrap();
+        let lock_file = LockFile::from_tree(index(), None, &HashMap::new(), lookup).unwrap();
         let content = lock_file.to_string().unwrap();
         assert_eq!(LockFile::from_string(&content).unwrap(), lock_file);
     }

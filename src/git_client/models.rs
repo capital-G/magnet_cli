@@ -22,6 +22,9 @@ pub struct GitIndexConfig {
     /// URL template of an artifact, using the placeholders
     /// `{name}`, `{version}`, `{kind}`, `{abi}` and `{platform}`
     pub dl: String,
+    /// base URL of the static HTTP mirror of this index, for clients without git
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<Url>,
 }
 
 /// abi and platform are kept as plain strings, so an index line which
@@ -94,6 +97,9 @@ pub struct GitRelease {
     )]
     pub version: SemanticVersion,
     pub kind: MagnetManifestV1PackageKind,
+    /// supported SuperCollider versions, see DESIGN.md "SuperCollider version"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sclang: Option<VersionReq>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, GitIndexDependency>,
     #[serde(default)]

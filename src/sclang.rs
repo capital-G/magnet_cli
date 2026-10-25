@@ -3,9 +3,11 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{ensure, Context};
+use pubgrub::SemanticVersion;
 use tracing::trace;
 
 /// Path of the sclang binary to use, takes precedence over `PATH`
@@ -67,6 +69,38 @@ impl Sclang {
     }
 }
 
+impl Sclang {
+    /// The version of sclang via `sclang -v`, which prints e.g.
+    /// `sclang 3.14.1 (Built from tag 'Version-3.14.1' [426edf6])` and exits.
+    /// Only the release numbers are kept, so `3.15.0-dev` becomes `3.15.0`.
+    pub fn version(&self) -> anyhow::Result<SemanticVersion> {
+        let output = Command::new(&self.binary)
+            .arg("-v")
+            .output()
+            .with_context(|| format!("Could not start {:?}", self.binary))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_version(&stdout).with_context(|| {
+            format!(
+                "Could not read the version of {:?} from {stdout:?}",
+                self.binary
+            )
+        })
+    }
+}
+
+fn parse_version(output: &str) -> Option<SemanticVersion> {
+    let version = output.split_whitespace().nth(1)?;
+    let release: String = version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut numbers = release.split('.').map(|number| number.parse::<u32>());
+    let major = numbers.next()?.ok()?;
+    let minor = numbers.next().unwrap_or(Ok(0)).ok()?;
+    let patch = numbers.next().unwrap_or(Ok(0)).ok()?;
+    Some(SemanticVersion::new(major, minor, patch))
+}
+
 fn find_binary(
     env_override: Option<OsString>,
     path_var: Option<OsString>,
@@ -107,6 +141,25 @@ fn class_library_dir(binary: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_parse_version() {
+        for (output, version) in [
+            (
+                "sclang 3.14.1 (Built from tag 'Version-3.14.1' [426edf6])\n",
+                SemanticVersion::new(3, 14, 1),
+            ),
+            (
+                "sclang 3.15.0-dev (Built from branch 'develop' [12b0aad2a6])\n",
+                SemanticVersion::new(3, 15, 0),
+            ),
+            ("sclang 3.14", SemanticVersion::new(3, 14, 0)),
+        ] {
+            assert_eq!(parse_version(output), Some(version), "{output}");
+        }
+        assert_eq!(parse_version(""), None);
+        assert_eq!(parse_version("sclang unknown"), None);
+    }
 
     /// creates an installation with the given binary and class library paths
     fn installation(root: &Path, binary: &str, class_library: &str) -> PathBuf {
