@@ -397,7 +397,7 @@ All steps can be repeated, such that e.g. each job of a CI matrix can publish it
 Artifacts can be added to a finalised version later on, e.g. binaries for an additional platform, but they can never be replaced.
 The first published version fixes the kind of the package, and versions of a different kind are rejected (an admin can override this).
 
-Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, or git or legacy quark dependencies which are pinned to a branch, since others could not reproduce them.
+Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, or git or legacy quark dependencies which are pinned to a branch, since others could not reproduce them, or packages from a different index.
 The client checks this before uploading, and the server checks it again.
 
 #### Checks of the server

@@ -400,9 +400,9 @@ mod tests {
     async fn test_env_token_takes_precedence() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/version"))
+            .and(path("/api/version/"))
             .and(header("authorization", "Bearer ci-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"version": "0.1.0"}"#))
             .expect(1)
             .mount(&server)
             .await;

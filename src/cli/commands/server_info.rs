@@ -1,16 +1,17 @@
-use magnet::http_client::{
-    basic::{MagnetClient, NoAuth},
-    endpoints::ServerInfo,
-};
+use clap::Parser;
+use magnet::http_client::endpoints::ServerInfo;
 
-use crate::cli::GlobalArgs;
+use crate::cli::{CliContext, MagnetSubCommand};
 
-pub async fn get_server_info(
-    _global_args: &GlobalArgs,
-    client: MagnetClient<NoAuth>,
-) -> anyhow::Result<()> {
-    let response = client.call(ServerInfo).await?;
-    let pretty = serde_json::to_string_pretty(&response)?;
-    println!("{pretty}");
-    Ok(())
+/// Shows the magnet server of the index and its version
+#[derive(Parser, Debug)]
+pub struct ServerInfoArgs {}
+
+impl MagnetSubCommand for ServerInfoArgs {
+    async fn run(self, cli_context: &CliContext) -> anyhow::Result<()> {
+        let client = cli_context.http_client()?;
+        let info = client.call(ServerInfo).await?;
+        println!("{} (version {})", client.base_url, info.version);
+        Ok(())
+    }
 }

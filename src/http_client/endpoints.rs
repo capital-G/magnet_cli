@@ -2,7 +2,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::http_client::{
     basic::{AuthToken, NoAuth},
-    models::{MagnetServerVersion, Project, ProjectDetail as ApiProjectDetail},
+    models::MagnetServerVersion,
 };
 
 pub trait NoAuthNecessary {}
@@ -24,42 +24,6 @@ pub trait Endpoint {
     }
 }
 
-pub struct ProjectEndpoint;
-
-impl Endpoint for ProjectEndpoint {
-    type Response = Vec<Project>;
-    type Body = ();
-    type Auth = dyn NoAuthNecessary;
-
-    fn path(&self) -> String {
-        "/api/v1/projects".to_string()
-    }
-
-    fn method(&self) -> reqwest::Method {
-        reqwest::Method::GET
-    }
-}
-
-pub struct ProjectDetail {
-    pub name: String,
-}
-
-impl Endpoint for ProjectDetail {
-    type Response = ApiProjectDetail;
-
-    type Body = ();
-
-    type Auth = dyn NoAuthNecessary;
-
-    fn path(&self) -> String {
-        format!("/api/project/{}", self.name)
-    }
-
-    fn method(&self) -> reqwest::Method {
-        reqwest::Method::GET
-    }
-}
-
 pub struct ServerInfo;
 
 impl Endpoint for ServerInfo {
@@ -69,7 +33,7 @@ impl Endpoint for ServerInfo {
     type Auth = dyn NoAuthNecessary;
 
     fn path(&self) -> String {
-        "/api/version".to_string()
+        "/api/version/".to_string()
     }
 
     fn method(&self) -> reqwest::Method {

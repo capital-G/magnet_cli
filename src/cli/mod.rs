@@ -6,6 +6,8 @@ use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
     ProjectRemoveDependencyArgs, ProjectRunArgs,
 };
+use crate::cli::commands::publish::PublishArgs;
+use crate::cli::commands::server_info::ServerInfoArgs;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use magnet::{
@@ -75,10 +77,14 @@ enum Commands {
     Run(ProjectRunArgs),
     /// Packages the current magnet project into `dist/` for publishing
     Package(ProjectPackageArgs),
+    /// Publishes packages of the current magnet project on the magnet server
+    Publish(PublishArgs),
     /// Logs in to the magnet server of the index
     Login(LoginArgs),
     /// Logs out of the magnet server of the index
     Logout(LogoutArgs),
+    /// Shows the magnet server of the index and its version
+    ServerInfo(ServerInfoArgs),
 }
 
 pub struct CliContext {
@@ -147,7 +153,9 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,
         Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
+        Commands::Publish(publish_args) => publish_args.run(&cli_context).await,
         Commands::Login(login_args) => login_args.run(&cli_context).await,
         Commands::Logout(logout_args) => logout_args.run(&cli_context).await,
+        Commands::ServerInfo(server_info_args) => server_info_args.run(&cli_context).await,
     }
 }

@@ -200,6 +200,15 @@ impl Project {
             .write(&self.path)
     }
 
+    pub fn manifest(&self) -> &MagnetManifestV1 {
+        self.project_manifest.get_manifest()
+    }
+
+    /// The project root, which holds `magnet.toml`
+    pub fn root(&self) -> &Path {
+        &self.path
+    }
+
     pub fn kind(&self) -> &MagnetManifestV1PackageKind {
         &self.project_manifest.get_manifest().package.kind
     }
