@@ -7,7 +7,6 @@ use inquire::{
     validator::{self, Validation},
     Select, Text,
 };
-use magnet::models::package::ArtifactTags;
 use magnet::{
     config::constants::{magnet_home, CACHE_DIR},
     models::{
@@ -279,11 +278,10 @@ impl MagnetSubCommand for ProjectRunArgs {
     }
 }
 
+/// Packages the current magnet project into `dist/`
 #[derive(Debug, Parser)]
-pub struct ProjectBundleArgs {
-    /// Path of the project.
-    /// If not provided, a new folder with the name of the project
-    /// will be created in the current working directory.
+pub struct ProjectPackageArgs {
+    /// Path of the project, the current directory by default
     #[arg(
         long,
         default_value = None,
@@ -291,19 +289,33 @@ pub struct ProjectBundleArgs {
     path: Option<PathBuf>,
 }
 
-impl MagnetSubCommand for ProjectBundleArgs {
+impl MagnetSubCommand for ProjectPackageArgs {
     async fn run(self, _cli_context: &CliContext) -> anyhow::Result<()> {
         let project_path = match self.path {
             Some(path) => path,
             None => env::current_dir()?,
         };
         let project = Project::open(&project_path)?;
-        // binaries need the platform and ABI tags, which come with leptons (C3.2)
-        let tags = match project.kind() {
-            MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
-            _ => ArtifactTags::source(),
-        };
-        project.create_package(&tags)?;
+        let archives = project.create_packages()?;
+        for archive in &archives {
+            let path = archive
+                .path
+                .strip_prefix(&project_path)
+                .unwrap_or(&archive.path);
+            println!("{} ({} files)", path.display(), archive.files.len());
+            for file in &archive.files {
+                println!("  {file}");
+            }
+        }
+        if *project.kind() != MagnetManifestV1PackageKind::Quark {
+            warn!(
+                "The binaries of a {} can't be packaged yet, only its source package",
+                project.kind()
+            );
+        }
+        println!(
+            "Check these files before publishing, a published artifact can never be replaced."
+        );
         Ok(())
     }
 }

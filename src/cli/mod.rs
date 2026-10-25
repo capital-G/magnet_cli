@@ -2,7 +2,7 @@ mod commands;
 mod logging;
 
 use crate::cli::commands::project::{
-    ProjectAddDependencyArgs, ProjectBundleArgs, ProjectInitArgs, ProjectInstallArgs,
+    ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
     ProjectRemoveDependencyArgs, ProjectRunArgs,
 };
 use anyhow::Context;
@@ -73,7 +73,8 @@ enum Commands {
     Install(ProjectInstallArgs),
     /// Runs an entrypoint of the current magnet project
     Run(ProjectRunArgs),
-    Bundle(ProjectBundleArgs),
+    /// Packages the current magnet project into `dist/` for publishing
+    Package(ProjectPackageArgs),
 }
 
 pub struct CliContext {
@@ -116,6 +117,6 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         }
         Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,
-        Commands::Bundle(project_bundle_args) => project_bundle_args.run(&cli_context).await,
+        Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
     }
 }

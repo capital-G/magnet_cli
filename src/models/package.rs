@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use anyhow::ensure;
 
@@ -50,6 +50,15 @@ impl fmt::Display for ArtifactTags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.abi, self.platform)
     }
+}
+
+/// An archive written by `magnet package`
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageArchive {
+    pub path: PathBuf,
+    pub tags: ArtifactTags,
+    /// the paths within the archive, sorted
+    pub files: Vec<String>,
 }
 
 /// Which archive of a package gets built, see DESIGN.md "Packaging"

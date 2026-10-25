@@ -8,7 +8,7 @@ use std::{
 use anyhow::{bail, ensure, Context};
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
-use tracing::{info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::models::project_manifest::{
     MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
@@ -21,7 +21,7 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{ArtifactTags, BundleType},
+        package::{ArtifactTags, BundleType, PackageArchive},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             MagnetManifestV1PackageKind,
@@ -590,12 +590,23 @@ impl Project {
         Ok(())
     }
 
+    /// Packages every archive of the project's version which can be built on this machine
+    /// into `dist/`: the `any-any` artifact of a quark, the source package of a lepton or gluon.
+    /// Their binaries need the platform and ABI tags (C3.2).
+    pub fn create_packages(&self) -> anyhow::Result<Vec<PackageArchive>> {
+        let tags = match self.kind() {
+            MagnetManifestV1PackageKind::Quark => vec![ArtifactTags::any()],
+            _ => vec![ArtifactTags::source()],
+        };
+        tags.iter().map(|tags| self.create_package(tags)).collect()
+    }
+
     /// Packages the project as the artifact with the given tags into `dist/`, see DESIGN.md
     /// "Packaging". The selected files keep their path relative to the project root, only the
     /// `platform-paths` binaries go into `plugins/`.
     /// [ArtifactTags::source] creates the source package of a lepton or gluon.
     #[instrument(skip(self))]
-    pub fn create_package(&self, tags: &ArtifactTags) -> anyhow::Result<PathBuf> {
+    pub fn create_package(&self, tags: &ArtifactTags) -> anyhow::Result<PackageArchive> {
         let manifest = self.project_manifest.get_manifest();
         let kind = &manifest.package.kind;
         ensure!(
@@ -636,9 +647,13 @@ impl Project {
         compression::compress(&entries, temp.path())?;
         temp.persist(&package_path)
             .with_context(|| format!("Could not write {package_path:?}"))?;
-        info!("Written package file to {package_path:?}");
+        debug!("Written package file to {package_path:?}");
 
-        Ok(package_path)
+        Ok(PackageArchive {
+            path: package_path,
+            tags: tags.clone(),
+            files: entries.into_keys().collect(),
+        })
     }
 }
 
@@ -1402,7 +1417,7 @@ beta = "^1"
             ],
         );
 
-        let package = project.create_package(&ArtifactTags::any()).unwrap();
+        let package = project.create_package(&ArtifactTags::any()).unwrap().path;
         assert_eq!(
             package,
             dir.path().join("dist/my-quark-0.2.0-quark-any-any.tar.gz")
@@ -1424,6 +1439,12 @@ beta = "^1"
         assert_eq!(fs::read(&package).unwrap(), first);
 
         assert!(project.create_package(&ArtifactTags::source()).is_err());
+
+        // the reported files are the contents of the archive
+        let archives = project.create_packages().unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].tags, ArtifactTags::any());
+        assert_eq!(archives[0].files, archive_paths(&package));
     }
 
     const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { platform = \"macos\", paths = [\"build/**/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\"]\n";
@@ -1442,15 +1463,22 @@ beta = "^1"
         );
 
         let tags = ArtifactTags::new("api3", "macos_arm64").unwrap();
-        let package = project.create_package(&tags).unwrap();
+        let package = project.create_package(&tags).unwrap().path;
         assert!(package.ends_with("foo-1.0.0-lepton-api3-macos_arm64.tar.gz"));
         assert_eq!(
             archive_paths(&package),
             ["Classes/Foo.sc", "magnet.toml", "plugins/Foo.scx"]
         );
 
-        let source = project.create_package(&ArtifactTags::source()).unwrap();
+        let source = project
+            .create_package(&ArtifactTags::source())
+            .unwrap()
+            .path;
         assert!(source.ends_with("foo-1.0.0-lepton-source-any.tar.gz"));
+        // binaries need platform tags (C3.2), so only the source package is built for now
+        let archives = project.create_packages().unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].path, source);
         assert_eq!(
             archive_paths(&source),
             ["Classes/Foo.sc", "magnet.toml", "src/Foo.cpp"]
