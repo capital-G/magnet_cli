@@ -7,7 +7,7 @@ use inquire::{
     validator::{self, Validation},
     Select, Text,
 };
-use magnet::models::package::{BundleFormat, Quark, QuarkAbiTag, SourcePlatformTag};
+use magnet::models::package::ArtifactTags;
 use magnet::{
     config::constants::{magnet_home, CACHE_DIR},
     models::{
@@ -277,14 +277,12 @@ impl MagnetSubCommand for ProjectBundleArgs {
             None => env::current_dir()?,
         };
         let project = Project::open(&project_path)?;
-        let bundle_format: BundleFormat<Quark> = BundleFormat {
-            abi: QuarkAbiTag::Sclang314,
-            platform: SourcePlatformTag::Any,
+        // binaries need the platform and ABI tags, which come with leptons (C3.2)
+        let tags = match project.kind() {
+            MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
+            _ => ArtifactTags::source(),
         };
-        project.create_package(
-            Some(MagnetManifestV1PackageKind::Gluon),
-            Some(bundle_format),
-        )?;
+        project.create_package(&tags)?;
         Ok(())
     }
 }

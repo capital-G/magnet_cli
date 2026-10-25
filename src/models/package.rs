@@ -1,98 +1,55 @@
-use crate::models::project_manifest::MagnetManifestV1PackageKind;
+use std::fmt;
 
-/// Describes the ABI which of the server it was compiled against.
-/// Since some plugins are not compatible with Supernova (e.g. FluCoMa)
-/// there is a not just the option to specify the ABI but also the
-/// abi
-///
-/// Do not rename these after creating, since those are
-/// used to identify packages on the server and on the client.
-/// Should be at some point derived from the JSON spec.
-#[derive(Debug, Clone)]
-pub enum LeptonAbiTag {
-    UniversalServer3,
-    UniversalServer4,
-    UniversalServer5,
+use anyhow::ensure;
 
-    ScsynthServer3,
-    ScsynthServer4,
-    ScsynthServer5,
-
-    SupernovaServer3,
-    SupernovaServer4,
-    SupernovaServer5,
+/// The tags of an artifact, which are part of its filename and its `dl` URL,
+/// see DESIGN.md "Packaging".
+/// The lists of valid lepton and gluon tags are not fixed yet (D3.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactTags {
+    pub abi: String,
+    pub platform: String,
 }
 
-/// Since the Gluon ABI is not existing yet we create a dummy entry V1
-#[derive(Debug, Clone)]
-pub enum GluonAbiTag {
-    GluonV1,
+impl ArtifactTags {
+    /// The tags of a lepton/gluon artifact. Tags use `_` instead of `-`, so they are URL-safe
+    /// and the parts of a filename stay apart.
+    pub fn new(abi: &str, platform: &str) -> anyhow::Result<Self> {
+        for tag in [abi, platform] {
+            ensure!(
+                !tag.is_empty()
+                    && tag
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{tag:?} is not a valid tag, which may only contain a-z, 0-9 and _"
+            );
+        }
+        Ok(Self {
+            abi: abi.to_string(),
+            platform: platform.to_string(),
+        })
+    }
+
+    /// The only artifact of a quark
+    pub fn any() -> Self {
+        Self::new("any", "any").unwrap()
+    }
+
+    /// The source package of a lepton or gluon
+    pub fn source() -> Self {
+        Self::new("source", "any").unwrap()
+    }
+
+    pub fn is_source(&self) -> bool {
+        *self == Self::source()
+    }
 }
 
-/// Minimum sclang class library version required.
-#[derive(Debug, Clone)]
-pub enum QuarkAbiTag {
-    Sclang310,
-    Sclang311,
-    Sclang312,
-    Sclang313,
-    Sclang314,
-    Sclang315,
-}
-
-#[derive(Debug, Clone)]
-pub enum SourcePlatformTag {
-    Any,
-}
-
-#[derive(Debug, Clone)]
-pub enum BinaryPlatformTag {
-    WinAmd64,
-    WinArm64,
-    Win32,
-
-    LinuxX86_64,
-    LinuxArm64,
-
-    MacOSXArm64,
-    MacOSXAmd64,
-    MacOSXUniversal,
-}
-
-pub struct Quark;
-pub struct Lepton;
-pub struct Gluon;
-
-pub trait MagnetPackage {
-    const KIND: MagnetManifestV1PackageKind;
-    type Abi: std::fmt::Debug;
-    type Platform: std::fmt::Debug;
-}
-
-impl MagnetPackage for Quark {
-    const KIND: MagnetManifestV1PackageKind = MagnetManifestV1PackageKind::Quark;
-    type Abi = QuarkAbiTag;
-    type Platform = SourcePlatformTag;
-}
-
-impl MagnetPackage for Lepton {
-    const KIND: MagnetManifestV1PackageKind = MagnetManifestV1PackageKind::Lepton;
-    type Abi = LeptonAbiTag;
-    type Platform = BinaryPlatformTag;
-}
-
-impl MagnetPackage for Gluon {
-    const KIND: MagnetManifestV1PackageKind = MagnetManifestV1PackageKind::Gluon;
-    type Abi = GluonAbiTag;
-    type Platform = BinaryPlatformTag;
-}
-
-pub struct SourceBundle;
-
-#[derive(Debug, Clone)]
-pub struct BundleFormat<P: MagnetPackage> {
-    pub abi: P::Abi,
-    pub platform: P::Platform,
+/// `{abi}-{platform}`, as used for the checksums of the lock file
+impl fmt::Display for ArtifactTags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.abi, self.platform)
+    }
 }
 
 /// Which archive of a package gets built, see DESIGN.md "Packaging"
@@ -102,4 +59,38 @@ pub enum BundleType {
     SourceBundle,
     /// artifact selected by `global-paths` (+ `platform-paths`)
     ArtifactBundle,
+}
+
+impl From<&ArtifactTags> for BundleType {
+    fn from(tags: &ArtifactTags) -> Self {
+        if tags.is_source() {
+            BundleType::SourceBundle
+        } else {
+            BundleType::ArtifactBundle
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tags() {
+        assert_eq!(ArtifactTags::any().to_string(), "any-any");
+        assert_eq!(ArtifactTags::source().to_string(), "source-any");
+        assert!(ArtifactTags::source().is_source());
+        assert!(ArtifactTags::new("api3", "macos_arm64").is_ok());
+        for (abi, platform) in [
+            ("api-3", "any"),
+            ("any", "macOS"),
+            ("", "any"),
+            ("a/b", "any"),
+        ] {
+            assert!(
+                ArtifactTags::new(abi, platform).is_err(),
+                "{abi} {platform}"
+            );
+        }
+    }
 }

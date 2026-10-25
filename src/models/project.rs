@@ -1,6 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File},
+    collections::{BTreeMap, HashMap, HashSet},
+    fs,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
 };
@@ -21,17 +21,13 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{BundleFormat, BundleType, MagnetPackage, SourceBundle},
+        package::{ArtifactTags, BundleType},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             MagnetManifestV1PackageKind,
         },
     },
-    packaging::{
-        collect::collect_files,
-        compression::{self, MagnetArchive},
-        naming::PackageNaming,
-    },
+    packaging::{collect::collect_files, compression, naming::artifact_file_name},
     resolver::{
         online_provider::{resolve_dependencies, RootProvider, ToRanges},
         package_downloader::{Artifact, PackageDownloader},
@@ -200,6 +196,10 @@ impl Project {
     fn write_language_config_for(&self, sclang: Option<Sclang>) -> anyhow::Result<()> {
         LanguageConfig::for_project(&self.path, self.project_manifest.get_manifest(), sclang)?
             .write(&self.path)
+    }
+
+    pub fn kind(&self) -> &MagnetManifestV1PackageKind {
+        &self.project_manifest.get_manifest().package.kind
     }
 
     /// The entrypoints of the project, which can be started via `magnet run`
@@ -513,106 +513,73 @@ impl Project {
         Ok(())
     }
 
-    /// collects all files of the project and puts them into a .tar.gz
-    /// file which can be distributed.
-    /// It will be saved under with the upload identifier format in the project directory
-    /// under `/dist`.
-    /// Additionally, the source package will also be created or updated.
-    #[instrument(skip(self, _artifact_kind, _bundle_format))]
-    pub fn create_package<P: MagnetPackage>(
-        &self,
-        _artifact_kind: Option<MagnetManifestV1PackageKind>,
-        _bundle_format: Option<BundleFormat<P>>,
-    ) -> anyhow::Result<PathBuf> {
-        // create tar file outside of directory and move it later back in to avoid recursive problems
-        // while scanning the project directory
-        if self.project_manifest.get_manifest().package.kind != MagnetManifestV1PackageKind::Quark {
-            self.create_source_package()?;
-        }
-
-        let temp_tar = tempfile::NamedTempFile::new()?;
-        let temp_tar_path = temp_tar.path();
-        trace!(?temp_tar_path, "Create temporary tar file");
-
-        let tar_file = File::create(temp_tar_path)?;
-        let encoder = flate2::write::GzEncoder::new(&tar_file, flate2::Compression::default());
-        let mut tar = tar::Builder::new(encoder);
-
-        Self::fill_archive(&mut tar, &self.path, &self.path)?;
-
-        tar.into_inner()?.finish()?;
-
-        let release_path = self.release_package_path();
-        temp_tar
-            .persist(&release_path)
-            .context("Could not write package file to {release_path:?}")?;
-        info!("Written package file to {:?}", release_path);
-
-        Ok(release_path)
-    }
-
+    /// Packages the project as the artifact with the given tags into `dist/`, see DESIGN.md
+    /// "Packaging". The selected files keep their path relative to the project root, only the
+    /// `platform-paths` binaries go into `plugins/`.
+    /// [ArtifactTags::source] creates the source package of a lepton or gluon.
     #[instrument(skip(self))]
-    fn create_source_package(&self) -> anyhow::Result<PathBuf> {
-        let bundle = SourceBundle {};
-        let source_name = bundle.package_file_name(
-            &self.project_manifest.get_manifest().package.name,
-            &SemanticVersion::try_from(
-                self.project_manifest.get_manifest().package.version.clone(),
-            )?,
+    pub fn create_package(&self, tags: &ArtifactTags) -> anyhow::Result<PathBuf> {
+        let manifest = self.project_manifest.get_manifest();
+        let kind = &manifest.package.kind;
+        ensure!(
+            *kind != MagnetManifestV1PackageKind::Quark || *tags == ArtifactTags::any(),
+            "A quark only has an {} artifact, not {tags}",
+            ArtifactTags::any()
         );
-        let archive_path = self.project_dir(ProjectDirectory::Dist).join(source_name);
+        let files = collect_files(&self.path, manifest, &BundleType::from(tags))?;
 
-        let files: Vec<PathBuf> = collect_files(
-            &self.path,
-            self.project_manifest.get_manifest(),
-            &BundleType::SourceBundle,
-        )?
-        .files
-        .iter()
-        .map(|file| self.path.join(file))
-        .collect();
-
-        self.compress(&files, &self.path, &archive_path)?;
-
-        Ok(archive_path)
-    }
-
-    fn release_package_path(&self) -> PathBuf {
-        self.project_dir(ProjectDirectory::Dist).join(format!(
-            "{}_{}.tar.gz",
-            self.project_manifest.get_manifest().package.name,
-            self.project_manifest
-                .get_manifest()
-                .package
-                .version
-                .to_string()
-                .replace(".", "-")
-        ))
-    }
-
-    /// Walks a the project directory recursively and adds the files accordingly
-    fn fill_archive(
-        tar: &mut tar::Builder<flate2::write::GzEncoder<&File>>,
-        base: &Path,
-        current: &Path,
-    ) -> Result<(), anyhow::Error> {
-        for entry in fs::read_dir(current).unwrap() {
-            let entry = entry?;
-            let path = entry.path();
-
-            if exclude_path(base, current) {
-                continue;
-            }
-            if path.is_dir() {
-                Self::fill_archive(tar, base, &path)?;
-            } else if path.is_file() {
-                let relative_path: PathBuf = path.strip_prefix(base)?.into();
-                trace!(?relative_path, "Include file");
-                tar.append_path_with_name(path, relative_path)?;
-            }
+        let mut entries = BTreeMap::new();
+        for file in &files.files {
+            entries.insert(archive_path(file)?, self.path.join(file));
         }
-        Ok(())
+        for binary in &files.binaries {
+            let name = binary
+                .file_name()
+                .with_context(|| format!("{binary:?} has no file name"))?
+                .to_string_lossy();
+            let path = format!("{PLUGINS_DIR}/{name}");
+            ensure!(
+                entries
+                    .insert(path.clone(), self.path.join(binary))
+                    .is_none(),
+                "{binary:?} would be packaged as {path}, which is already part of the package"
+            );
+        }
+
+        let dist = self.project_dir(ProjectDirectory::Dist);
+        fs::create_dir_all(&dist).with_context(|| format!("Could not create {dist:?}"))?;
+        let package_path = dist.join(artifact_file_name(
+            &manifest.package.name,
+            &SemanticVersion::try_from(manifest.package.version.clone())?,
+            kind,
+            tags,
+        ));
+        // written next to the target and renamed, so a failure leaves no half-written package
+        let temp = tempfile::NamedTempFile::new_in(&dist)?;
+        compression::compress(&entries, temp.path())?;
+        temp.persist(&package_path)
+            .with_context(|| format!("Could not write {package_path:?}"))?;
+        info!("Written package file to {package_path:?}");
+
+        Ok(package_path)
     }
+}
+
+/// binaries of `platform-paths` within a package
+const PLUGINS_DIR: &str = "plugins";
+
+/// The `/`-separated path of a file within a package
+fn archive_path(file: &Path) -> anyhow::Result<String> {
+    Ok(file
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .with_context(|| format!("{file:?} is not valid UTF-8"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .join("/"))
 }
 
 /// A shell command, which receives `args` as additional arguments
@@ -683,31 +650,12 @@ fn is_index_dependency(dependency: &MagnetManifestV1DependenciesValue) -> bool {
     }
 }
 
-static PROJECT_EXCLUDE_PATHS: &[&str] = &["build", ".git", ".vscode", ".DS_Store"];
-
-/// determines if a given path within the project directory gets ignored or not
-/// returns `true` if the given path should be rejected
-fn exclude_path(_base: &Path, current: &Path) -> bool {
-    let file_name = current.file_name().unwrap().to_str().unwrap();
-    PROJECT_EXCLUDE_PATHS.iter().any(|name| name == &file_name)
-}
-
 #[cfg(test)]
 mod tests {
     use std::env;
 
     use super::*;
     use url::Url;
-
-    #[test]
-    fn test_exclude_path() {
-        let path = env::current_dir().unwrap();
-
-        for non_reject in ["foo.scd", "classes"] {
-            assert!(!exclude_path(&path, &path.join(non_reject)));
-            assert!(!exclude_path(&path, &path.join("sub_idr").join(non_reject)));
-        }
-    }
 
     const MANIFEST: &str = r#"# my project
 magnet-version = 1
@@ -1294,5 +1242,108 @@ beta = "^1"
         for entry in ["/dist/", "/external/", "/sclang_conf.yaml"] {
             assert!(gitignore.lines().any(|line| line == entry), "{gitignore}");
         }
+    }
+    /// the paths within a `.tar.gz` archive, in their order
+    fn archive_paths(archive: &Path) -> Vec<String> {
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+            fs::File::open(archive).unwrap(),
+        ));
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().to_string_lossy().to_string())
+            .collect()
+    }
+
+    fn write_files(dir: &tempfile::TempDir, files: &[&str]) {
+        for file in files {
+            let path = dir.path().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, file).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_create_quark_package() {
+        let (dir, project) = project(
+            "magnet-version = 1\n[package]\nname = \"My_Quark\"\nversion = \"0.2.0\"\nkind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"HelpSource/**/*\"]\n",
+        );
+        write_files(
+            &dir,
+            &[
+                "Classes/Foo.sc",
+                "Classes/Sub/Bar.sc",
+                "HelpSource/Classes/Foo.schelp",
+                "README.md",
+                "test.scd",
+            ],
+        );
+
+        let package = project.create_package(&ArtifactTags::any()).unwrap();
+        assert_eq!(
+            package,
+            dir.path().join("dist/my-quark-0.2.0-quark-any-any.tar.gz")
+        );
+        assert_eq!(
+            archive_paths(&package),
+            [
+                "Classes/Foo.sc",
+                "Classes/Sub/Bar.sc",
+                "HelpSource/Classes/Foo.schelp",
+                "README.md",
+                "magnet.toml"
+            ]
+        );
+
+        // packaging again (now with dist/ present) gives the same bytes
+        let first = fs::read(&package).unwrap();
+        project.create_package(&ArtifactTags::any()).unwrap();
+        assert_eq!(fs::read(&package).unwrap(), first);
+
+        assert!(project.create_package(&ArtifactTags::source()).is_err());
+    }
+
+    const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { platform = \"macos\", paths = [\"build/**/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\"]\n";
+
+    #[test]
+    fn test_create_lepton_packages() {
+        let (dir, project) = project(LEPTON_MANIFEST);
+        write_files(
+            &dir,
+            &[
+                "Classes/Foo.sc",
+                "src/Foo.cpp",
+                "build/Release/Foo.scx",
+                "build/Foo.o",
+            ],
+        );
+
+        let tags = ArtifactTags::new("api3", "macos_arm64").unwrap();
+        let package = project.create_package(&tags).unwrap();
+        assert!(package.ends_with("foo-1.0.0-lepton-api3-macos_arm64.tar.gz"));
+        assert_eq!(
+            archive_paths(&package),
+            ["Classes/Foo.sc", "magnet.toml", "plugins/Foo.scx"]
+        );
+
+        let source = project.create_package(&ArtifactTags::source()).unwrap();
+        assert!(source.ends_with("foo-1.0.0-lepton-source-any.tar.gz"));
+        assert_eq!(
+            archive_paths(&source),
+            ["Classes/Foo.sc", "magnet.toml", "src/Foo.cpp"]
+        );
+    }
+
+    #[test]
+    fn test_binaries_with_the_same_name() {
+        let (dir, project) = project(LEPTON_MANIFEST);
+        write_files(
+            &dir,
+            &["Classes/Foo.sc", "build/a/Foo.scx", "build/b/Foo.scx"],
+        );
+        let err = project
+            .create_package(&ArtifactTags::new("api3", "macos_arm64").unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("plugins/Foo.scx"), "{err}");
     }
 }

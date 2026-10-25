@@ -1,87 +1,57 @@
 use pubgrub::SemanticVersion;
 
-use crate::models::package::{BundleFormat, MagnetPackage, SourceBundle};
+use crate::models::{
+    package::ArtifactTags,
+    project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+};
 
-pub trait PackageNaming {
-    fn package_file_name(&self, name: &str, version: &SemanticVersion) -> String;
-}
-
-impl<P: MagnetPackage> PackageNaming for BundleFormat<P> {
-    fn package_file_name(&self, name: &str, version: &SemanticVersion) -> String {
-        format!(
-            "{}-{}-{}-{}-{}.tar.gz",
-            name,
-            version,
-            format!("{:?}", P::KIND).to_lowercase(),
-            format!("{:?}", self.abi).to_lowercase(),
-            format!("{:?}", self.platform).to_lowercase(),
-        )
-    }
-}
-
-impl PackageNaming for SourceBundle {
-    fn package_file_name(&self, name: &str, version: &SemanticVersion) -> String {
-        format!("{}-{}-source.tar.gz", name, version,)
-    }
+/// `{name}-{version}-{kind}-{abi}-{platform}.tar.gz` with the normalised name, see DESIGN.md
+/// "Packaging". The filename is only ever built, never parsed.
+pub fn artifact_file_name(
+    name: &str,
+    version: &SemanticVersion,
+    kind: &MagnetManifestV1PackageKind,
+    tags: &ArtifactTags,
+) -> String {
+    format!(
+        "{}-{version}-{kind}-{tags}.tar.gz",
+        MagnetManifestV1::normalize_name(name)
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use pubgrub::SemanticVersion;
-
-    use crate::models::package::{
-        BinaryPlatformTag, Gluon, GluonAbiTag, Lepton, LeptonAbiTag, Quark, QuarkAbiTag,
-        SourceBundle, SourcePlatformTag,
-    };
-
     use super::*;
 
     #[test]
     fn test_quark_name() {
-        let bundle = BundleFormat::<Quark> {
-            abi: QuarkAbiTag::Sclang310,
-            platform: SourcePlatformTag::Any,
-        };
-
         assert_eq!(
-            bundle.package_file_name("foobar", &SemanticVersion::one()),
-            "foobar-1.0.0-quark-sclang310-any.tar.gz",
+            artifact_file_name(
+                "Foo_Bar",
+                &SemanticVersion::new(1, 2, 0),
+                &MagnetManifestV1PackageKind::Quark,
+                &ArtifactTags::any()
+            ),
+            "foo-bar-1.2.0-quark-any-any.tar.gz",
         );
     }
 
     #[test]
-    fn test_lepton_name() {
-        let bundle = BundleFormat::<Lepton> {
-            abi: LeptonAbiTag::UniversalServer3,
-            platform: BinaryPlatformTag::MacOSXArm64,
-        };
-
+    fn test_lepton_names() {
+        let version = SemanticVersion::one();
+        let kind = MagnetManifestV1PackageKind::Lepton;
         assert_eq!(
-            bundle.package_file_name("foobar", &SemanticVersion::one()),
-            "foobar-1.0.0-lepton-universalserver3-macosxarm64.tar.gz",
+            artifact_file_name(
+                "foobar",
+                &version,
+                &kind,
+                &ArtifactTags::new("api3", "macos_arm64").unwrap()
+            ),
+            "foobar-1.0.0-lepton-api3-macos_arm64.tar.gz",
         );
-    }
-
-    #[test]
-    fn test_gluon_name() {
-        let bundle = BundleFormat::<Gluon> {
-            abi: GluonAbiTag::GluonV1,
-            platform: BinaryPlatformTag::Win32,
-        };
-
         assert_eq!(
-            bundle.package_file_name("foobar", &SemanticVersion::one()),
-            "foobar-1.0.0-gluon-gluonv1-win32.tar.gz",
-        );
-    }
-
-    #[test]
-    fn test_source_name() {
-        let bundle = SourceBundle;
-
-        assert_eq!(
-            bundle.package_file_name("foobar", &SemanticVersion::one()),
-            "foobar-1.0.0-source.tar.gz",
+            artifact_file_name("foobar", &version, &kind, &ArtifactTags::source()),
+            "foobar-1.0.0-lepton-source-any.tar.gz",
         );
     }
 }
