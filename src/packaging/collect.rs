@@ -15,9 +15,7 @@ use crate::{
         directories::ProjectDirectory,
         language_config::SCLANG_CONF_FILE,
         package::ArtifactTags,
-        project_manifest::{
-            MagnetManifestV1, MagnetManifestV1ArtifactPlatformPathsKey, MagnetManifestV1PackageKind,
-        },
+        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind, Platform},
     },
 };
 
@@ -71,7 +69,7 @@ pub fn collect_files(
                     );
                     vec![]
                 }
-                _ => MagnetManifestV1ArtifactPlatformPathsKey::from_str(&tags.platform)
+                _ => Platform::from_str(&tags.platform)
                     .ok()
                     .and_then(|platform| artifact.platform_paths.get(&platform).cloned())
                     .with_context(|| {
@@ -432,7 +430,7 @@ mod tests {
     ];
 
     fn macos_arm64() -> ArtifactTags {
-        ArtifactTags::new("api3", "macos_arm64").unwrap()
+        ArtifactTags::new("api3_0", "macos_arm64").unwrap()
     }
 
     #[test]
@@ -456,7 +454,7 @@ mod tests {
         );
         let files = collect_files(dir.path(), &manifest, &macos_arm64()).unwrap();
         assert_eq!(files.binaries, paths(&["build/Foo.scx"]));
-        let linux = ArtifactTags::new("api3", "linux_x86_64").unwrap();
+        let linux = ArtifactTags::new("api3_0", "linux_x86_64").unwrap();
         let files = collect_files(dir.path(), &manifest, &linux).unwrap();
         assert_eq!(
             files.binaries,
@@ -464,7 +462,7 @@ mod tests {
         );
 
         for platform in ["windows_x86_64", "any"] {
-            let tags = ArtifactTags::new("api3", platform).unwrap();
+            let tags = ArtifactTags::new("api3_0", platform).unwrap();
             let err = collect_files(dir.path(), &manifest, &tags).unwrap_err();
             assert!(
                 err.to_string()

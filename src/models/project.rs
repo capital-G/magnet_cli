@@ -709,12 +709,17 @@ impl Project {
     }
 
     /// Packages every archive of the project's version which can be built on this machine
-    /// into `dist/`: the `any-any` artifact of a quark, the source package of a lepton or gluon.
-    /// Their binaries need the platform and ABI tags (C3.2).
-    pub fn create_packages(&self) -> anyhow::Result<Vec<PackageArchive>> {
+    /// into `dist/`: the `any-any` artifact of a quark, the source package and the binary
+    /// artifact of a lepton (with the tags of `binary_tags`), only the source package of a
+    /// gluon (reserved).
+    pub fn create_packages(
+        &self,
+        binary_tags: impl FnOnce() -> anyhow::Result<ArtifactTags>,
+    ) -> anyhow::Result<Vec<PackageArchive>> {
         let tags = match self.kind() {
             MagnetManifestV1PackageKind::Quark => vec![ArtifactTags::any()],
-            _ => vec![ArtifactTags::source()],
+            MagnetManifestV1PackageKind::Lepton => vec![ArtifactTags::source(), binary_tags()?],
+            MagnetManifestV1PackageKind::Gluon => vec![ArtifactTags::source()],
         };
         tags.iter().map(|tags| self.create_package(tags)).collect()
     }
@@ -1559,7 +1564,9 @@ beta = "^1"
         assert!(project.create_package(&ArtifactTags::source()).is_err());
 
         // the reported files are the contents of the archive
-        let archives = project.create_packages().unwrap();
+        let archives = project
+            .create_packages(|| panic!("a quark has no binaries"))
+            .unwrap();
         assert_eq!(archives.len(), 1);
         assert_eq!(archives[0].tags, ArtifactTags::any());
         assert_eq!(archives[0].files, archive_paths(&package));
@@ -1580,9 +1587,9 @@ beta = "^1"
             ],
         );
 
-        let tags = ArtifactTags::new("api3", "macos_arm64").unwrap();
+        let tags = ArtifactTags::new("api3_0", "macos_arm64").unwrap();
         let package = project.create_package(&tags).unwrap().path;
-        assert!(package.ends_with("foo-1.0.0-lepton-api3-macos_arm64.tar.gz"));
+        assert!(package.ends_with("foo-1.0.0-lepton-api3_0-macos_arm64.tar.gz"));
         assert_eq!(
             archive_paths(&package),
             ["Classes/Foo.sc", "magnet.toml", "plugins/Foo.scx"]
@@ -1593,10 +1600,9 @@ beta = "^1"
             .unwrap()
             .path;
         assert!(source.ends_with("foo-1.0.0-lepton-source-any.tar.gz"));
-        // binaries need platform tags (C3.2), so only the source package is built for now
-        let archives = project.create_packages().unwrap();
-        assert_eq!(archives.len(), 1);
-        assert_eq!(archives[0].path, source);
+        let archives = project.create_packages(|| Ok(tags.clone())).unwrap();
+        let paths: Vec<_> = archives.iter().map(|archive| &archive.path).collect();
+        assert_eq!(paths, [&source, &package]);
         assert_eq!(
             archive_paths(&source),
             ["Classes/Foo.sc", "magnet.toml", "src/Foo.cpp"]
@@ -1611,7 +1617,7 @@ beta = "^1"
             &["Classes/Foo.sc", "build/a/Foo.scx", "build/b/Foo.scx"],
         );
         let err = project
-            .create_package(&ArtifactTags::new("api3", "macos_arm64").unwrap())
+            .create_package(&ArtifactTags::new("api3_0", "macos_arm64").unwrap())
             .unwrap_err();
         assert!(err.to_string().contains("plugins/Foo.scx"), "{err}");
     }

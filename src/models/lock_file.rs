@@ -294,7 +294,7 @@ mod tests {
     fn test_from_git_release() {
         let release: GitRelease = serde_json::from_str(
             r#"{"name": "gamma", "version": "0.3.0", "kind": "lepton", "artifacts": [
-                {"abi": "api3", "platform": "linux_x86_64", "sha256": "abc"},
+                {"abi": "api3_0", "platform": "linux_x86_64", "sha256": "abc"},
                 {"abi": "source", "platform": "any", "sha256": "def"}]}"#,
         )
         .unwrap();
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(
             dependency.checksums,
             BTreeMap::from([
-                ("api3-linux_x86_64".to_string(), "abc".to_string()),
+                ("api3_0-linux_x86_64".to_string(), "abc".to_string()),
                 ("source-any".to_string(), "def".to_string()),
             ])
         );

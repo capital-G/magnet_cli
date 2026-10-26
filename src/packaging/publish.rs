@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn test_archives_of_the_current_version() {
         let dir = dist(&[
-            "foo-bar-1.2.0-lepton-api3-macos_arm64.tar.gz",
+            "foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz",
             "foo-bar-1.2.0-lepton-source-any.tar.gz",
             // other versions, kinds or files are ignored
             "foo-bar-1.1.0-lepton-source-any.tar.gz",
@@ -318,8 +318,8 @@ mod tests {
                     "source-any".to_string()
                 ),
                 (
-                    "foo-bar-1.2.0-lepton-api3-macos_arm64.tar.gz".to_string(),
-                    "api3-macos_arm64".to_string()
+                    "foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz".to_string(),
+                    "api3_0-macos_arm64".to_string()
                 ),
             ]
         );
@@ -328,20 +328,20 @@ mod tests {
     #[test]
     fn test_explicit_archives() {
         let dir = dist(&[
-            "foo-bar-1.2.0-lepton-api3-macos_arm64.tar.gz",
+            "foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz",
             "foo-bar-1.2.0-lepton-source-any.tar.gz",
             "foo-bar-1.1.0-lepton-source-any.tar.gz",
         ]);
         let file = dir
             .path()
-            .join("dist/foo-bar-1.2.0-lepton-api3-macos_arm64.tar.gz");
+            .join("dist/foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz");
         let archives =
             publish_archives(dir.path(), &manifest("lepton", ""), &[file.clone()]).unwrap();
         assert_eq!(
             archives,
             [PublishArchive {
                 path: file,
-                tags: ArtifactTags::new("api3", "macos_arm64").unwrap()
+                tags: ArtifactTags::new("api3_0", "macos_arm64").unwrap()
             }]
         );
 
@@ -458,11 +458,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_append_to_final_version() {
-        let binary = "foo-bar-1.2.0-lepton-api3-linux_x86_64.tar.gz";
+        let binary = "foo-bar-1.2.0-lepton-api3_0-linux_x86_64.tar.gz";
         let dir = dist(&[binary]);
         let artifacts = serde_json::json!([{"abi": "source", "platform": "any", "sha256": "abc"}]);
         let server = server((200, version("final", artifacts))).await;
-        expect_upload(&server, "api3-linux_x86_64", binary.as_bytes(), 201).await;
+        expect_upload(&server, "api3_0-linux_x86_64", binary.as_bytes(), 201).await;
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
         let archives = publish_archives(dir.path(), &manifest("lepton", ""), &[]).unwrap();
@@ -474,10 +474,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_binary_without_source_stays_draft() {
-        let binary = "foo-bar-1.2.0-lepton-api3-linux_x86_64.tar.gz";
+        let binary = "foo-bar-1.2.0-lepton-api3_0-linux_x86_64.tar.gz";
         let dir = dist(&[binary]);
         let server = server((201, version("draft", serde_json::json!([])))).await;
-        expect_upload(&server, "api3-linux_x86_64", binary.as_bytes(), 201).await;
+        expect_upload(&server, "api3_0-linux_x86_64", binary.as_bytes(), 201).await;
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
         let archives = publish_archives(dir.path(), &manifest("lepton", ""), &[]).unwrap();

@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(ArtifactTags::any().to_string(), "any-any");
         assert_eq!(ArtifactTags::source().to_string(), "source-any");
         assert!(ArtifactTags::source().is_source());
-        assert!(ArtifactTags::new("api3", "macos_arm64").is_ok());
+        assert!(ArtifactTags::new("api3_0", "macos_arm64").is_ok());
         for (abi, platform) in [
             ("api-3", "any"),
             ("any", "macOS"),

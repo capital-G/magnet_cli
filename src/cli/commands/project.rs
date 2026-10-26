@@ -2,7 +2,7 @@ use std::{env, error::Error, fs, path::PathBuf};
 
 use crate::cli::{CliContext, MagnetSubCommand};
 use anyhow::Context;
-use clap::{arg, Parser};
+use clap::{arg, Args, Parser};
 use inquire::{
     validator::{self, Validation},
     Select, Text,
@@ -11,11 +11,13 @@ use magnet::{
     config::constants::{magnet_home, CACHE_DIR},
     git_client::client::GitClient,
     models::{
+        package::ArtifactTags,
         project::Project,
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     resolver::package_downloader::PackageDownloader,
     sclang::Sclang,
+    target::{binary_tags, MAGNET_ABI_ENV, MAGNET_PLATFORM_ENV},
 };
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
@@ -373,6 +375,27 @@ pub struct ProjectPackageArgs {
         default_value = None,
     )]
     path: Option<PathBuf>,
+
+    #[command(flatten)]
+    target: TargetArgs,
+}
+
+/// Tags of the binary artifact for this machine, by default detected
+#[derive(Debug, Args)]
+pub struct TargetArgs {
+    /// Platform tag of the binaries, e.g. linux_x86_64, detected by default
+    #[arg(long, env = MAGNET_PLATFORM_ENV)]
+    platform: Option<String>,
+
+    /// abi tag of the binaries, e.g. api3_0, derived from the version of the found sclang by default
+    #[arg(long, env = MAGNET_ABI_ENV)]
+    abi: Option<String>,
+}
+
+impl TargetArgs {
+    fn binary_tags(&self) -> anyhow::Result<ArtifactTags> {
+        binary_tags(self.platform.as_deref(), self.abi.as_deref(), Sclang::find)
+    }
 }
 
 impl MagnetSubCommand for ProjectPackageArgs {
@@ -382,7 +405,7 @@ impl MagnetSubCommand for ProjectPackageArgs {
             None => env::current_dir()?,
         };
         let project = Project::open(&project_path)?;
-        let archives = project.create_packages()?;
+        let archives = project.create_packages(|| self.target.binary_tags())?;
         for archive in &archives {
             let path = archive
                 .path
@@ -393,11 +416,8 @@ impl MagnetSubCommand for ProjectPackageArgs {
                 println!("  {file}");
             }
         }
-        if *project.kind() != MagnetManifestV1PackageKind::Quark {
-            warn!(
-                "The binaries of a {} can't be packaged yet, only its source package",
-                project.kind()
-            );
+        if *project.kind() == MagnetManifestV1PackageKind::Gluon {
+            warn!("The binaries of a gluon can't be packaged yet, only its source package");
         }
         println!(
             "Check these files before publishing, a published artifact can never be replaced."

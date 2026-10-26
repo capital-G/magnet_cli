@@ -374,7 +374,7 @@ mod tests {
         let keys: Vec<String> = release.artifacts.iter().map(|a| a.key()).collect();
         assert_eq!(
             keys,
-            ["api3-linux_x86_64", "api3-macos_arm64", "source-any"]
+            ["api3_0-linux_x86_64", "api3_0-macos_arm64", "source-any"]
         );
     }
 

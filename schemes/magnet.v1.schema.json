@@ -161,7 +161,7 @@
           "type": "object",
           "description": "Platform-dependent paths of a lepton or gluon, e.g. binary build outputs, keyed by platform tag - supports glob wildcards",
           "propertyNames": {
-            "enum": ["linux_x86_64", "linux_arm64", "linux_armv7", "macos_x86_64", "macos_arm64", "windows_x86_64", "windows_arm64", "wasm32_emscripten"]
+            "$ref": "#/definitions/platform"
           },
           "additionalProperties": {
             "type": "array",
@@ -230,5 +230,12 @@
     }
   },
   "required": ["magnet-version", "package"],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "definitions": {
+    "platform": {
+      "type": "string",
+      "description": "Platform tag of a binary artifact",
+      "enum": ["linux_x86_64", "linux_arm64", "linux_armv7", "macos_x86_64", "macos_arm64", "windows_x86_64", "windows_arm64", "wasm32_emscripten"]
+    }
+  }
 }

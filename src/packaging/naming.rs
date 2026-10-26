@@ -45,9 +45,9 @@ mod tests {
                 "foobar",
                 &version,
                 &kind,
-                &ArtifactTags::new("api3", "macos_arm64").unwrap()
+                &ArtifactTags::new("api3_0", "macos_arm64").unwrap()
             ),
-            "foobar-1.0.0-lepton-api3-macos_arm64.tar.gz",
+            "foobar-1.0.0-lepton-api3_0-macos_arm64.tar.gz",
         );
         assert_eq!(
             artifact_file_name("foobar", &version, &kind, &ArtifactTags::source()),
