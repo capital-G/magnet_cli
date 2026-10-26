@@ -110,12 +110,7 @@ pub fn detect_target(
     find_sclang: impl FnOnce() -> anyhow::Result<Option<Sclang>>,
 ) -> anyhow::Result<Target> {
     let platform = match platform {
-        Some(platform) => Platform::from_str(platform).ok().with_context(|| {
-            format!(
-                "{platform:?} is not a valid platform, use one of {}",
-                platforms()
-            )
-        })?,
+        Some(platform) => parse_platform(platform)?,
         None => current_platform()?,
     };
     let api = match abi {
@@ -160,6 +155,14 @@ impl LazyTarget {
         }
     }
 
+    /// Only the platform, which doesn't need sclang, e.g. for overrides
+    pub fn platform(&self) -> anyhow::Result<Platform> {
+        match &self.platform {
+            Some(platform) => parse_platform(platform),
+            None => current_platform(),
+        }
+    }
+
     pub fn get(&self) -> anyhow::Result<&Target> {
         self.target
             .get_or_init(|| {
@@ -179,6 +182,15 @@ impl Default for LazyTarget {
     fn default() -> Self {
         Self::new(None, None)
     }
+}
+
+fn parse_platform(platform: &str) -> anyhow::Result<Platform> {
+    Platform::from_str(platform).ok().with_context(|| {
+        format!(
+            "{platform:?} is not a valid platform, use one of {}",
+            platforms()
+        )
+    })
 }
 
 /// The platform tag of the target magnet was built for

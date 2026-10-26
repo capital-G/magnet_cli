@@ -27,7 +27,11 @@ use crate::{
             MagnetManifestV1PackageKind,
         },
     },
-    packaging::{collect::collect_files, compression, naming::artifact_file_name},
+    packaging::{
+        collect::{collect_files, PackageFiles},
+        compression,
+        naming::artifact_file_name,
+    },
     resolver::{
         online_provider::{
             resolve_dependencies, sclang_lower_bound, RootProvider, ToRanges, SCLANG_PACKAGE,
@@ -643,9 +647,19 @@ impl Project {
             .context("A lock file should exist after resolving")?;
         self.check_locked_versions(provider, &lock_file)?;
 
+        let overrides = self.overrides();
+        for name in overrides.keys() {
+            if !lock_file.dependencies.contains_key(name) {
+                warn!("{name} is overridden in [overrides], but it isn't a locked dependency, so the override is ignored. A package which isn't in the index needs to be a `path` dependency");
+            }
+        }
+
         let mut artifacts = vec![];
         let mut missing = vec![];
         for (name, dependency) in lock_file.dependencies.iter_mut() {
+            if overrides.contains_key(name) {
+                continue;
+            }
             match self.select_artifact(provider, name, dependency)? {
                 Ok(artifact) => artifacts.push(artifact),
                 Err(message) => missing.push(message),
@@ -668,10 +682,17 @@ impl Project {
         for (artifact, archive) in artifacts.iter().zip(archives) {
             self.install_package(artifact, &archive)?;
         }
+        let mut overridden = 0;
+        for (name, folder) in &overrides {
+            if let Some(dependency) = lock_file.dependencies.get(name) {
+                self.install_override(name, &dependency.kind, folder)?;
+                overridden += 1;
+            }
+        }
 
         self.prune_packages(&lock_file)?;
         self.write_language_config()?;
-        info!("Installed {} packages", artifacts.len());
+        info!("Installed {} packages", artifacts.len() + overridden);
         Ok(())
     }
 
@@ -791,7 +812,7 @@ impl Project {
             .map(|release| release.version)
             .max();
         let Some(newest) = newest else {
-            return Ok(format!("{message}, and no other version has one either"));
+            return Ok(format!("{message}, and no other version has one either. A local build can be installed via [overrides] in {MAGNET_PROJECT_FILE}, e.g. {name} = {{ path = \"../{name}\" }}"));
         };
         let allowed = self.manifest_dependencies()?.iter().any(|dependency| {
             MagnetManifestV1::normalize_name(&dependency.name) == name
@@ -800,6 +821,75 @@ impl Project {
         Ok(match allowed {
             true => format!("{message}. The newest version with one is {newest}, run `magnet update {name}` to move to it"),
             false => format!("{message}. The newest version with one is {newest}, run `magnet add {name}@={newest}` to use it"),
+        })
+    }
+
+    /// The folders of `[overrides]` by the normalized package name, relative to the project
+    fn overrides(&self) -> BTreeMap<String, PathBuf> {
+        self.project_manifest
+            .get_manifest()
+            .overrides
+            .iter()
+            .map(|(name, value)| {
+                (
+                    MagnetManifestV1::normalize_name(name),
+                    self.path.join(&value.path),
+                )
+            })
+            .collect()
+    }
+
+    /// Installs a package from the folder of its override (DESIGN.md "Missing binary"): what
+    /// `magnet package` would select for this platform if the folder has a `magnet.toml`,
+    /// otherwise the folder as it is. Always copied and never checked against a checksum, so
+    /// every install copies the current files.
+    fn install_override(
+        &self,
+        name: &str,
+        kind: &MagnetManifestV1PackageKind,
+        folder: &Path,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            folder.is_dir(),
+            "The override of {name} in {MAGNET_PROJECT_FILE} points to {folder:?}, which is not a folder"
+        );
+        let manifest_path = folder.join(MAGNET_PROJECT_FILE);
+        let entries = match manifest_path.is_file() {
+            true => {
+                let manifest = ProjectManifest::open(manifest_path)?.get_manifest().clone();
+                ensure!(
+                    manifest.package.kind == *kind,
+                    "The override of {name} at {folder:?} is a {}, but {name} is a {kind}",
+                    manifest.package.kind
+                );
+                if MagnetManifestV1::normalize_name(&manifest.package.name) != name {
+                    warn!(
+                        "The override of {name} at {folder:?} is the project {}",
+                        manifest.package.name
+                    );
+                }
+                // only the platform matters for selecting the files, so a local build also
+                // works with a SuperCollider whose abi isn't known
+                let tags = match kind {
+                    MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
+                    _ => ArtifactTags::new("any", &self.target.platform()?.to_string())?,
+                };
+                package_entries(folder, &collect_files(folder, &manifest, &tags)?)?
+            }
+            false => folder_entries(folder)?,
+        };
+        info!("Install {name} from {folder:?} ([overrides])");
+        self.swap_in(kind, name, |staging| {
+            for (path, source) in &entries {
+                let destination = staging.join(path);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("Could not create {parent:?}"))?;
+                }
+                fs::copy(source, &destination)
+                    .with_context(|| format!("Could not copy {source:?}"))?;
+            }
+            Ok(())
         })
     }
 
@@ -813,7 +903,19 @@ impl Project {
     /// Extracts the archive of a package next to its directory and swaps it in afterwards,
     /// so a broken archive never replaces a working package
     fn install_package(&self, artifact: &Artifact, archive: &Path) -> anyhow::Result<()> {
-        let target = self.package_dir(&artifact.kind, &artifact.name);
+        self.swap_in(&artifact.kind, &artifact.name, |staging| {
+            compression::extract(archive, staging)
+        })
+    }
+
+    /// Fills a new directory via `fill` and replaces the package directory by it afterwards
+    fn swap_in(
+        &self,
+        kind: &MagnetManifestV1PackageKind,
+        name: &str,
+        fill: impl FnOnce(&Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let target = self.package_dir(kind, name);
         let kind_dir = target
             .parent()
             .context("A package directory has a parent")?;
@@ -823,7 +925,7 @@ impl Project {
         let staging = tempfile::Builder::new()
             .prefix(STAGING_PREFIX)
             .tempdir_in(kind_dir)?;
-        compression::extract(archive, staging.path())?;
+        fill(staging.path())?;
         if target.exists() {
             fs::remove_dir_all(&target)
                 .with_context(|| format!("Could not remove old package {target:?}"))?;
@@ -899,24 +1001,7 @@ impl Project {
             ArtifactTags::any()
         );
         let files = collect_files(&self.path, manifest, tags)?;
-
-        let mut entries = BTreeMap::new();
-        for file in &files.files {
-            entries.insert(archive_path(file)?, self.path.join(file));
-        }
-        for binary in &files.binaries {
-            let name = binary
-                .file_name()
-                .with_context(|| format!("{binary:?} has no file name"))?
-                .to_string_lossy();
-            let path = format!("{PLUGINS_DIR}/{name}");
-            ensure!(
-                entries
-                    .insert(path.clone(), self.path.join(binary))
-                    .is_none(),
-                "{binary:?} would be packaged as {path}, which is already part of the package"
-            );
-        }
+        let entries = package_entries(&self.path, &files)?;
 
         let dist = self.project_dir(ProjectDirectory::Dist);
         fs::create_dir_all(&dist).with_context(|| format!("Could not create {dist:?}"))?;
@@ -943,6 +1028,40 @@ impl Project {
 
 /// binaries of `platform-paths` within a package
 const PLUGINS_DIR: &str = "plugins";
+
+/// The files of a package by their `/`-separated path within it: the selected files keep
+/// their path relative to `root`, the binaries go into `plugins/`
+fn package_entries(root: &Path, files: &PackageFiles) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let mut entries = BTreeMap::new();
+    for file in &files.files {
+        entries.insert(archive_path(file)?, root.join(file));
+    }
+    for binary in &files.binaries {
+        let name = binary
+            .file_name()
+            .with_context(|| format!("{binary:?} has no file name"))?
+            .to_string_lossy();
+        let path = format!("{PLUGINS_DIR}/{name}");
+        ensure!(
+            entries.insert(path.clone(), root.join(binary)).is_none(),
+            "{binary:?} would be packaged as {path}, which is already part of the package"
+        );
+    }
+    Ok(entries)
+}
+
+/// All files within `folder` by their `/`-separated path relative to it, following links
+fn folder_entries(folder: &Path) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let mut entries = BTreeMap::new();
+    for entry in walkdir::WalkDir::new(folder).follow_links(true) {
+        let entry = entry.with_context(|| format!("Could not read {folder:?}"))?;
+        if entry.file_type().is_file() {
+            let relative = entry.path().strip_prefix(folder)?;
+            entries.insert(archive_path(relative)?, entry.path().to_path_buf());
+        }
+    }
+    Ok(entries)
+}
 
 /// The `/`-separated path of a file within a package
 fn archive_path(file: &Path) -> anyhow::Result<String> {
@@ -1496,7 +1615,7 @@ beta = "^1"
             .unwrap();
         assert_eq!(
             err.to_string(),
-            "zeta 1.1.0 has no binary for linux_x86_64 (api5_0), and no other version has one either"
+            "zeta 1.1.0 has no binary for linux_x86_64 (api5_0), and no other version has one either. A local build can be installed via [overrides] in magnet.toml, e.g. zeta = { path = \"../zeta\" }"
         );
         assert!(!dir.path().join("magnet_packages/leptons/zeta").exists());
     }
@@ -1555,6 +1674,116 @@ beta = "^1"
             .err()
             .unwrap();
         assert!(err.to_string().contains("differs from the index"), "{err}");
+    }
+
+    /// a project depending on zeta 1.1.0 (only a linux binary), with `zeta` overridden by
+    /// the folder `local`
+    fn overridden_project(override_name: &str) -> tempfile::TempDir {
+        let (dir, _) = project(&format!(
+            "{ZETA}zeta = \"=1.1.0\"\n[overrides]\n{override_name} = {{ path = \"local\" }}\n"
+        ));
+        write_lock_file(&dir, &[("zeta", "1.1.0")]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_install_override_project() {
+        let dir = overridden_project("Zeta");
+        fs::create_dir(dir.path().join("local")).unwrap();
+        fs::write(
+            dir.path().join("local/magnet.toml"),
+            "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"classes/*.sc\"]\n[artifact.platform-paths]\nmacos_arm64 = [\"build/*.scx\"]\n",
+        )
+        .unwrap();
+        write_files(
+            &dir,
+            &[
+                "local/classes/Zeta.sc",
+                "local/build/Zeta.scx",
+                "local/build/Zeta.o",
+            ],
+        );
+        let lock = read_lock(&dir);
+
+        // no version of zeta has a binary for macOS, and sclang's abi isn't needed
+        let macos = || LazyTarget::with_sclang(Some("macos_arm64".into()), None, no_sclang);
+        install_for(&dir, macos(), false).await.unwrap();
+        assert_eq!(installed_plugin(&dir), "local/build/Zeta.scx");
+        let zeta = dir.path().join("magnet_packages/leptons/zeta");
+        let mut files: Vec<_> = walkdir::WalkDir::new(&zeta)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| archive_path(entry.path().strip_prefix(&zeta).unwrap()).unwrap())
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            ["classes/Zeta.sc", "magnet.toml", "plugins/Zeta.scx"]
+        );
+        // the lock file keeps the index entry
+        assert_eq!(read_lock(&dir), lock);
+
+        // every install copies the current files
+        fs::write(dir.path().join("local/build/Zeta.scx"), "rebuilt").unwrap();
+        install_for(&dir, macos(), true).await.unwrap();
+        assert_eq!(installed_plugin(&dir), "rebuilt");
+    }
+
+    #[tokio::test]
+    async fn test_install_override_folder() {
+        let dir = overridden_project("zeta");
+        write_files(
+            &dir,
+            &[
+                "local/Zeta.sc",
+                "local/plugins/Zeta.scx",
+                "local/HelpSource/Zeta.schelp",
+            ],
+        );
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .unwrap();
+        let zeta = dir.path().join("magnet_packages/leptons/zeta");
+        for file in ["Zeta.sc", "plugins/Zeta.scx", "HelpSource/Zeta.schelp"] {
+            assert!(zeta.join(file).is_file(), "{file}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_override_errors() {
+        // the folder is missing
+        let dir = overridden_project("zeta");
+        let err = install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("not a folder"), "{err}");
+
+        // a quark can't override a lepton
+        write_files(&dir, &["local/Zeta.sc"]);
+        fs::write(
+            dir.path().join("local/magnet.toml"),
+            "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\nkind = \"quark\"\n[artifact]\nglobal-paths = [\"*.sc\"]\n",
+        )
+        .unwrap();
+        let err = install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("is a quark"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_override_of_other_package_is_ignored() {
+        let (dir, _) = project(&format!(
+            "{ZETA}zeta = \"=1.0.0\"\n[overrides]\nunknown = {{ path = \"local\" }}\n"
+        ));
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .unwrap();
+        assert_eq!(installed_plugin(&dir), "zeta 1.0.0 api3_0 macos_arm64\n");
+        assert!(!dir.path().join("magnet_packages/leptons/unknown").exists());
     }
 
     #[tokio::test]
