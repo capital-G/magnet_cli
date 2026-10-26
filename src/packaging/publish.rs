@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::{
-    config::constants::MAGNET_PROJECT_FILE,
+    config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::models::GitArtifact,
     http_client::{
         basic::{AuthToken, MagnetClient},
@@ -38,7 +38,12 @@ pub struct PublishArchive {
 
 /// Refuses manifests which others couldn't reproduce: `path` dependencies, `[overrides]`,
 /// dependencies of another index, and git or legacy quark dependencies which aren't pinned via
-/// `tag` or `ref`
+/// a full commit SHA as `ref`, which the index line copies (DESIGN.md "Publishing a package")
+/// `true` for a full (40 hex digits) git commit SHA
+fn is_full_sha(rev: &str) -> bool {
+    rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
     let mut problems = vec![];
     for (name, dependency) in &manifest.dependencies {
@@ -58,17 +63,25 @@ pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
         if index.is_some() {
             problems.push(format!("{name} comes from another index"));
         }
+        let hint = format!(
+            "pin it via `ref = \"<commit SHA>\"`, e.g. the one of {name} in {MAGNET_LOCK_FILE}"
+        );
         match git {
-            Some(git) if git.branch.is_some() => problems.push(format!(
-                "{name} is pinned to a git branch, use a tag or ref"
+            Some(git) if git.ref_.as_deref().is_some_and(is_full_sha) => {}
+            Some(git) if git.ref_.is_some() => {
+                problems.push(format!("{name} is pinned to an abbreviated commit, {hint}"))
+            }
+            Some(git) if git.tag.is_some() => problems.push(format!(
+                "{name} is pinned to a git tag, which can move, {hint}"
             )),
-            Some(git) if git.tag.is_none() && git.ref_.is_none() => {
-                problems.push(format!("{name} is a git dependency without a tag or ref"))
+            Some(git) if git.branch.is_some() => {
+                problems.push(format!("{name} is pinned to a git branch, {hint}"))
             }
-            None if legacy_quark.unwrap_or(false) => {
-                problems.push(format!("{name} is a legacy quark without a git tag or ref"))
-            }
-            _ => {}
+            Some(_) => problems.push(format!("{name} is a git dependency without a ref, {hint}")),
+            None if legacy_quark.unwrap_or(false) => problems.push(format!(
+                "{name} is a legacy quark without a git URL and ref, add `git = {{ url = \"…\", ref = \"<commit SHA>\" }}`, e.g. from {MAGNET_LOCK_FILE}"
+            )),
+            None => {}
         }
     }
     let mut overrides: Vec<_> = manifest.overrides.keys().collect();
@@ -246,7 +259,7 @@ mod tests {
     fn test_publishable_dependencies() {
         check_publishable(&manifest(
             "quark",
-            "a = \"^1\"\nb = { version = \"1.0\" }\nc = { git = { url = \"https://x.org/c.git\", tag = \"v1\" } }\nd = { legacy-quark = true, git = { url = \"https://x.org/d.git\", ref = \"4b825dc\" } }\n",
+            "a = \"^1\"\nb = { version = \"1.0\" }\nc = { git = { url = \"https://x.org/c.git\", ref = \"4b825dc642cb6eb9a060e54bf8d69288fbee4904\" } }\nd = { legacy-quark = true, git = { url = \"https://x.org/d.git\", ref = \"4b825dc642cb6eb9a060e54bf8d69288fbee4904\" } }\n",
         ))
         .unwrap();
     }
@@ -255,7 +268,7 @@ mod tests {
     fn test_refused_dependencies() {
         let err = check_publishable(&manifest(
             "quark",
-            "a = { path = \"../a\" }\nb = { index = \"https://other.org/index\" }\nc = { git = { url = \"https://x.org/c.git\", branch = \"main\" } }\nd = { git = { url = \"https://x.org/d.git\" } }\ne = { legacy-quark = true }\n[overrides]\nf = { path = \"../f\" }\n",
+            "a = { path = \"../a\" }\nb = { index = \"https://other.org/index\" }\nc = { git = { url = \"https://x.org/c.git\", branch = \"main\" } }\nd = { git = { url = \"https://x.org/d.git\" } }\ne = { legacy-quark = true }\ng = { git = { url = \"https://x.org/g.git\", tag = \"v1\" } }\nh = { legacy-quark = true, git = { url = \"https://x.org/h.git\", ref = \"4b825dc\" } }\n[overrides]\nf = { path = \"../f\" }\n",
         ))
         .unwrap_err()
         .to_string();
@@ -263,8 +276,10 @@ mod tests {
             "a is a local path dependency",
             "b comes from another index",
             "c is pinned to a git branch",
-            "d is a git dependency without a tag or ref",
-            "e is a legacy quark without a git tag or ref",
+            "d is a git dependency without a ref",
+            "e is a legacy quark without a git URL and ref",
+            "g is pinned to a git tag",
+            "h is pinned to an abbreviated commit",
             "f is overridden by a local folder",
         ] {
             assert!(err.contains(expected), "{expected}: {err}");

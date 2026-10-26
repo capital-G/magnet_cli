@@ -86,6 +86,16 @@ fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::R
     }
 }
 
+/// A git dependency of a package of the index, which is pinned by its commit
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexGitDependency {
+    pub name: String,
+    pub url: Url,
+    pub sha: String,
+    /// the release which requires it, e.g. `delta 0.2.0`
+    pub required_by: String,
+}
+
 /// A dependency which still needs to be collected
 struct Pending {
     spelled: String,
@@ -132,11 +142,14 @@ impl Pending {
 /// `locked` returns the locked source of a package if its commit should be kept, so a git
 /// dependency whose URL and reference didn't change isn't fetched again. A legacy quark
 /// without URL is looked up in `directory` (its repository and refspec), unless it's locked.
+/// `from_index` are the git dependencies of the resolved index packages, which get collected
+/// after the project's own (see `Project::resolve`).
 /// A package which is required from two sources, or from the index as well, is an error,
 /// unless the second one comes from a `.quark` file.
 pub fn collect_sources(
     root: &Path,
     dependencies: &HashMap<String, MagnetManifestV1DependenciesValue>,
+    from_index_releases: &[IndexGitDependency],
     cache: &GitCache,
     directory: &QuarksDirectory,
     in_index: impl Fn(&str) -> anyhow::Result<bool>,
@@ -147,6 +160,17 @@ pub fn collect_sources(
             Pending::from_manifest(name, &dependency, Origin::Project, PROJECT.to_string())
         })
         .collect::<anyhow::Result<_>>()?;
+    pending.extend(from_index_releases.iter().map(|dependency| Pending {
+        spelled: dependency.name.clone(),
+        spec: Spec::Git(
+            dependency.url.clone(),
+            GitReference::Ref(dependency.sha.clone()),
+        ),
+        origin: Origin::Project,
+        required_by: dependency.required_by.clone(),
+        from_quark: false,
+        ignore_quark_deps: false,
+    }));
     let mut packages: BTreeMap<String, SourcePackage> = BTreeMap::new();
     // the packages required from the index, with who requires them
     let mut from_index: BTreeMap<String, String> = BTreeMap::new();
@@ -231,7 +255,7 @@ pub fn collect_sources(
         };
 
         if let Some(existing) = packages.get(&name) {
-            if existing.source != source && from_quark {
+            if !existing.source.same_as(&source) && from_quark {
                 warn!(
                     "{required_by} requires {spelled} from {source}, but {} already requires it from {}, which is kept",
                     existing.required_by, existing.source
@@ -239,7 +263,7 @@ pub fn collect_sources(
                 continue;
             }
             ensure!(
-                existing.source == source,
+                existing.source.same_as(&source),
                 "{name} is required from two sources: {} by {}, and {source} by {required_by}. Remove one of them, or use [overrides] in {MAGNET_PROJECT_FILE}",
                 existing.source,
                 existing.required_by
@@ -510,6 +534,7 @@ mod tests {
             collect_sources(
                 &self.path("project"),
                 &dependencies(toml),
+                &[],
                 &self.cache,
                 &self.directory(),
                 // the fixture index has alpha, and other names which these tests don't use

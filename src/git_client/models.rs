@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use anyhow::bail;
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -71,8 +70,14 @@ impl GitRelease {
 #[serde(untagged)]
 pub enum GitIndexDependency {
     Version(VersionReq),
-    LegacyQuark {
-        #[serde(rename = "legacy-quark")]
+    /// a git dependency (a magnet project or, with `legacy-quark`, a legacy quark), which
+    /// published packages can only pin by its commit (DESIGN.md "Publishing a package")
+    Git {
+        #[serde(
+            rename = "legacy-quark",
+            default,
+            skip_serializing_if = "std::ops::Not::not"
+        )]
         legacy_quark: bool,
         git: GitIndexDependencySource,
     },
@@ -133,22 +138,29 @@ pub struct GitRelease {
 }
 
 impl GitRelease {
-    /// The dependencies which take part in the version resolution
-    pub fn version_dependencies(&self) -> anyhow::Result<Vec<GitDependency>> {
+    /// The dependencies as requirements for the resolver: a git dependency accepts any
+    /// version, since its commit determines it
+    pub fn version_dependencies(&self) -> Vec<GitDependency> {
         self.dependencies
             .iter()
-            .map(|(name, dependency)| match dependency {
-                GitIndexDependency::Version(constraint) => Ok(GitDependency {
-                    name: name.clone(),
-                    constraint: constraint.clone(),
-                }),
-                GitIndexDependency::LegacyQuark { .. } => bail!(
-                    "{} {} depends on the legacy quark {name}, which is not supported yet",
-                    self.name,
-                    self.version
-                ),
+            .map(|(name, dependency)| GitDependency {
+                name: name.clone(),
+                constraint: match dependency {
+                    GitIndexDependency::Version(constraint) => constraint.clone(),
+                    GitIndexDependency::Git { .. } => VersionReq::STAR,
+                },
             })
             .collect()
+    }
+
+    /// The git dependencies by their name as given
+    pub fn git_dependencies(&self) -> impl Iterator<Item = (&String, &GitIndexDependencySource)> {
+        self.dependencies
+            .iter()
+            .filter_map(|(name, dependency)| match dependency {
+                GitIndexDependency::Git { git, .. } => Some((name, git)),
+                GitIndexDependency::Version(_) => None,
+            })
     }
 }
 

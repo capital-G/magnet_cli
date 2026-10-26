@@ -13,7 +13,7 @@ use tracing::{debug, error};
 
 use crate::git_client::{
     client::GitClient,
-    models::{GitDependency, GitRelease},
+    models::{GitDependency, GitIndexDependencySource, GitRelease},
 };
 use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
 use crate::resolver::sources::SourcePackage;
@@ -149,13 +149,9 @@ impl DependencyProvider for GitClient {
         version: &Self::V,
     ) -> Result<pubgrub::Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
         match self.get_release(package, version)? {
-            Some(release) => match release.version_dependencies() {
-                Ok(dependencies) => Ok(Dependencies::Available(dependency_list_to_hash_map(
-                    &dependencies,
-                ))),
-                // pubgrub appends this message to "dependencies of .. are unavailable"
-                Err(err) => Ok(Dependencies::Unavailable(format!("({err})"))),
-            },
+            Some(release) => Ok(Dependencies::Available(dependency_list_to_hash_map(
+                &release.version_dependencies(),
+            ))),
             None => Ok(Dependencies::Unavailable(format!(
                 "({package} {version} is missing in the index)"
             ))),
@@ -291,20 +287,38 @@ impl DependencyProvider for RootProvider<'_> {
             }
             return Ok(Dependencies::Available(dependencies));
         }
-        let dependencies = self.git_provider.get_dependencies(package, version)?;
-        // a name only comes from one source (DESIGN.md "Backwards compatibility / Legacy
-        // Quarks"), so this version can't be used, which pubgrub reports with the reason
-        if let Dependencies::Available(dependencies) = &dependencies {
-            let mut names: Vec<&String> = dependencies.keys().collect();
+        let mut dependencies = self.git_provider.get_dependencies(package, version)?;
+        if let Dependencies::Available(dependencies) = &mut dependencies {
+            let release = self.git_provider.get_release(package, version)?;
+            let git: HashMap<String, &GitIndexDependencySource> = release
+                .iter()
+                .flat_map(|release| release.git_dependencies())
+                .map(|(name, git)| (MagnetManifestV1::normalize_name(name), git))
+                .collect();
+            let mut names: Vec<String> = dependencies.keys().cloned().collect();
             names.sort();
-            if let Some((name, source)) = names
-                .into_iter()
-                .find_map(|name| self.sources.get(name).map(|source| (name, source)))
-            {
-                return Ok(Dependencies::Unavailable(format!(
-                    "({package} {version} requires {name} from the index, but {} requires it from {}. Remove one of them, or use [overrides])",
-                    source.required_by, source.source
-                )));
+            for name in names {
+                let source = self.sources.get(&name);
+                match (git.get(&name), source) {
+                    (None, None) => {}
+                    // not collected yet, the next round of the project adds it as a source
+                    (Some(_), None) => {
+                        dependencies.remove(&name);
+                    }
+                    (Some(git), Some(source)) if source.source.is_commit(&git.url, &git.ref_) => {}
+                    // a name only comes from one source (DESIGN.md "Backwards compatibility /
+                    // Legacy Quarks"), so this version can't be used, which pubgrub reports
+                    (required, Some(source)) => {
+                        let from = match required {
+                            Some(git) => format!("{}#{}", git.url, git.ref_),
+                            None => "the index".to_string(),
+                        };
+                        return Ok(Dependencies::Unavailable(format!(
+                            "({package} {version} requires {name} from {from}, but {} requires it from {}. Remove one of them, or use [overrides])",
+                            source.required_by, source.source
+                        )));
+                    }
+                }
             }
         }
         match (dependencies, &self.sclang) {
@@ -558,11 +572,11 @@ mod tests {
 
     #[test]
     fn test_resolve_legacy_quark_dependency() {
-        let err = resolve_fixture(&[("delta", "=0.2.0")])
-            .unwrap_err()
-            .to_string();
-        println!("{err}");
-        assert!(err.contains("legacy quark"));
+        // the legacy quark isn't a source yet, so it's left out (see `Project::resolve`)
+        assert_eq!(
+            resolve_fixture(&[("delta", "=0.2.0")]).unwrap(),
+            pairs(&[("delta", "0.2.0")])
+        );
     }
 
     // epsilon 1.0.0 needs sclang >=3.10, 1.1.0 >=3.13, <3.14 and 1.2.0 >=3.15

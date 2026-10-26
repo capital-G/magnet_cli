@@ -386,8 +386,14 @@ mod tests {
             .unwrap();
         assert!(matches!(
             release.dependencies.get("ddwCommon"),
-            Some(GitIndexDependency::LegacyQuark { .. })
+            Some(GitIndexDependency::Git {
+                legacy_quark: true,
+                ..
+            })
         ));
-        assert!(release.version_dependencies().is_err());
+        let dependencies = release.version_dependencies();
+        assert_eq!(dependencies[0].name, "ddwCommon");
+        assert_eq!(dependencies[0].constraint, semver::VersionReq::STAR);
+        assert_eq!(release.git_dependencies().count(), 1);
     }
 }

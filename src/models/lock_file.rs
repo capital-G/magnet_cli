@@ -82,6 +82,22 @@ impl Display for LockSource {
     }
 }
 
+impl LockSource {
+    /// `true` for a git source of the commit `sha` of `url`, whatever reference led to it
+    pub fn is_commit(&self, url: &Url, sha: &str) -> bool {
+        matches!(self, LockSource::Git { url: own, sha: own_sha, .. } if own == url && own_sha == sha)
+    }
+
+    /// `true` if both are the same package: the same commit of the same repository (also if
+    /// one was given as tag and the other as `ref`), or otherwise equal
+    pub fn same_as(&self, other: &LockSource) -> bool {
+        match other {
+            LockSource::Git { url, sha, .. } => self.is_commit(url, sha),
+            _ => self == other,
+        }
+    }
+}
+
 impl FromStr for LockSource {
     type Err = anyhow::Error;
 

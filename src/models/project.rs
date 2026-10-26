@@ -41,11 +41,15 @@ use crate::{
             SCLANG_PACKAGE,
         },
         package_downloader::{Artifact, PackageDownloader},
-        sources::{collect_sources, SourcePackage},
+        sources::{collect_sources, IndexGitDependency, SourcePackage},
     },
     sclang::{Sclang, MAGNET_SCLANG_ENV},
     target::{LazyTarget, Target},
 };
+
+/// how often the git dependencies of index packages may change the resolution, see
+/// [Project::resolve_preferring]
+const MAX_RESOLVE_ROUNDS: usize = 8;
 
 /// number of artifacts which get downloaded at the same time
 const PARALLEL_DOWNLOADS: usize = 4;
@@ -468,6 +472,7 @@ impl Project {
     fn collect_sources(
         &self,
         dependencies: &ManifestDependencies,
+        from_index_releases: &[IndexGitDependency],
         in_index: impl Fn(&str) -> anyhow::Result<bool>,
         locked: impl Fn(&str) -> Option<LockSource>,
     ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
@@ -475,6 +480,7 @@ impl Project {
         collect_sources(
             &self.path,
             dependencies,
+            from_index_releases,
             &self.git_cache,
             &directory,
             in_index,
@@ -500,45 +506,57 @@ impl Project {
     }
 
     /// Like [Self::resolve], but only prefers the locked versions (and commits of git
-    /// dependencies) of the packages `keep` accepts
+    /// dependencies) of the packages `keep` accepts.
+    /// The git dependencies of index packages are only known once these are chosen, so this
+    /// resolves in rounds: the git dependencies of the chosen index releases become sources of
+    /// the next round, until a round chooses releases whose git dependencies are all collected.
     fn resolve_preferring(
         &self,
         provider: &GitClient,
         dependencies: ManifestDependencies,
         keep: impl Fn(&str) -> bool,
     ) -> anyhow::Result<Resolution> {
-        let sources = self.collect_sources(
-            &dependencies,
-            |name| Ok(provider.get_releases(name)?.is_some()),
-            |name| keep(name).then(|| self.locked_source(name)).flatten(),
-        )?;
-        let preferred = self
+        let preferred: HashMap<String, SemanticVersion> = self
             .lock_file
             .iter()
             .flat_map(|lock_file| &lock_file.dependencies)
             .filter(|(name, _)| keep(name))
             .map(|(name, dependency)| (name.clone(), dependency.version))
             .collect();
-        let versions: HashMap<String, SemanticVersion> = resolve_dependencies(&RootProvider {
-            git_provider: provider,
-            dependencies: requirements(&dependencies)?,
-            preferred,
-            sclang: self.sclang_requirement()?,
-            target: &self.target,
-            sources: &sources,
-        })?
-        .into_iter()
-        .filter(|(name, _)| name != SCLANG_PACKAGE)
-        .collect();
-        trace!(?versions, "Resolved dependencies");
-
-        let from_index: HashMap<String, SemanticVersion> = versions
-            .iter()
-            .filter(|(name, _)| *name != ROOT_PACKAGE && !sources.contains_key(*name))
-            .map(|(name, version)| (name.clone(), *version))
+        let mut from_index_releases: Vec<IndexGitDependency> = vec![];
+        for _ in 0..MAX_RESOLVE_ROUNDS {
+            let sources = self.collect_sources(
+                &dependencies,
+                &from_index_releases,
+                |name| Ok(provider.get_releases(name)?.is_some()),
+                |name| keep(name).then(|| self.locked_source(name)).flatten(),
+            )?;
+            let versions: HashMap<String, SemanticVersion> = resolve_dependencies(&RootProvider {
+                git_provider: provider,
+                dependencies: requirements(&dependencies)?,
+                preferred: preferred.clone(),
+                sclang: self.sclang_requirement()?,
+                target: &self.target,
+                sources: &sources,
+            })?
+            .into_iter()
+            .filter(|(name, _)| name != SCLANG_PACKAGE)
             .collect();
-        self.warn_about_sclang(provider, &from_index)?;
-        Ok(Resolution { versions, sources })
+            trace!(?versions, "Resolved dependencies");
+
+            let from_index: HashMap<String, SemanticVersion> = versions
+                .iter()
+                .filter(|(name, _)| *name != ROOT_PACKAGE && !sources.contains_key(*name))
+                .map(|(name, version)| (name.clone(), *version))
+                .collect();
+            let required = index_git_dependencies(provider, &from_index)?;
+            if required == from_index_releases {
+                self.warn_about_sclang(provider, &from_index)?;
+                return Ok(Resolution { versions, sources });
+            }
+            from_index_releases = required;
+        }
+        bail!("The git dependencies of the index packages keep changing the resolution, after {MAX_RESOLVE_ROUNDS} rounds")
     }
 
     /// The `sclang` range of `[package]`
@@ -738,6 +756,7 @@ impl Project {
         // as one of the index, so an unknown one fails the check below instead of a lookup
         let sources = self.collect_sources(
             &dependencies,
+            &[],
             |name| {
                 Ok(!matches!(
                     self.locked_source(name),
@@ -1300,6 +1319,29 @@ fn shell_command(command: &str, args: &[String]) -> Command {
             .args(args);
         shell
     }
+}
+
+/// The git dependencies of the given index releases, sorted, so rounds can be compared
+fn index_git_dependencies(
+    provider: &GitClient,
+    releases: &HashMap<String, SemanticVersion>,
+) -> anyhow::Result<Vec<IndexGitDependency>> {
+    let mut dependencies = vec![];
+    for (name, version) in releases {
+        let Some(release) = provider.get_release(name, version)? else {
+            continue;
+        };
+        for (dependency, git) in release.git_dependencies() {
+            dependencies.push(IndexGitDependency {
+                name: dependency.clone(),
+                url: git.url.clone(),
+                sha: git.ref_.clone(),
+                required_by: format!("{name} {version}"),
+            });
+        }
+    }
+    dependencies.sort_by(|a, b| (&a.name, &a.required_by).cmp(&(&b.name, &b.required_by)));
+    Ok(dependencies)
 }
 
 /// Manifest dependencies as requirements for the resolver
@@ -2922,5 +2964,123 @@ beta = "^1"
             .collect();
         names.sort();
         names
+    }
+
+    /// The fixture index with an additional package `eta` 0.1.0 (the files of alpha 1.0.0),
+    /// whose index line has `dependency` as only dependency, and a downloader for it
+    fn index_with_eta(root: &Path, dependency: &str) -> (GitClient, PackageDownloader) {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let index = root.join("index");
+        for entry in walkdir::WalkDir::new(fixtures.join("index")) {
+            let entry = entry.unwrap();
+            let target = index.join(entry.path().strip_prefix(fixtures.join("index")).unwrap());
+            match entry.file_type().is_dir() {
+                true => fs::create_dir_all(&target).unwrap(),
+                false => {
+                    fs::copy(entry.path(), &target).unwrap();
+                }
+            }
+        }
+        let dl = root.join("dl");
+        fs::create_dir_all(&dl).unwrap();
+        for entry in fs::read_dir(fixtures.join("dl")).unwrap() {
+            let entry = entry.unwrap();
+            fs::copy(entry.path(), dl.join(entry.file_name())).unwrap();
+        }
+        let archive = dl.join("eta-0.1.0-quark-any-any.tar.gz");
+        fs::copy(dl.join("alpha-1.0.0-quark-any-any.tar.gz"), &archive).unwrap();
+        let sha256 = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(fs::read(&archive).unwrap())
+        );
+        fs::write(
+            index.join("e/eta.jsonl"),
+            format!("{{\"name\": \"eta\", \"version\": \"0.1.0\", \"kind\": \"quark\", \"dependencies\": {{{dependency}}}, \"artifacts\": [{{\"abi\": \"any\", \"platform\": \"any\", \"sha256\": \"{sha256}\"}}]}}\n"),
+        )
+        .unwrap();
+        let downloader = PackageDownloader::new(
+            root.join("download-cache"),
+            format!(
+                "{}{{name}}-{{version}}-{{kind}}-{{abi}}-{{platform}}.tar.gz",
+                Url::from_directory_path(&dl).unwrap()
+            ),
+        );
+        (GitClient::open_local(index).unwrap(), downloader)
+    }
+
+    #[tokio::test]
+    async fn test_install_index_package_with_legacy_dependency() {
+        use crate::git_client::source::tests::commit_files;
+        let root = tempfile::tempdir().unwrap();
+        let bar = root.path().join("bar");
+        let sha = commit_files(
+            &bar,
+            &[
+                ("Bar.sc", "Bar {}"),
+                ("Bar.quark", "(dependencies: [\"Beta\"])"),
+            ],
+        );
+        // a later commit, which the pinned ref must not pick up
+        commit_files(&bar, &[("Bar.sc", "Bar { newer {} }")]);
+        let (index, downloader) = index_with_eta(
+            root.path(),
+            &format!(
+                "\"Bar\": {{\"legacy-quark\": true, \"git\": {{\"url\": \"{}\", \"ref\": \"{sha}\"}}}}",
+                file_url(&bar)
+            ),
+        );
+        let mut project = sources_project(root.path(), "eta = \"^0.1\"\n");
+        project.install(&index, &downloader, false).await.unwrap();
+
+        let dir = root.path().join("project");
+        // bar's .quark file adds beta of the index (and beta 1.2.0 needs ddw-common)
+        assert_eq!(
+            installed_packages_in(&dir),
+            ["bar", "beta", "ddw-common", "eta"]
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("magnet_packages/quarks/bar/Bar.sc")).unwrap(),
+            "Bar {}"
+        );
+        let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
+        assert!(
+            lock.contains(&format!(
+                "source = \"git+{}?ref={sha}#{sha}\"",
+                file_url(&bar)
+            )),
+            "{lock}"
+        );
+    }
+
+    #[test]
+    fn test_index_package_with_conflicting_git_dependency() {
+        use crate::git_client::source::tests::commit_files;
+        let root = tempfile::tempdir().unwrap();
+        let bar = root.path().join("bar");
+        let pinned = commit_files(&bar, &[("Bar.sc", "Bar {}")]);
+        commit_files(&bar, &[("Bar.sc", "Bar { newer {} }")]);
+        let (index, _) = index_with_eta(
+            root.path(),
+            &format!(
+                "\"bar\": {{\"git\": {{\"url\": \"{}\", \"ref\": \"{pinned}\"}}}}",
+                file_url(&bar)
+            ),
+        );
+        // the project wants the newest commit of bar, eta another one
+        let mut project = sources_project(
+            root.path(),
+            &format!(
+                "eta = \"^0.1\"\nbar = {{ git = {{ url = \"{}\" }} }}\n",
+                file_url(&bar)
+            ),
+        );
+        let err = project.update(&index, &[]).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!(
+                "eta 0.1.0 requires bar from {}#{pinned}",
+                file_url(&bar)
+            )),
+            "{err}"
+        );
     }
 }
