@@ -320,10 +320,9 @@ The naming convention for the `.tar.gz` file follows
 
 where `name` is the normalized package name, `kind` the kind of the package (`quark`, `lepton` or `gluon`) and `abi` and `platform` the tags of the artifact.
 These filenames are only ever built from the fields of the index (see `config.json` of `magnet-index`) and never parsed, so a `-` within a name is not a problem.
-Tags use `_` instead of `-` and are taken from a fixed list of URL-safe values.
+Tags use `_` instead of `-` and only consist of `a-z`, `0-9` and `_`, so they are URL-safe.
 
-For platform-dependent binary packages, so Leptons and Gluons, magnet will guess the platform and architecture, but it is possible to specify this explicitly through CLI flags and environment variables for cross-compilation.
-The ABI tag needs to be specified, but defaults to the latest ABI version.
+For platform-dependent binary packages, so Leptons and Gluons, magnet will detect the platform and the ABI of the found SuperCollider, but it is possible to specify both explicitly through CLI flags and environment variables, e.g. for cross-compilation.
 Leptons and Gluons will also upload a package of the source code to the index, which consists of the files selected by `source-paths`.
 
 ```
@@ -334,6 +333,23 @@ Since Quarks are not bound to a platform or a binary interface, they use `any` f
 The supported SuperCollider versions are not a tag but the `sclang` range of the manifest (see SuperCollider version), like Python wheels keep `Requires-Python` in their metadata.
 
 For binary packages, the abi tag only describes the binary compatibility, i.e. the plugin API version of scsynth/supernova for leptons and the plugin ABI of sclang for gluons.
+The abi tag of a lepton follows what scsynth checks when it loads a plugin, which is currently the `sc_api_version` of the plugin interface, so the tag is `api` followed by this number, e.g. `api3`.
+This is not a fixed list: the number can be any integer, since it increases with every breaking change of the plugin interface.
+Two abi tags are either equal or incompatible, there is no ordering between them.
+Should SuperCollider ever ship incompatible variants of the same plugin API side by side, e.g. scsynth with 64 bit samples, scsynth needs to tell their plugins apart and the tag gets a suffix, e.g. `api5_f64`.
+
+Additions to the plugin interface which do not break existing plugins, e.g. new functions at the end of the interface table, do not change the abi tag.
+A lepton which uses such a new function sets the minimum SuperCollider version via `sclang` in its manifest (see SuperCollider version), so the resolver falls back to an older version of the lepton for older SuperCollider versions and one artifact serves all SuperCollider versions with the same abi tag.
+scsynth and supernova share the same plugin API version, so one artifact contains the binaries for both.
+
+SuperCollider | abi tag
+--- | ---
+3.6 - 3.8 | `api2`
+3.9 - 3.14 | `api3`
+3.15 | not released yet, expected to be `api4`
+
+magnet derives the abi tag from the version of the found SuperCollider via this table.
+For versions it does not know, e.g. development builds, it needs to be set explicitly, e.g. `api7`.
 
 The archive is a gzip compressed tar file in the plain *ustar* format without GNU or pax extensions, such that a small reader is enough to unpack it, e.g. within a browser.
 Long paths use the `prefix` field of ustar (155 characters for the directory in addition to the 100 characters of the name), and packaging fails for longer paths.
@@ -341,14 +357,18 @@ It only contains regular files and directories, and its entries are sorted and w
 
 The platform tag is one of the following values
 
-* `win_amd64`
-* `win_arm64`
-* `win32`
 * `linux_x86_64`
 * `linux_arm64`
-* `macosx_arm64`
-* `macosx_amd64`
-* `macosx_universal`
+* `linux_armv7` - 32 bit ARM, e.g. older versions of Raspberry Pi OS
+* `macos_x86_64`
+* `macos_arm64`
+* `windows_x86_64`
+* `windows_arm64`
+* `wasm32_emscripten` - reserved for SuperCollider within the browser, which may be able to load leptons via Emscripten side modules in the future
+
+The architectures are named the same on every operating system.
+Binaries for Linux need to run on glibc 2.35 (Ubuntu 22.04) and newer, so they should be built on such a system.
+There is no universal tag for macOS: a universal binary gets packaged once for each architecture.
 
 Before uploading the asset to the index a user is expected to inspect its content since the package index only allows to add, never to delete.
 
@@ -367,9 +387,6 @@ Once installed into `magnet_packages/leptons/<name>`, sclang picks up its classe
 
 A version may lack binaries for some platforms, e.g. because nobody built them yet.
 These can be added to the published version later on (see Publishing a package), and a missing binary is handled during the installation (see Missing binary).
-
-If only the classes are needed, e.g. because sclang talks to an scsynth on another machine or the platform can not load plugins, magnet installs any binary artifact of the version without its `plugins/` folder, since the classes are the same in every artifact.
-This requires that the version has at least one binary artifact.
 
 #### Valid package names
 
