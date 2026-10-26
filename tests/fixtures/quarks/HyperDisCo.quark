@@ -1,0 +1,12 @@
+////// first draft of quark description, adc
+////// better name suggestions please!
+(
+  name: "HyperDisCo",
+  summary: "Internet-shared live coding",
+  version: "0.1",
+  schelp: "HyperDisCo",
+  license: "GPL",
+  status: "experimental",
+  dependencies: ["adclib", "JITLibExtensions", "Utopia"],
+  copyright: "Bruno Gola, Alberto de Campo, Hannes Hoelzl, UdK 2020-"
+)
