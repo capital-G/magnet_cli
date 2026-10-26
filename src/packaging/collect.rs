@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     path::{Component, Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{bail, ensure, Context};
@@ -13,8 +14,10 @@ use crate::{
     models::{
         directories::ProjectDirectory,
         language_config::SCLANG_CONF_FILE,
-        package::BundleType,
-        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+        package::ArtifactTags,
+        project_manifest::{
+            MagnetManifestV1, MagnetManifestV1ArtifactPlatformPathsKey, MagnetManifestV1PackageKind,
+        },
     },
 };
 
@@ -38,13 +41,13 @@ pub struct PackageFiles {
 pub fn collect_files(
     root: &Path,
     manifest: &MagnetManifestV1,
-    bundle_type: &BundleType,
+    tags: &ArtifactTags,
 ) -> anyhow::Result<PackageFiles> {
     let artifact = manifest.artifact.clone().unwrap_or_default();
     let kind = &manifest.package.kind;
 
-    let (file_globs, binary_globs) = match bundle_type {
-        BundleType::SourceBundle => {
+    let (file_globs, binary_globs) = match tags.is_source() {
+        true => {
             ensure!(
                 *kind != MagnetManifestV1PackageKind::Quark,
                 "A quark has no source package, since its artifact already is the source"
@@ -55,19 +58,29 @@ pub fn collect_files(
             );
             (artifact.source_paths, vec![])
         }
-        BundleType::ArtifactBundle => {
+        false => {
             ensure!(
                 !artifact.global_paths.is_empty(),
                 "There are no `global-paths` in [artifact], which select the files of the package"
             );
-            let binary_globs = artifact
-                .platform_paths
-                .map(|platform_paths| platform_paths.paths)
-                .unwrap_or_default();
-            ensure!(
-                *kind != MagnetManifestV1PackageKind::Quark || binary_globs.is_empty(),
-                "A quark can not have `platform-paths`, since it has no binaries"
-            );
+            let binary_globs = match kind {
+                MagnetManifestV1PackageKind::Quark => {
+                    ensure!(
+                        artifact.platform_paths.is_empty(),
+                        "A quark can not have `platform-paths`, since it has no binaries"
+                    );
+                    vec![]
+                }
+                _ => MagnetManifestV1ArtifactPlatformPathsKey::from_str(&tags.platform)
+                    .ok()
+                    .and_then(|platform| artifact.platform_paths.get(&platform).cloned())
+                    .with_context(|| {
+                        format!(
+                            "There are no `platform-paths` for {} in [artifact], which select the binaries of the package",
+                            tags.platform
+                        )
+                    })?,
+            };
             (artifact.global_paths, binary_globs)
         }
     };
@@ -273,7 +286,7 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"HelpSource/**/*\"]\n",
             QUARK_FILES,
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(
             files,
             PackageFiles {
@@ -294,7 +307,7 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"*.sc\", \"Classes/*.sc\"]\n",
             QUARK_FILES,
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(
             files.files,
             paths(&["Classes/Foo.sc", "Root.sc", "magnet.toml"])
@@ -307,7 +320,7 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"Classes/Foo.sc\", \"./Classes/*\"]\n",
             QUARK_FILES,
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(
             files.files,
             paths(&[
@@ -325,7 +338,7 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**\"]\nexclude = [\"**/*.txt\", \"Classes/Nested/**\"]\n",
             QUARK_FILES,
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(files.files, paths(&["Classes/Foo.sc", "magnet.toml"]));
     }
 
@@ -348,7 +361,7 @@ mod tests {
                 "external/libfoo/foo.cpp",
             ],
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(
             files.files,
             paths(&[
@@ -366,7 +379,7 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"Clases/*.sc\", \".github/*\"]\n",
             QUARK_FILES,
         );
-        let err = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap_err();
+        let err = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap_err();
         assert!(
             err.to_string().contains("`Clases/*.sc`, `.github/*`"),
             "{err}"
@@ -379,7 +392,7 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"*.scd\"]\nexclude = [\"test.scd\"]\n",
             QUARK_FILES,
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert!(!files.files.contains(&PathBuf::from("test.scd")));
     }
 
@@ -389,14 +402,14 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"*.sc\"]\n",
             &["Root.sc", "README.md"],
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(files.files, paths(&["README.md", "Root.sc", "magnet.toml"]));
 
         let (dir, manifest) = project(
             "kind = \"quark\"\n[metadata]\nreadme = \"docs/intro.md\"\n[artifact]\nglobal-paths = [\"*.sc\"]\nexclude = [\"docs/**\"]\n",
             &["Root.sc", "README.md", "docs/intro.md"],
         );
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap();
         assert_eq!(
             files.files,
             paths(&["Root.sc", "docs/intro.md", "magnet.toml"])
@@ -406,10 +419,10 @@ mod tests {
             "kind = \"quark\"\n[metadata]\nreadme = \"MISSING.md\"\n[artifact]\nglobal-paths = [\"*.sc\"]\n",
             &["Root.sc"],
         );
-        assert!(collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).is_err());
+        assert!(collect_files(dir.path(), &manifest, &ArtifactTags::any()).is_err());
     }
 
-    const LEPTON: &str = "kind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { platform = \"macos\", paths = [\"build/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\", \"CMakeLists.txt\"]\n";
+    const LEPTON: &str = "kind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { macos_arm64 = [\"build/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\", \"CMakeLists.txt\"]\n";
     const LEPTON_FILES: &[&str] = &[
         "Classes/Foo.sc",
         "src/Foo.cpp",
@@ -418,10 +431,14 @@ mod tests {
         "build/CMakeCache.txt",
     ];
 
+    fn macos_arm64() -> ArtifactTags {
+        ArtifactTags::new("api3", "macos_arm64").unwrap()
+    }
+
     #[test]
     fn test_lepton_artifact() {
         let (dir, manifest) = project(LEPTON, LEPTON_FILES);
-        let files = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &macos_arm64()).unwrap();
         assert_eq!(
             files,
             PackageFiles {
@@ -432,9 +449,42 @@ mod tests {
     }
 
     #[test]
+    fn test_binaries_of_the_platform() {
+        let (dir, manifest) = project(
+            "kind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\n[artifact.platform-paths]\nmacos_arm64 = [\"build/*.scx\"]\nlinux_x86_64 = [\"build/linux/*.{scx,so}\"]\n",
+            &["Classes/Foo.sc", "build/Foo.scx", "build/linux/Foo.scx", "build/linux/libdep.so"],
+        );
+        let files = collect_files(dir.path(), &manifest, &macos_arm64()).unwrap();
+        assert_eq!(files.binaries, paths(&["build/Foo.scx"]));
+        let linux = ArtifactTags::new("api3", "linux_x86_64").unwrap();
+        let files = collect_files(dir.path(), &manifest, &linux).unwrap();
+        assert_eq!(
+            files.binaries,
+            paths(&["build/linux/Foo.scx", "build/linux/libdep.so"])
+        );
+
+        for platform in ["windows_x86_64", "any"] {
+            let tags = ArtifactTags::new("api3", platform).unwrap();
+            let err = collect_files(dir.path(), &manifest, &tags).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("no `platform-paths` for {platform}")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_platform_in_manifest() {
+        let manifest = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\nkind = \"lepton\"\n[artifact]\nplatform-paths = { macos = [\"build/*.scx\"] }\n";
+        let err = format!("{:#}", MagnetManifestV1::from_string(manifest).unwrap_err());
+        assert!(err.contains("macos_arm64"), "{err}");
+    }
+
+    #[test]
     fn test_lepton_source() {
         let (dir, manifest) = project(LEPTON, LEPTON_FILES);
-        let files = collect_files(dir.path(), &manifest, &BundleType::SourceBundle).unwrap();
+        let files = collect_files(dir.path(), &manifest, &ArtifactTags::source()).unwrap();
         assert_eq!(
             files,
             PackageFiles {
@@ -455,7 +505,7 @@ mod tests {
             "kind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\n",
             LEPTON_FILES,
         );
-        let err = collect_files(dir.path(), &manifest, &BundleType::SourceBundle).unwrap_err();
+        let err = collect_files(dir.path(), &manifest, &ArtifactTags::source()).unwrap_err();
         assert!(err.to_string().contains("source-paths"), "{err}");
     }
 
@@ -465,30 +515,30 @@ mod tests {
             "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\n",
             QUARK_FILES,
         );
-        assert!(collect_files(dir.path(), &manifest, &BundleType::SourceBundle).is_err());
+        assert!(collect_files(dir.path(), &manifest, &ArtifactTags::source()).is_err());
 
         let (dir, manifest) = project(
-            "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { platform = \"macos\", paths = [\"build/*.scx\"] }\n",
+            "kind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { macos_arm64 = [\"build/*.scx\"] }\n",
             LEPTON_FILES,
         );
-        let err = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap_err();
+        let err = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap_err();
         assert!(err.to_string().contains("platform-paths"), "{err}");
     }
 
     #[test]
     fn test_global_and_platform_paths_overlap() {
         let (dir, manifest) = project(
-            "kind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"build/**\"]\nplatform-paths = { platform = \"macos\", paths = [\"build/*.scx\"] }\n",
+            "kind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"build/**\"]\nplatform-paths = { macos_arm64 = [\"build/*.scx\"] }\n",
             LEPTON_FILES,
         );
-        let err = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap_err();
+        let err = collect_files(dir.path(), &manifest, &macos_arm64()).unwrap_err();
         assert!(err.to_string().contains("build/Foo.scx"), "{err}");
     }
 
     #[test]
     fn test_missing_global_paths() {
         let (dir, manifest) = project("kind = \"quark\"\n", QUARK_FILES);
-        assert!(collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).is_err());
+        assert!(collect_files(dir.path(), &manifest, &ArtifactTags::any()).is_err());
     }
 
     #[cfg(unix)]
@@ -503,7 +553,7 @@ mod tests {
             dir.path().join("Classes/Link.sc"),
         )
         .unwrap();
-        let err = collect_files(dir.path(), &manifest, &BundleType::ArtifactBundle).unwrap_err();
+        let err = collect_files(dir.path(), &manifest, &ArtifactTags::any()).unwrap_err();
         assert!(err.to_string().contains("symbolic link"), "{err}");
     }
 }

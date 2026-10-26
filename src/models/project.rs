@@ -21,7 +21,7 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{ArtifactTags, BundleType, PackageArchive},
+        package::{ArtifactTags, PackageArchive},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             MagnetManifestV1PackageKind,
@@ -732,7 +732,7 @@ impl Project {
             "A quark only has an {} artifact, not {tags}",
             ArtifactTags::any()
         );
-        let files = collect_files(&self.path, manifest, &BundleType::from(tags))?;
+        let files = collect_files(&self.path, manifest, tags)?;
 
         let mut entries = BTreeMap::new();
         for file in &files.files {
@@ -1565,7 +1565,7 @@ beta = "^1"
         assert_eq!(archives[0].files, archive_paths(&package));
     }
 
-    const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { platform = \"macos\", paths = [\"build/**/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\"]\n";
+    const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { macos_arm64 = [\"build/**/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\"]\n";
 
     #[test]
     fn test_create_lepton_packages() {

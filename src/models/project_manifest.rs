@@ -220,6 +220,7 @@ impl MagnetManifestV1 {
             entrypoint: vec![],
             magnet_version: 1,
             metadata: Some(metadata),
+            overrides: HashMap::new(),
             package: MagnetManifestV1Package {
                 kind: project_kind,
                 name,
@@ -424,6 +425,7 @@ baz = {}
     fn test_serialize_manifest() {
         let manifest = MagnetManifestV1 {
             magnet_version: 1,
+            overrides: HashMap::new(),
             package: MagnetManifestV1Package {
                 name: "bar".to_string(),
                 version: MagnetManifestV1PackageVersion::from_str("0.1.0").unwrap(),
@@ -442,7 +444,7 @@ baz = {}
             dependencies: HashMap::new(),
             artifact: Some(MagnetManifestV1Artifact {
                 global_paths: vec!["classes/**/*.sc".to_string()],
-                platform_paths: None,
+                platform_paths: HashMap::new(),
                 source_paths: vec![],
                 exclude: vec![],
             }),

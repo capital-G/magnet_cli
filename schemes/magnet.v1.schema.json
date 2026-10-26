@@ -159,23 +159,17 @@
         },
         "platform-paths": {
           "type": "object",
-          "description": "Platform-dependent paths, e.g. binary build outputs",
-          "properties": {
-            "platform": {
-              "type": "string",
-              "enum": ["windows", "linux", "macos"],
-              "description": "Platform to match"
-            },
-            "paths": {
-              "type": "array",
-              "description": "Platform-dependent files to include",
-              "items": {
-                "type": "string"
-              }
-            }
+          "description": "Platform-dependent paths of a lepton or gluon, e.g. binary build outputs, keyed by platform tag - supports glob wildcards",
+          "propertyNames": {
+            "enum": ["linux_x86_64", "linux_arm64", "linux_armv7", "macos_x86_64", "macos_arm64", "windows_x86_64", "windows_arm64", "wasm32_emscripten"]
           },
-          "required": ["platform", "paths"],
-          "additionalProperties": false
+          "additionalProperties": {
+            "type": "array",
+            "description": "Binaries for this platform, which get packaged into plugins/",
+            "items": {
+              "type": "string"
+            }
+          }
         },
         "source-paths": {
           "type": "array",
@@ -193,6 +187,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "overrides": {
+      "type": "object",
+      "description": "Install packages from a local folder instead of the index, keyed by package name - can not be published",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Folder to install the package from, relative to the project root"
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
     },
     "entrypoint": {
       "type": "array",

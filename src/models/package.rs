@@ -61,25 +61,6 @@ pub struct PackageArchive {
     pub files: Vec<String>,
 }
 
-/// Which archive of a package gets built, see DESIGN.md "Packaging"
-#[derive(Debug, Clone)]
-pub enum BundleType {
-    /// source package of a lepton or gluon, selected by `source-paths`
-    SourceBundle,
-    /// artifact selected by `global-paths` (+ `platform-paths`)
-    ArtifactBundle,
-}
-
-impl From<&ArtifactTags> for BundleType {
-    fn from(tags: &ArtifactTags) -> Self {
-        if tags.is_source() {
-            BundleType::SourceBundle
-        } else {
-            BundleType::ArtifactBundle
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

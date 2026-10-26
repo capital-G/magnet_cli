@@ -36,8 +36,9 @@ pub struct PublishArchive {
     pub tags: ArtifactTags,
 }
 
-/// Refuses manifests which others couldn't reproduce: `path` dependencies, dependencies of
-/// another index, and git or legacy quark dependencies which aren't pinned via `tag` or `ref`
+/// Refuses manifests which others couldn't reproduce: `path` dependencies, `[overrides]`,
+/// dependencies of another index, and git or legacy quark dependencies which aren't pinned via
+/// `tag` or `ref`
 pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
     let mut problems = vec![];
     for (name, dependency) in &manifest.dependencies {
@@ -69,6 +70,11 @@ pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
             }
             _ => {}
         }
+    }
+    let mut overrides: Vec<_> = manifest.overrides.keys().collect();
+    overrides.sort();
+    for name in overrides {
+        problems.push(format!("{name} is overridden by a local folder"));
     }
     ensure!(
         problems.is_empty(),
@@ -249,7 +255,7 @@ mod tests {
     fn test_refused_dependencies() {
         let err = check_publishable(&manifest(
             "quark",
-            "a = { path = \"../a\" }\nb = { index = \"https://other.org/index\" }\nc = { git = { url = \"https://x.org/c.git\", branch = \"main\" } }\nd = { git = { url = \"https://x.org/d.git\" } }\ne = { legacy-quark = true }\n",
+            "a = { path = \"../a\" }\nb = { index = \"https://other.org/index\" }\nc = { git = { url = \"https://x.org/c.git\", branch = \"main\" } }\nd = { git = { url = \"https://x.org/d.git\" } }\ne = { legacy-quark = true }\n[overrides]\nf = { path = \"../f\" }\n",
         ))
         .unwrap_err()
         .to_string();
@@ -259,6 +265,7 @@ mod tests {
             "c is pinned to a git branch",
             "d is a git dependency without a tag or ref",
             "e is a legacy quark without a git tag or ref",
+            "f is overridden by a local folder",
         ] {
             assert!(err.contains(expected), "{expected}: {err}");
         }
