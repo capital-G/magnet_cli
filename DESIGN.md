@@ -87,7 +87,7 @@ Leptons additionally contain a `plugins` folder with the scsynth and, if availab
 
 > This is open to change in future version of magnet.
 
-After `magnet install`, `add` or `remove`, it will create (or update) a `sclang_conf.yaml` in the root folder of the project.
+After `magnet install`, `add`, `remove`, `update` or `run`, it will create (or update) a `sclang_conf.yaml` in the root folder of the project.
 This can be used by the IDE to pick up all dependencies and code of the magnet project, e.g. via `sclang -l sclang_conf.yaml`.
 Note that this sync goes only one-way, so any user changes to `sclang_conf.yaml` would be overwritten when the state of the magnet project changes.
 
@@ -97,13 +97,19 @@ The content of the file is
 excludeDefaultPaths: true
 
 includePaths:
+  # the class library of the found sclang
+  - "/Applications/SuperCollider.app/Contents/Resources/SCClassLibrary"
   # base directories of the global-paths of the project, i.e. "classes/" by default
-  - "classes/"
-  - "magnet_packages/"
+  - "/path/to/project/classes"
+  - "/path/to/project/magnet_packages"
   # local dependencies are added via the base directories of their global-paths
 ```
 
 The base directory of a global path is the part before the first wildcard, e.g. `Classes/**.sc` results in `Classes/`.
+All paths are absolute, since sclang resolves relative paths against its working directory, which is not the project root when sclang gets started by the IDE.
+
+`excludeDefaultPaths` keeps globally installed extensions out of the project, but it also excludes the class library of SuperCollider itself, so magnet adds the `SCClassLibrary` of the sclang it finds (via `MAGNET_SCLANG`, the `PATH` or the default installation) as first entry.
+If magnet can not find sclang, it writes `excludeDefaultPaths: false` instead and warns that globally installed extensions are compiled as well.
 
 ### Server plugins
 
@@ -112,7 +118,9 @@ If a list of plugin paths is given (`-U`, which sclang passes from `ServerOption
 `SC_PLUGIN_PATH` can only add paths, so it can not isolate a project from globally installed plugins.
 
 Like for sclang, magnet therefore lists all paths explicitly: the `plugins` folder of SuperCollider itself, `magnet_packages/leptons`, and the plugins of a lepton which is developed within the project (see below).
-These paths are set as the default of `ServerOptions.ugenPluginsPath` by a small class which magnet generates into `magnet_packages`, so it gets compiled via the include paths of `sclang_conf.yaml` and also applies when the server gets booted from the IDE.
+These paths are set as `ServerOptions.ugenPluginsPath` of every server by a subclass of `ServerOptions` which magnet generates into `magnet_packages`: it becomes the default options class of `Server` and sets the paths on the servers which already exist.
+It gets compiled via the include paths of `sclang_conf.yaml`, so it also applies when the server gets booted from the IDE.
+Options which user code creates via `ServerOptions.new` keep the default plugin paths of SuperCollider.
 The class determines the paths when sclang compiles it, i.e. the `plugins` folder of the running SuperCollider (via `Platform.resourceDir`) and `magnet_packages` relative to its own file, so it does not depend on a found sclang and always matches the SuperCollider it runs in.
 It does not replace plugin paths which the user has set explicitly.
 
@@ -192,6 +200,10 @@ authors = [
 Entrypoints will be an alternative for a standalone version of SuperCollider: Ideally, People would only need the source code and a copy of magnet and everything would be setup accordingly.
 
 One can only run the entrypoints of the root project.
+
+The `kind` of an entrypoint defaults to `sclang`, whose `command` is the path of a script relative to the project root, which gets started via `sclang -l sclang_conf.yaml`.
+A `system` entrypoint runs its `command` via the shell.
+Both run in the project root, and additional arguments are passed on, e.g. `magnet run test a b`.
 
 ### Semantic versioning
 
@@ -622,8 +634,8 @@ Since there is already an existing solution, there needs to be not just some inc
 
 ### sclang
 
-Like `Quarks` there will be a new `Magnet` class which communicates with the magnet CLI if is available/installed.
-This will hopefully become part of the standard library of 3.15 to make the setup process easier.
+Like `Quarks` there will be a `Magnet` class which communicates with the magnet CLI.
+magnet provides it within magnet projects by generating it into `magnet_packages`, like the class for the server plugins, so it gets released together with magnet and always matches the CLI which installed the project, instead of being part of the standard library of SuperCollider.
 
 ### scsynth / supernova
 
