@@ -468,6 +468,7 @@ impl Project {
     fn collect_sources(
         &self,
         dependencies: &ManifestDependencies,
+        in_index: impl Fn(&str) -> anyhow::Result<bool>,
         locked: impl Fn(&str) -> Option<LockSource>,
     ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
         let directory = QuarksDirectory::new(self.quarks_directory.clone(), &self.git_cache);
@@ -476,6 +477,7 @@ impl Project {
             dependencies,
             &self.git_cache,
             &directory,
+            in_index,
             locked,
         )
     }
@@ -505,9 +507,11 @@ impl Project {
         dependencies: ManifestDependencies,
         keep: impl Fn(&str) -> bool,
     ) -> anyhow::Result<Resolution> {
-        let sources = self.collect_sources(&dependencies, |name| {
-            keep(name).then(|| self.locked_source(name)).flatten()
-        })?;
+        let sources = self.collect_sources(
+            &dependencies,
+            |name| Ok(provider.get_releases(name)?.is_some()),
+            |name| keep(name).then(|| self.locked_source(name)).flatten(),
+        )?;
         let preferred = self
             .lock_file
             .iter()
@@ -730,7 +734,18 @@ impl Project {
             return Ok(false);
         };
         let dependencies = self.manifest_dependency_values();
-        let sources = self.collect_sources(&dependencies, |name| self.locked_source(name))?;
+        // without the index: a dependency of a .quark file which isn't locked from git counts
+        // as one of the index, so an unknown one fails the check below instead of a lookup
+        let sources = self.collect_sources(
+            &dependencies,
+            |name| {
+                Ok(!matches!(
+                    self.locked_source(name),
+                    Some(LockSource::Git { .. })
+                ))
+            },
+            |name| self.locked_source(name),
+        )?;
         let sources_locked = sources.iter().all(|(name, source)| {
             lock_file.dependencies.get(name).is_some_and(|locked| {
                 locked.source == source.source
@@ -2849,5 +2864,63 @@ beta = "^1"
             err.contains("beta 1.2.0 requires ddw-common from the index, but the project requires it from git+"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_install_quark_file_dependencies() {
+        use crate::git_client::source::tests::commit_files;
+        let root = tempfile::tempdir().unwrap();
+        let baz = root.path().join("baz");
+        commit_files(&baz, &[("Baz.sc", "Baz {}")]);
+        let quarks = root.path().join("quarks");
+        commit_files(
+            &quarks,
+            &[(
+                "directory.txt",
+                &format!("Baz={}\n", file_url(&baz).as_str().trim_end_matches('/')),
+            )],
+        );
+        let bar = root.path().join("bar");
+        commit_files(
+            &bar,
+            &[
+                ("Bar.sc", "Bar {}"),
+                ("Bar.quark", "(dependencies: [\"Alpha\", \"Baz\"])"),
+            ],
+        );
+        let mut project = sources_project(
+            root.path(),
+            &format!(
+                "bar = {{ legacy-quark = true, git = {{ url = \"{}\" }} }}\n",
+                file_url(&bar)
+            ),
+        );
+        project.set_quarks_directory(file_url(&quarks));
+        install_sources(&mut project, false).await.unwrap();
+        assert_eq!(
+            installed_packages_in(&root.path().join("project")),
+            // `*` resolves to alpha 1.1.0, which needs beta and ddw-common of the index
+            ["alpha", "bar", "baz", "beta", "ddw-common"]
+        );
+
+        // the lock covers the .quark dependencies, so the directory isn't needed again
+        let lock = fs::read_to_string(root.path().join("project").join(MAGNET_LOCK_FILE)).unwrap();
+        fs::remove_dir_all(&quarks).unwrap();
+        let mut project = open_sources_project(root.path());
+        project.set_quarks_directory(file_url(&quarks));
+        install_sources(&mut project, true).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("project").join(MAGNET_LOCK_FILE)).unwrap(),
+            lock
+        );
+    }
+
+    fn installed_packages_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir.join("magnet_packages/quarks"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
     }
 }

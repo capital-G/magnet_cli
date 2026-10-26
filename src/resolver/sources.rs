@@ -14,7 +14,10 @@ use crate::git_client::{
     models::GitDependency,
     source::{GitCache, GitReference},
 };
-use crate::legacy::directory::QuarksDirectory;
+use crate::legacy::{
+    directory::{parse_refspec, QuarksDirectory},
+    quark_parser::{parse_dependencies, QuarkDependency},
+};
 use crate::models::{
     lock_file::LockSource,
     project_manifest::{
@@ -56,8 +59,9 @@ enum Spec {
     Index,
     Git(Url, GitReference),
     Path(PathBuf),
-    /// a legacy quark without URL, which is looked up in the quarks directory
-    Legacy,
+    /// a legacy quark without URL, which is looked up in the quarks directory, optionally
+    /// with another reference than the directory's (from a `.quark` file's `name@refspec`)
+    Legacy(Option<GitReference>),
 }
 
 fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::Result<Spec> {
@@ -77,36 +81,87 @@ fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::R
             Ok(Spec::Git(url, reference))
         }
         (None, Some(path)) => Ok(Spec::Path(PathBuf::from(path))),
-        (None, None) if legacy_quark.unwrap_or(false) => Ok(Spec::Legacy),
+        (None, None) if legacy_quark.unwrap_or(false) => Ok(Spec::Legacy(None)),
         (None, None) => Ok(Spec::Index),
     }
 }
 
+/// A dependency which still needs to be collected
+struct Pending {
+    spelled: String,
+    spec: Spec,
+    origin: Origin,
+    required_by: String,
+    /// named by a `.quark` file, where the first source of a name wins (like in
+    /// `Quark.prCollectDependencies`) instead of being an error
+    from_quark: bool,
+    /// `ignore-quark-deps = true` of a direct dependency of the project
+    ignore_quark_deps: bool,
+}
+
+impl Pending {
+    fn from_manifest(
+        spelled: String,
+        dependency: &MagnetManifestV1DependenciesValue,
+        origin: Origin,
+        required_by: String,
+    ) -> anyhow::Result<Self> {
+        let ignore_quark_deps = matches!(origin, Origin::Project)
+            && matches!(
+                dependency,
+                MagnetManifestV1DependenciesValue::Object {
+                    ignore_quark_deps: Some(true),
+                    ..
+                }
+            );
+        Ok(Self {
+            spec: spec(&spelled, dependency)?,
+            spelled,
+            origin,
+            required_by,
+            from_quark: false,
+            ignore_quark_deps,
+        })
+    }
+}
+
 /// Collects the git and path dependencies of `dependencies` (a manifest's) and, recursively,
-/// those of their `magnet.toml`s. `locked` returns the locked source of a package if its
-/// commit should be kept, so a git dependency whose URL and reference didn't change isn't
-/// fetched again. A legacy quark without URL is looked up in `directory` (its repository and
-/// refspec), unless it's locked.
-/// A package which is required from two sources, or from the index as well, is an error
-/// (DESIGN.md "Backwards compatibility / Legacy Quarks").
+/// those of their `magnet.toml`s, or of the `.quark` file of a legacy quark (DESIGN.md
+/// "Backwards compatibility / Legacy Quarks"): a dependency named there is a `*` requirement
+/// against the index if `in_index` knows it, otherwise a legacy quark.
+/// `locked` returns the locked source of a package if its commit should be kept, so a git
+/// dependency whose URL and reference didn't change isn't fetched again. A legacy quark
+/// without URL is looked up in `directory` (its repository and refspec), unless it's locked.
+/// A package which is required from two sources, or from the index as well, is an error,
+/// unless the second one comes from a `.quark` file.
 pub fn collect_sources(
     root: &Path,
     dependencies: &HashMap<String, MagnetManifestV1DependenciesValue>,
     cache: &GitCache,
     directory: &QuarksDirectory,
+    in_index: impl Fn(&str) -> anyhow::Result<bool>,
     locked: impl Fn(&str) -> Option<LockSource>,
 ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
-    let mut pending: VecDeque<(String, MagnetManifestV1DependenciesValue, Origin, String)> =
-        sorted(dependencies)
-            .map(|(name, dependency)| (name, dependency, Origin::Project, PROJECT.to_string()))
-            .collect();
+    let mut pending: VecDeque<Pending> = sorted(dependencies)
+        .map(|(name, dependency)| {
+            Pending::from_manifest(name, &dependency, Origin::Project, PROJECT.to_string())
+        })
+        .collect::<anyhow::Result<_>>()?;
     let mut packages: BTreeMap<String, SourcePackage> = BTreeMap::new();
     // the packages required from the index, with who requires them
     let mut from_index: BTreeMap<String, String> = BTreeMap::new();
 
-    while let Some((spelled, dependency, origin, required_by)) = pending.pop_front() {
+    while let Some(item) = pending.pop_front() {
+        let Pending {
+            spelled,
+            spec,
+            origin,
+            required_by,
+            from_quark,
+            ignore_quark_deps,
+        } = item;
         let name = MagnetManifestV1::normalize_name(&spelled);
-        let (source, folder) = match spec(&spelled, &dependency)? {
+        let (source, folder) = match spec {
             Spec::Index => {
                 from_index.entry(name).or_insert(required_by);
                 continue;
@@ -146,22 +201,27 @@ pub fn collect_sources(
                 );
                 (LockSource::Path(path), Some(folder))
             }
-            Spec::Legacy => match locked(&name) {
+            Spec::Legacy(reference) => match locked(&name) {
                 Some(source @ LockSource::Git { .. }) => (source, None),
+                _ if from_quark && packages.contains_key(&name) => {
+                    // already collected, so there is nothing to look up
+                    continue;
+                }
                 _ => {
                     let entry = directory.lookup(&spelled)?.with_context(|| {
                         format!(
-                            "{spelled} is not in the quarks directory {}. Add its repository, e.g. {spelled} = {{ legacy-quark = true, git = {{ url = \"https://github.com/<user>/{spelled}\" }} }}",
+                            "{spelled} (required by {required_by}) is not in the quarks directory {}. Add its repository, e.g. {spelled} = {{ legacy-quark = true, git = {{ url = \"https://github.com/<user>/{spelled}\" }} }}",
                             directory.url()
                         )
                     })?;
+                    let reference = reference.unwrap_or(entry.reference);
                     let sha = cache
-                        .resolve(&entry.url, &entry.reference)
+                        .resolve(&entry.url, &reference)
                         .with_context(|| format!("Could not check out {spelled}"))?;
                     (
                         LockSource::Git {
                             url: entry.url,
-                            reference: entry.reference,
+                            reference,
                             sha,
                         },
                         None,
@@ -171,6 +231,13 @@ pub fn collect_sources(
         };
 
         if let Some(existing) = packages.get(&name) {
+            if existing.source != source && from_quark {
+                warn!(
+                    "{required_by} requires {spelled} from {source}, but {} already requires it from {}, which is kept",
+                    existing.required_by, existing.source
+                );
+                continue;
+            }
             ensure!(
                 existing.source == source,
                 "{name} is required from two sources: {} by {}, and {source} by {required_by}. Remove one of them, or use [overrides] in {MAGNET_PROJECT_FILE}",
@@ -184,16 +251,7 @@ pub fn collect_sources(
             (LockSource::Git { url, sha, .. }, _) => {
                 cache.read_file(url, sha, MAGNET_PROJECT_FILE)?
             }
-            (_, Some(folder)) => {
-                let path = folder.join(MAGNET_PROJECT_FILE);
-                match path.is_file() {
-                    true => Some(
-                        std::fs::read_to_string(&path)
-                            .with_context(|| format!("Could not read {path:?}"))?,
-                    ),
-                    false => None,
-                }
-            }
+            (_, Some(folder)) => read_optional(&folder.join(MAGNET_PROJECT_FILE))?,
             _ => None,
         };
         let manifest = manifest
@@ -229,7 +287,12 @@ pub fn collect_sources(
                     LockSource::Index => Origin::Project,
                 };
                 for (nested, dependency) in sorted(&manifest.dependencies) {
-                    pending.push_back((nested, dependency, nested_origin.clone(), name.clone()));
+                    pending.push_back(Pending::from_manifest(
+                        nested,
+                        &dependency,
+                        nested_origin.clone(),
+                        name.clone(),
+                    )?);
                 }
                 SourcePackage {
                     version: SemanticVersion::try_from(manifest.package.version.clone())?,
@@ -251,14 +314,48 @@ pub fn collect_sources(
                 }
             }
             // a legacy quark, which is used as a whole
-            None => SourcePackage {
-                version: SemanticVersion::zero(),
-                kind: MagnetManifestV1PackageKind::Quark,
-                source,
-                dependencies: vec![],
-                sclang: None,
-                required_by,
-            },
+            None => {
+                let quark_dependencies = match ignore_quark_deps {
+                    true => vec![],
+                    false => quark_dependencies(&spelled, &source, folder.as_deref(), cache)?,
+                };
+                let mut dependencies = vec![];
+                for dependency in quark_dependencies {
+                    let nested = MagnetManifestV1::normalize_name(&dependency.name);
+                    // the version of a .quark dependency is ignored, like SuperCollider does
+                    dependencies.push(GitDependency {
+                        name: nested.clone(),
+                        constraint: VersionReq::STAR,
+                    });
+                    if from_index.contains_key(&nested) || in_index(&nested)? {
+                        from_index.entry(nested).or_insert(name.clone());
+                        continue;
+                    }
+                    let reference = dependency.refspec.as_deref().map(parse_refspec);
+                    let spec = match dependency.url {
+                        Some(url) => {
+                            Spec::Git(url, reference.unwrap_or(GitReference::DefaultBranch))
+                        }
+                        None => Spec::Legacy(reference),
+                    };
+                    pending.push_back(Pending {
+                        spelled: dependency.name,
+                        spec,
+                        origin: Origin::Project,
+                        required_by: name.clone(),
+                        from_quark: true,
+                        ignore_quark_deps: false,
+                    });
+                }
+                SourcePackage {
+                    version: SemanticVersion::zero(),
+                    kind: MagnetManifestV1PackageKind::Quark,
+                    source,
+                    dependencies,
+                    sclang: None,
+                    required_by,
+                }
+            }
         };
         packages.insert(name, package);
     }
@@ -273,6 +370,73 @@ pub fn collect_sources(
         }
     }
     Ok(packages)
+}
+
+fn read_optional(path: &Path) -> anyhow::Result<Option<String>> {
+    match path.is_file() {
+        true => Ok(Some(
+            std::fs::read_to_string(path).with_context(|| format!("Could not read {path:?}"))?,
+        )),
+        false => Ok(None),
+    }
+}
+
+/// The `.quark` file among the files at the root of a legacy quark: `<name>.quark` (in any
+/// spelling), otherwise the only one
+fn find_quark_file(name: &str, files: &[String]) -> Option<String> {
+    let quark_files: Vec<&String> = files
+        .iter()
+        .filter(|file| file.ends_with(".quark"))
+        .collect();
+    let normalized = MagnetManifestV1::normalize_name(&format!("{name}.quark"));
+    quark_files
+        .iter()
+        .find(|file| MagnetManifestV1::normalize_name(file) == normalized)
+        .or(match quark_files.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        })
+        .map(|file| file.to_string())
+}
+
+/// The dependencies of a legacy quark's `.quark` file, which is read from its commit or
+/// folder. A file which isn't a plain literal gives a warning and no dependencies (D4.1).
+fn quark_dependencies(
+    spelled: &str,
+    source: &LockSource,
+    folder: Option<&Path>,
+    cache: &GitCache,
+) -> anyhow::Result<Vec<QuarkDependency>> {
+    let (file, content) = match (source, folder) {
+        (LockSource::Git { url, sha, .. }, _) => {
+            let Some(file) = find_quark_file(spelled, &cache.root_files(url, sha)?) else {
+                return Ok(vec![]);
+            };
+            let content = cache.read_file(url, sha, &file)?;
+            (file, content)
+        }
+        (_, Some(folder)) => {
+            let files: Vec<String> = std::fs::read_dir(folder)?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            let Some(file) = find_quark_file(spelled, &files) else {
+                return Ok(vec![]);
+            };
+            let content = read_optional(&folder.join(&file))?;
+            (file, content)
+        }
+        _ => return Ok(vec![]),
+    };
+    match parse_dependencies(&content.unwrap_or_default()) {
+        Ok(dependencies) => Ok(dependencies),
+        Err(reason) => {
+            warn!(
+                "Could not read the dependencies of {spelled} from {file} ({reason}), so it gets installed without them. Set `ignore-quark-deps = true` on {spelled} in {MAGNET_PROJECT_FILE} and add its dependencies there to fix this"
+            );
+            Ok(vec![])
+        }
+    }
 }
 
 /// The dependencies sorted by name, so errors and fetches don't depend on the hash order
@@ -348,6 +512,8 @@ mod tests {
                 &dependencies(toml),
                 &self.cache,
                 &self.directory(),
+                // the fixture index has alpha, and other names which these tests don't use
+                |name| Ok(name == "alpha"),
                 locked,
             )
         }
@@ -564,7 +730,7 @@ mod tests {
             .unwrap_err();
         assert!(err
             .to_string()
-            .contains("unknown is not in the quarks directory"));
+            .contains("unknown (required by the project) is not in the quarks directory"));
     }
 
     #[test]
@@ -587,5 +753,143 @@ mod tests {
         assert!(fixture
             .collect("ddwCommon = { legacy-quark = true }\n")
             .is_err());
+    }
+
+    /// a repository `name` at the fixture's root with `files`, returns its URL without `/`
+    fn repo(fixture: &Fixture, name: &str, files: &[(&str, &str)]) -> String {
+        let path = fixture.path(name);
+        commit_files(&path, files);
+        url(&path).trim_end_matches('/').to_string()
+    }
+
+    fn dependency_names(package: &SourcePackage) -> Vec<String> {
+        package
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn test_quark_file_dependencies() {
+        let fixture = Fixture::new();
+        let baz = repo(&fixture, "baz", &[("Baz.sc", "Baz {}")]);
+        let qux = repo(&fixture, "qux", &[("Qux.sc", "Qux {}")]);
+        tag(&fixture.path("qux"), "v1");
+        repo(
+            &fixture,
+            "quarks",
+            &[("directory.txt", &format!("Baz={baz}\n"))],
+        );
+        let bar = repo(
+            &fixture,
+            "bar",
+            &[(
+                "Bar.quark",
+                &format!("(name: \"Bar\", dependencies: [\"alpha\", \"Baz\", \"{qux}@tags/v1\"])"),
+            )],
+        );
+        let sources = fixture
+            .collect(&format!(
+                "bar = {{ legacy-quark = true, git = {{ url = \"{bar}\" }} }}\n"
+            ))
+            .unwrap();
+        // alpha is in the index, so it's a requirement against it, not a source
+        assert_eq!(sources.keys().collect::<Vec<_>>(), ["bar", "baz", "qux"]);
+        assert_eq!(dependency_names(&sources["bar"]), ["alpha", "baz", "qux"]);
+        assert_eq!(sources["baz"].required_by, "bar");
+        assert!(sources["qux"]
+            .source
+            .to_string()
+            .starts_with(&format!("git+{qux}?tag=v1#")));
+    }
+
+    #[test]
+    fn test_ignore_quark_deps() {
+        let fixture = Fixture::new();
+        let bar = repo(
+            &fixture,
+            "bar",
+            &[("bar.quark", "(dependencies: [\"Unknown\"])")],
+        );
+        let sources = fixture
+            .collect(&format!(
+                "bar = {{ legacy-quark = true, ignore-quark-deps = true, git = {{ url = \"{bar}\" }} }}\n"
+            ))
+            .unwrap();
+        assert!(sources["bar"].dependencies.is_empty());
+        // without the flag, Unknown is looked up in the quarks directory
+        let err = fixture
+            .collect(&format!(
+                "bar = {{ legacy-quark = true, git = {{ url = \"{bar}\" }} }}\n"
+            ))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("quarks directory"), "{err:#}");
+    }
+
+    #[test]
+    fn test_unreadable_quark_file() {
+        let fixture = Fixture::new();
+        let bar = repo(
+            &fixture,
+            "bar",
+            &[(
+                "Bar.quark",
+                "(dependencies: [] ++ if(true) { [\"Unknown\"] })",
+            )],
+        );
+        let sources = fixture
+            .collect(&format!(
+                "bar = {{ legacy-quark = true, git = {{ url = \"{bar}\" }} }}\n"
+            ))
+            .unwrap();
+        assert!(sources["bar"].dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_first_quark_dependency_wins() {
+        let fixture = Fixture::new();
+        let foo = repo(&fixture, "foo", &[("Foo.sc", "Foo {}")]);
+        tag(&fixture.path("foo"), "v1");
+        repo(
+            &fixture,
+            "quarks",
+            &[("directory.txt", &format!("Foo={foo}\n"))],
+        );
+        let a = repo(
+            &fixture,
+            "a",
+            &[("a.quark", "(dependencies: [\"Foo@tags/v1\"])")],
+        );
+        let b = repo(&fixture, "b", &[("b.quark", "(dependencies: [\"Foo\"])")]);
+        let sources = fixture
+            .collect(&format!(
+                "a = {{ legacy-quark = true, git = {{ url = \"{a}\" }} }}\nb = {{ legacy-quark = true, git = {{ url = \"{b}\" }} }}\n"
+            ))
+            .unwrap();
+        assert_eq!(sources["foo"].required_by, "a");
+        assert!(sources["foo"].source.to_string().contains("?tag=v1#"));
+        assert_eq!(dependency_names(&sources["b"]), ["foo"]);
+    }
+
+    #[test]
+    fn test_find_quark_file() {
+        let files = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            find_quark_file("ddwCommon", &files(&["README.md", "ddwCommon.quark"])),
+            Some("ddwCommon.quark".to_string())
+        );
+        // e.g. Modality-toolkit has Modality.quark
+        assert_eq!(
+            find_quark_file("Modality-toolkit", &files(&["Modality.quark"])),
+            Some("Modality.quark".to_string())
+        );
+        assert_eq!(find_quark_file("x", &files(&["a.quark", "b.quark"])), None);
+        assert_eq!(find_quark_file("x", &files(&["x.sc"])), None);
     }
 }

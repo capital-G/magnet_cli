@@ -64,7 +64,7 @@ pub fn parse_directory(content: &str) -> BTreeMap<String, DirectoryEntry> {
 
 /// A refspec of `directory.txt` like `Quark.validateRefspec`: `HEAD`, a commit SHA, or a tag
 /// with or without `tags/`
-fn parse_refspec(refspec: &str) -> GitReference {
+pub fn parse_refspec(refspec: &str) -> GitReference {
     if refspec == "HEAD" {
         return GitReference::DefaultBranch;
     }

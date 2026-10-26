@@ -223,6 +223,17 @@ impl GitCache {
         Ok(Some(content.to_string()))
     }
 
+    /// The names of the files and folders at the root of the commit `sha`
+    pub fn root_files(&self, url: &Url, sha: &str) -> anyhow::Result<Vec<String>> {
+        self.ensure(url, sha)?;
+        let repo = self.repo(url)?;
+        let tree = repo.find_commit(Oid::from_str(sha)?)?.tree()?;
+        Ok(tree
+            .iter()
+            .filter_map(|entry| entry.name().map(String::from))
+            .collect())
+    }
+
     /// Writes the files of the commit `sha` into `destination`, without the `.git` folder.
     /// Links and submodules are skipped with a warning.
     pub fn export(&self, url: &Url, sha: &str, destination: &Path) -> anyhow::Result<()> {
