@@ -196,6 +196,12 @@ mod tests {
             assert_eq!(parsed.unwrap().to_string(), constraint);
         }
         assert!(parse_dependency("foo@latest").is_err());
+        // a name may start with a digit, like the legacy quark 3Dj
+        let (name, parsed) = parse_dependency("3Dj@^1").unwrap();
+        assert_eq!(
+            (name.as_str(), parsed.unwrap().to_string()),
+            ("3Dj", "^1".to_string())
+        );
     }
 }
 

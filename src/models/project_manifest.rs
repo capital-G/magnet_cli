@@ -277,8 +277,10 @@ impl MagnetManifestV1 {
         })
     }
 
+    /// Letters, digits, `_` and `-`, starting with a letter or digit (e.g. the legacy quark
+    /// `3Dj`). No dots, which would read like file extensions in `dl` file names and folders.
     pub fn is_valid_name(name: &str) -> bool {
-        let re = Regex::new(r"^[A-Za-z][A-Za-z0-9_-]*$").unwrap();
+        let re = Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_-]*$").unwrap();
         re.is_match(name)
     }
 
@@ -416,11 +418,18 @@ baz = {}
 
     #[test]
     fn test_project_name() {
-        for name in ["foobar", "hello42", "hello-foo", "hello_bar"] {
+        for name in [
+            "foobar",
+            "hello42",
+            "hello-foo",
+            "hello_bar",
+            "42hello",
+            "3Dj",
+        ] {
             assert!(MagnetManifestV1::is_valid_name(name))
         }
 
-        for name in ["foo@bar", "42hello", "_hello"] {
+        for name in ["foo@bar", "_hello", "-hello", "Faust.quark", ""] {
             assert!(!MagnetManifestV1::is_valid_name(name))
         }
     }
