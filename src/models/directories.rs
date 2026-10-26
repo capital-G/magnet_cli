@@ -4,8 +4,8 @@ pub enum ProjectDirectory {
     Classes,
     /// Holds compiled package data of the project
     Dist,
-    /// help files for project
-    Docs,
+    /// help files of the project, SCDoc only finds them in a folder with this name
+    HelpSource,
     /// dependencies of the project, installed by magnet. Named after magnet, so it doesn't
     /// clash with e.g. an `external/` folder holding the C++ dependencies of a lepton.
     Packages,
@@ -19,7 +19,7 @@ impl From<ProjectDirectory> for String {
         match value {
             ProjectDirectory::Classes => "classes",
             ProjectDirectory::Dist => "dist",
-            ProjectDirectory::Docs => "docs",
+            ProjectDirectory::HelpSource => "HelpSource",
             ProjectDirectory::Tests => "tests",
             ProjectDirectory::Packages => "magnet_packages",
         }

@@ -11,7 +11,9 @@ use std::{
     str::FromStr,
 };
 use toml_edit::DocumentMut;
-use tracing::{error, instrument, trace};
+use tracing::{error, instrument, trace, warn};
+
+use crate::target::current_platform;
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
 
@@ -57,6 +59,41 @@ fn serialize_toml_via_serde<T: serde::Serialize>(value: &T) -> anyhow::Result<to
     Ok(doc.into_table())
 }
 
+/// The `[artifact]` table of a new project, as a commented starting point for the author,
+/// see DESIGN.md "Packaging". It matches the folders of a new project (`classes/`,
+/// `HelpSource/`). A lepton or gluon also gets its source package and the binaries of
+/// `platform` (if known), where `build/` is a guess for the build folder.
+fn artifact_template(kind: &MagnetManifestV1PackageKind, platform: Option<Platform>) -> String {
+    let mut template = String::from(
+        "\n[artifact]\n\
+         # Only the files selected here get packaged, so add every other file the package\n\
+         # needs, e.g. \"sounds/*.wav\" or \"examples/*.scd\"\n\
+         global-paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n]\n",
+    );
+    if *kind == MagnetManifestV1PackageKind::Quark {
+        return template;
+    }
+    template.push_str(
+        "# The files of the source package, from which the binaries can be built\n\
+         source-paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n    \"src/**\",\n    \"CMakeLists.txt\",\n]\n",
+    );
+    if let Some(platform) = platform {
+        // the plugins and the shared libraries they need, which get loaded next to them
+        let libraries = match platform {
+            Platform::MacosX8664 | Platform::MacosArm64 => "dylib",
+            Platform::WindowsX8664 | Platform::WindowsArm64 => "dll",
+            _ => "so",
+        };
+        template.push_str(&format!(
+            "\n# The binaries per platform tag, which get packaged into plugins/: the plugins and\n\
+             # the shared libraries they need, e.g. linux_x86_64 = [\"build/*.{{scx,so}}\"]\n\
+             [artifact.platform-paths]\n\
+             {platform} = [\"build/*.{{scx,{libraries}}}\"]\n"
+        ));
+    }
+    template
+}
+
 pub struct ProjectManifest {
     path: PathBuf,
     manifest: MagnetManifestV1,
@@ -77,7 +114,17 @@ impl ProjectManifest {
     }
 
     pub fn write_new(path: PathBuf, manifest: &MagnetManifestV1) -> anyhow::Result<Self> {
-        let content = Self::serialize_manifest(manifest)?;
+        let mut content = Self::serialize_manifest(manifest)?;
+        if manifest.artifact.is_none() {
+            let platform = match current_platform() {
+                Ok(platform) => Some(platform),
+                Err(err) => {
+                    warn!("{err:#}, so the manifest gets no `platform-paths`");
+                    None
+                }
+            };
+            content.push_str(&artifact_template(&manifest.package.kind, platform));
+        }
         let file = File::create(&path).context("Could not create project file")?;
         let mut writer = BufWriter::new(file);
         writer.write(content.as_bytes())?;
@@ -469,6 +516,69 @@ baz = {}
              [artifact]\n\
              global-paths = [\"classes/**/*.sc\"]\n"
         );
+    }
+
+    fn manifest_with_template(
+        kind: MagnetManifestV1PackageKind,
+        platform: Option<Platform>,
+    ) -> MagnetManifestV1 {
+        let manifest = MagnetManifestV1::new(
+            "foo".to_string(),
+            None,
+            None,
+            SemanticVersion::new(0, 1, 0),
+            None,
+            kind.clone(),
+        )
+        .unwrap();
+        let content = ProjectManifest::serialize_manifest(&manifest).unwrap()
+            + &artifact_template(&kind, platform);
+        MagnetManifestV1::from_string(&content).unwrap()
+    }
+
+    #[test]
+    fn test_quark_template() {
+        let artifact = manifest_with_template(MagnetManifestV1PackageKind::Quark, None)
+            .artifact
+            .unwrap();
+        assert_eq!(artifact.global_paths, ["classes/**/*.sc", "HelpSource/**"]);
+        assert!(artifact.source_paths.is_empty());
+        assert!(artifact.platform_paths.is_empty());
+    }
+
+    #[test]
+    fn test_lepton_template() {
+        for (platform, binaries) in [
+            (Platform::MacosArm64, "build/*.{scx,dylib}"),
+            (Platform::LinuxArmv7, "build/*.{scx,so}"),
+            (Platform::WindowsX8664, "build/*.{scx,dll}"),
+        ] {
+            let artifact =
+                manifest_with_template(MagnetManifestV1PackageKind::Lepton, Some(platform))
+                    .artifact
+                    .unwrap();
+            assert_eq!(artifact.global_paths, ["classes/**/*.sc", "HelpSource/**"]);
+            assert_eq!(
+                artifact.source_paths,
+                [
+                    "classes/**/*.sc",
+                    "HelpSource/**",
+                    "src/**",
+                    "CMakeLists.txt"
+                ]
+            );
+            assert_eq!(
+                artifact.platform_paths,
+                HashMap::from([(platform, vec![binaries.to_string()])])
+            );
+        }
+
+        // an unknown platform gets no binaries, which the author adds
+        let artifact = manifest_with_template(MagnetManifestV1PackageKind::Lepton, None)
+            .artifact
+            .unwrap();
+        assert!(artifact.platform_paths.is_empty());
+        assert!(!artifact.source_paths.is_empty());
     }
 
     /// The manifest example in DESIGN.md must always be valid against the schema.

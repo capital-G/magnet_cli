@@ -90,7 +90,7 @@ impl Project {
         for directory in [
             ProjectDirectory::Classes,
             ProjectDirectory::Tests,
-            ProjectDirectory::Docs,
+            ProjectDirectory::HelpSource,
             ProjectDirectory::Packages,
         ] {
             trace!(?directory, "Create project folder");
@@ -1496,6 +1496,7 @@ beta = "^1"
 
         assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
         assert!(dir.path().join("classes").is_dir());
+        assert!(dir.path().join("HelpSource").is_dir());
         // the lock file gets created by the first add or install
         assert!(!dir.path().join(MAGNET_LOCK_FILE).exists());
         let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
@@ -1504,6 +1505,76 @@ beta = "^1"
             assert!(gitignore.lines().any(|line| line == entry), "{gitignore}");
         }
     }
+    /// `magnet init` writes an `[artifact]` template which `magnet package` accepts once the
+    /// project has its files
+    #[test]
+    fn test_init_template_packages() {
+        let platform = crate::target::current_platform().unwrap();
+        let libraries = match platform.to_string().split('_').next().unwrap() {
+            "macos" => "dylib",
+            "windows" => "dll",
+            _ => "so",
+        };
+        for kind in [
+            MagnetManifestV1PackageKind::Quark,
+            MagnetManifestV1PackageKind::Lepton,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = MagnetManifestV1::new(
+                "foo".to_string(),
+                None,
+                None,
+                SemanticVersion::new(0, 1, 0),
+                None,
+                kind.clone(),
+            )
+            .unwrap();
+            let project = Project::create(dir.path(), manifest).unwrap();
+            let library = format!("build/libdep.{libraries}");
+            write_files(
+                &dir,
+                &[
+                    "classes/Foo.sc",
+                    "HelpSource/Classes/Foo.schelp",
+                    "src/Foo.cpp",
+                    "CMakeLists.txt",
+                    "build/Foo.scx",
+                    &library,
+                ],
+            );
+            let tags = ArtifactTags::new("api3_0", &platform.to_string()).unwrap();
+            let archives = project.create_packages(|| Ok(tags.clone())).unwrap();
+            let files: Vec<_> = archives
+                .iter()
+                .map(|archive| archive.files.clone())
+                .collect();
+            let mut expected = vec![vec![
+                "HelpSource/Classes/Foo.schelp".to_string(),
+                "classes/Foo.sc".to_string(),
+                "magnet.toml".to_string(),
+            ]];
+            if kind == MagnetManifestV1PackageKind::Lepton {
+                expected = vec![
+                    vec![
+                        "CMakeLists.txt".to_string(),
+                        "HelpSource/Classes/Foo.schelp".to_string(),
+                        "classes/Foo.sc".to_string(),
+                        "magnet.toml".to_string(),
+                        "src/Foo.cpp".to_string(),
+                    ],
+                    vec![
+                        "HelpSource/Classes/Foo.schelp".to_string(),
+                        "classes/Foo.sc".to_string(),
+                        "magnet.toml".to_string(),
+                        "plugins/Foo.scx".to_string(),
+                        format!("plugins/libdep.{libraries}"),
+                    ],
+                ];
+            }
+            assert_eq!(files, expected, "{kind}");
+        }
+    }
+
     /// the paths within a `.tar.gz` archive, in their order
     fn archive_paths(archive: &Path) -> Vec<String> {
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(

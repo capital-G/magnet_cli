@@ -79,7 +79,7 @@ pub fn binary_tags(
                 platforms()
             )
         })?,
-        None => detect_platform(std::env::consts::OS, std::env::consts::ARCH)?,
+        None => current_platform()?,
     };
     let abi = match abi {
         Some(abi) => abi.parse()?,
@@ -92,6 +92,11 @@ pub fn binary_tags(
     };
     debug!(%platform, %abi, "Tags of the binary artifact");
     ArtifactTags::new(&abi.to_string(), &platform.to_string())
+}
+
+/// The platform tag of the target magnet was built for
+pub fn current_platform() -> anyhow::Result<Platform> {
+    detect_platform(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// The platform tag for an operating system and architecture as named by
