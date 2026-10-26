@@ -8,6 +8,8 @@ pub const CONFIG_PATH: &str = ".magnet";
 pub const MAGNET_HOME_ENV: &str = "MAGNET_HOME";
 /// clone of the git index within the magnet home directory
 pub const INDEX_DIR: &str = "index";
+/// clones of git dependencies within the magnet home directory
+pub const GIT_DIR: &str = "git";
 /// downloaded artifacts within the magnet home directory
 pub const CACHE_DIR: &str = "cache";
 

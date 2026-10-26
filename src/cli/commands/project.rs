@@ -11,6 +11,7 @@ use magnet::{
     config::constants::{magnet_home, CACHE_DIR},
     git_client::client::GitClient,
     models::{
+        lock_file::LockDependency,
         project::Project,
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
@@ -278,8 +279,8 @@ impl MagnetSubCommand for ProjectUpdateArgs {
             println!("All dependencies are up to date");
             return Ok(());
         }
-        let version = |version: Option<SemanticVersion>| match version {
-            Some(version) => version.to_string(),
+        let version = |dependency: Option<LockDependency>| match dependency {
+            Some(dependency) => dependency.label(),
             None => "-".to_string(),
         };
         for (name, old, new) in changes {

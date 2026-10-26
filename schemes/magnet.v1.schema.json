@@ -108,6 +108,10 @@
                 "const": true,
                 "description": "Used for the legacy quarks package management system"
               },
+              "ignore-quark-deps": {
+                "type": "boolean",
+                "description": "Don't use the dependencies of the legacy quark's .quark file, list them in the manifest instead"
+              },
               "git": {
                 "type": "object",
                 "description": "Git repository - magnet index will not be queried",

@@ -16,6 +16,7 @@ use url::Url;
 use crate::git_client::models::{
     deserialize_semantic_version, serialize_semantic_version, GitRelease,
 };
+use crate::git_client::source::GitReference;
 use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
 use crate::resolver::online_provider::{ROOT_PACKAGE, SCLANG_PACKAGE};
 
@@ -53,12 +54,17 @@ pub struct LockDependency {
     pub checksums: BTreeMap<String, String>,
 }
 
-/// Serialized as `index`, `git+<url>#<sha>` or a path
+/// Serialized as `index`, `git+<url>?<reference>#<sha>` (e.g. `?tag=v1`, nothing for the
+/// default branch) or a path relative to the project
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum LockSource {
     Index,
-    Git { url: Url, sha: String },
+    Git {
+        url: Url,
+        reference: GitReference,
+        sha: String,
+    },
     Path(PathBuf),
 }
 
@@ -66,7 +72,11 @@ impl Display for LockSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LockSource::Index => write!(f, "index"),
-            LockSource::Git { url, sha } => write!(f, "git+{url}#{sha}"),
+            LockSource::Git {
+                url,
+                reference,
+                sha,
+            } => write!(f, "git+{}#{sha}", reference.to_url(url)),
             LockSource::Path(path) => write!(f, "{}", path.display()),
         }
     }
@@ -83,8 +93,10 @@ impl FromStr for LockSource {
             let (url, sha) = git
                 .rsplit_once('#')
                 .with_context(|| format!("git source {value} is missing a #<sha>"))?;
+            let (url, reference) = GitReference::from_url(url.parse()?);
             return Ok(LockSource::Git {
-                url: url.parse()?,
+                url,
+                reference,
                 sha: sha.to_string(),
             });
         }
@@ -117,6 +129,18 @@ impl From<&GitRelease> for LockDependency {
                 .iter()
                 .map(|artifact| (artifact.key(), artifact.sha256.clone()))
                 .collect(),
+        }
+    }
+}
+
+impl LockDependency {
+    /// The version, and the short commit of a git source, e.g. `1.2.0 (git 4b825dc)`
+    pub fn label(&self) -> String {
+        match &self.source {
+            LockSource::Git { sha, .. } => {
+                format!("{} (git {})", self.version, &sha[..sha.len().min(7)])
+            }
+            _ => self.version.to_string(),
         }
     }
 }
@@ -225,6 +249,7 @@ mod tests {
             "bar" => (
                 LockSource::Git {
                     url: "https://github.com/foo/bar.git".parse().unwrap(),
+                    reference: GitReference::Tag("v1".to_string()),
                     sha: "1a2b3c".to_string(),
                 },
                 BTreeMap::new(),
@@ -271,7 +296,7 @@ mod tests {
              [dependencies.bar]\n\
              version = \"0.2.0\"\n\
              kind = \"quark\"\n\
-             source = \"git+https://github.com/foo/bar.git#1a2b3c\"\n\
+             source = \"git+https://github.com/foo/bar.git?tag=v1#1a2b3c\"\n\
              \n\
              [dependencies.ddw-common]\n\
              version = \"1.2.3\"\n\
@@ -330,6 +355,12 @@ mod tests {
             LockSource::Index,
             LockSource::Git {
                 url: "https://github.com/foo/bar.git".parse().unwrap(),
+                reference: GitReference::DefaultBranch,
+                sha: "1a2b3c".to_string(),
+            },
+            LockSource::Git {
+                url: "https://github.com/foo/bar.git".parse().unwrap(),
+                reference: GitReference::Branch("main".to_string()),
                 sha: "1a2b3c".to_string(),
             },
             LockSource::Path(PathBuf::from("../baz")),

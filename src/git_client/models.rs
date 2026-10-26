@@ -195,6 +195,7 @@ impl From<GitDependency> for MagnetManifestV1DependenciesValue {
     fn from(value: GitDependency) -> Self {
         MagnetManifestV1DependenciesValue::Object {
             git: None,
+            ignore_quark_deps: None,
             index: None,
             legacy_quark: None,
             path: None,

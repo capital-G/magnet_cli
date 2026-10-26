@@ -4,7 +4,11 @@ use pubgrub::{
     Ranges, Reporter, SelectedDependencies, SemanticVersion,
 };
 use semver::VersionReq;
-use std::{collections::HashMap, fmt::Display, ops::Bound};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Display,
+    ops::Bound,
+};
 use tracing::{debug, error};
 
 use crate::git_client::{
@@ -12,6 +16,7 @@ use crate::git_client::{
     models::{GitDependency, GitRelease},
 };
 use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
+use crate::resolver::sources::SourcePackage;
 use crate::target::LazyTarget;
 
 pub trait ToRanges {
@@ -208,6 +213,9 @@ pub struct RootProvider<'a> {
     pub sclang: Option<VersionReq>,
     /// this machine, whose binaries are preferred when choosing a version of a lepton
     pub target: &'a LazyTarget,
+    /// the git and path dependencies, which have a single version and aren't looked up in
+    /// the index. Keyed by the normalized name.
+    pub sources: &'a BTreeMap<String, SourcePackage>,
 }
 
 impl DependencyProvider for RootProvider<'_> {
@@ -245,6 +253,9 @@ impl DependencyProvider for RootProvider<'_> {
                 .map(lowest_sclang_version)
                 .filter(|version| range.contains(version)));
         }
+        if let Some(source) = self.sources.get(package) {
+            return Ok(Some(source.version).filter(|version| range.contains(version)));
+        }
         // a preferred version may also be yanked, as yanking must not break existing lock files
         if let Some(version) = self.preferred.get(package) {
             if range.contains(version) && self.git_provider.get_release(package, version)?.is_some()
@@ -273,7 +284,29 @@ impl DependencyProvider for RootProvider<'_> {
         if package == SCLANG_PACKAGE {
             return Ok(Dependencies::Available(DependencyConstraints::default()));
         }
+        if let Some(source) = self.sources.get(package) {
+            let mut dependencies = dependency_list_to_hash_map(&source.dependencies);
+            if let (Some(_), Some(requirement)) = (&self.sclang, &source.sclang) {
+                dependencies.insert(SCLANG_PACKAGE.to_string(), sclang_lower_bound(requirement));
+            }
+            return Ok(Dependencies::Available(dependencies));
+        }
         let dependencies = self.git_provider.get_dependencies(package, version)?;
+        // a name only comes from one source (DESIGN.md "Backwards compatibility / Legacy
+        // Quarks"), so this version can't be used, which pubgrub reports with the reason
+        if let Dependencies::Available(dependencies) = &dependencies {
+            let mut names: Vec<&String> = dependencies.keys().collect();
+            names.sort();
+            if let Some((name, source)) = names
+                .into_iter()
+                .find_map(|name| self.sources.get(name).map(|source| (name, source)))
+            {
+                return Ok(Dependencies::Unavailable(format!(
+                    "({package} {version} requires {name} from the index, but {} requires it from {}. Remove one of them, or use [overrides])",
+                    source.required_by, source.source
+                )));
+            }
+        }
         match (dependencies, &self.sclang) {
             (Dependencies::Available(mut dependencies), Some(_)) => {
                 let release_sclang = self
@@ -406,6 +439,7 @@ mod tests {
                 .collect(),
             sclang: sclang.map(|sclang| sclang.parse().unwrap()),
             target,
+            sources: &BTreeMap::new(),
         };
         let mut selected: Vec<(String, String)> = resolve_dependencies(&provider)?
             .into_iter()

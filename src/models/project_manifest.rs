@@ -378,6 +378,7 @@ baz = {}
                 dependency: MagnetManifestV1DependenciesValue::Object {
                     version: Some("2.0.0".to_string()),
                     git: None,
+                    ignore_quark_deps: None,
                     index: None,
                     legacy_quark: Some(true),
                     path: None,
@@ -452,6 +453,7 @@ baz = {}
                 ref_: None,
                 tag: None,
             }),
+            ignore_quark_deps: None,
             index: None,
             legacy_quark: None,
             path: None,

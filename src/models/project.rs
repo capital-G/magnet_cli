@@ -14,8 +14,8 @@ use crate::models::project_manifest::{
     MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
 };
 use crate::{
-    config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
-    git_client::{client::GitClient, models::GitDependency},
+    config::constants::{magnet_home, GIT_DIR, MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
+    git_client::{client::GitClient, models::GitDependency, source::GitCache},
     models::{
         directories::ProjectDirectory,
         gitignore::write_gitignore,
@@ -35,9 +35,11 @@ use crate::{
     },
     resolver::{
         online_provider::{
-            resolve_dependencies, sclang_lower_bound, RootProvider, ToRanges, SCLANG_PACKAGE,
+            resolve_dependencies, sclang_lower_bound, RootProvider, ToRanges, ROOT_PACKAGE,
+            SCLANG_PACKAGE,
         },
         package_downloader::{Artifact, PackageDownloader},
+        sources::{collect_sources, SourcePackage},
     },
     sclang::{Sclang, MAGNET_SCLANG_ENV},
     target::{LazyTarget, Target},
@@ -58,6 +60,17 @@ pub struct Project {
     path: PathBuf,
     /// this machine, for the binaries of leptons
     target: LazyTarget,
+    /// clones of the git dependencies
+    git_cache: GitCache,
+}
+
+/// The manifest's dependencies by their spelling in it
+type ManifestDependencies = HashMap<String, MagnetManifestV1DependenciesValue>;
+
+/// The version of every resolved package, and the git and path packages among them
+struct Resolution {
+    versions: HashMap<String, SemanticVersion>,
+    sources: BTreeMap<String, SourcePackage>,
 }
 
 impl Project {
@@ -71,6 +84,7 @@ impl Project {
             lock_file: None,
             path: path.into(),
             target: LazyTarget::default(),
+            git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
         };
         project.generate_project_directories()?;
         write_gitignore(&project.path)?;
@@ -84,12 +98,18 @@ impl Project {
             lock_file: Self::open_lock_file(path)?,
             path: path.to_path_buf(),
             target: LazyTarget::default(),
+            git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
         })
     }
 
     /// The machine whose binaries get packaged and installed, detected by default
     pub fn set_target(&mut self, target: LazyTarget) {
         self.target = target;
+    }
+
+    /// Where git dependencies get cloned, `~/.magnet/git` by default
+    pub fn set_git_cache(&mut self, dir: PathBuf) {
+        self.git_cache = GitCache::new(dir);
     }
 
     fn open_lock_file(path: &Path) -> anyhow::Result<Option<LockFile>> {
@@ -154,24 +174,23 @@ impl Project {
             None => name,
         };
 
-        let mut dependencies: Vec<GitDependency> = self
-            .manifest_dependencies()?
-            .into_iter()
-            .filter(|dependency| dependency.name != name)
-            .collect();
-        dependencies.push(GitDependency {
-            name: name.clone(),
-            constraint: constraint.clone().unwrap_or(VersionReq::STAR),
-        });
+        let mut dependencies = self.manifest_dependency_values();
+        dependencies.insert(
+            name.clone(),
+            MagnetManifestV1DependenciesValue::String(
+                constraint.clone().unwrap_or(VersionReq::STAR).to_string(),
+            ),
+        );
 
-        let tree = self
+        let resolution = self
             .resolve(provider, dependencies)
             .with_context(|| format!("Failed to add dependency {name}"))?;
 
         let constraint = match constraint {
             Some(constraint) => constraint,
             None => {
-                let version = tree
+                let version = resolution
+                    .versions
                     .get(&normalized_name)
                     .with_context(|| format!("{name} is missing in the resolved dependencies"))?;
                 format!("^{version}").parse()?
@@ -183,7 +202,7 @@ impl Project {
             name,
             dependency: MagnetManifestV1DependenciesValue::String(constraint.to_string()),
         })?;
-        self.write_lock(provider, &tree)?;
+        self.write_lock(provider, &resolution)?;
 
         self.reload_from_file()?;
         self.write_language_config()?;
@@ -394,19 +413,16 @@ impl Project {
             .cloned()
             .with_context(|| format!("{name} is not a dependency of this project"))?;
 
-        let dependencies: Vec<GitDependency> = self
-            .manifest_dependencies()?
-            .into_iter()
-            .filter(|dependency| dependency.name != key)
-            .collect();
-        let tree = self
+        let mut dependencies = self.manifest_dependency_values();
+        dependencies.remove(&key);
+        let resolution = self
             .resolve(provider, dependencies)
             .with_context(|| format!("Failed to remove dependency {key}"))?;
 
         let previous = self.lock_file.clone();
         info!("Remove {key}");
         self.project_manifest.remove_dependency(&key)?;
-        self.write_lock(provider, &tree)?;
+        self.write_lock(provider, &resolution)?;
         self.reload_from_file()?;
 
         let lock_file = self
@@ -421,38 +437,50 @@ impl Project {
             previous
                 .as_ref()
                 .and_then(|previous| previous.dependencies.get(name))
-                .is_some_and(|locked| locked.version != dependency.version)
+                .is_some_and(|locked| {
+                    locked.version != dependency.version || locked.source != dependency.source
+                })
         });
         Ok(changed)
     }
 
+    fn manifest_dependency_values(&self) -> ManifestDependencies {
+        self.project_manifest.get_manifest().dependencies.clone()
+    }
+
     /// The dependencies of the manifest, as requirements for the resolver
     fn manifest_dependencies(&self) -> anyhow::Result<Vec<GitDependency>> {
-        self.project_manifest
-            .get_manifest()
-            .dependencies
-            .clone()
-            .into_iter()
-            .map(|(name, dependency)| GitDependency::try_from(NamedDependency { name, dependency }))
-            .collect()
+        requirements(&self.manifest_dependency_values())
+    }
+
+    /// The locked source of `name`, if the lock file has one
+    fn locked_source(&self, name: &str) -> Option<LockSource> {
+        self.lock_file
+            .as_ref()
+            .and_then(|lock_file| lock_file.dependencies.get(name))
+            .map(|dependency| dependency.source.clone())
     }
 
     fn resolve(
         &self,
         provider: &GitClient,
-        dependencies: Vec<GitDependency>,
-    ) -> anyhow::Result<HashMap<String, SemanticVersion>> {
+        dependencies: ManifestDependencies,
+    ) -> anyhow::Result<Resolution> {
         // keep the locked versions where possible, so only the necessary changes are made
         self.resolve_preferring(provider, dependencies, |_| true)
     }
 
-    /// Like [Self::resolve], but only prefers the locked versions of the packages `keep` accepts
+    /// Like [Self::resolve], but only prefers the locked versions (and commits of git
+    /// dependencies) of the packages `keep` accepts
     fn resolve_preferring(
         &self,
         provider: &GitClient,
-        dependencies: Vec<GitDependency>,
+        dependencies: ManifestDependencies,
         keep: impl Fn(&str) -> bool,
-    ) -> anyhow::Result<HashMap<String, SemanticVersion>> {
+    ) -> anyhow::Result<Resolution> {
+        let sources = collect_sources(&self.path, &dependencies, &self.git_cache, |name| {
+            keep(name).then(|| self.locked_source(name)).flatten()
+        })?;
         let preferred = self
             .lock_file
             .iter()
@@ -460,19 +488,26 @@ impl Project {
             .filter(|(name, _)| keep(name))
             .map(|(name, dependency)| (name.clone(), dependency.version))
             .collect();
-        let tree: HashMap<String, SemanticVersion> = resolve_dependencies(&RootProvider {
+        let versions: HashMap<String, SemanticVersion> = resolve_dependencies(&RootProvider {
             git_provider: provider,
-            dependencies,
+            dependencies: requirements(&dependencies)?,
             preferred,
             sclang: self.sclang_requirement()?,
             target: &self.target,
+            sources: &sources,
         })?
         .into_iter()
         .filter(|(name, _)| name != SCLANG_PACKAGE)
         .collect();
-        trace!(?tree, "Resolved dependencies");
-        self.warn_about_sclang(provider, &tree)?;
-        Ok(tree)
+        trace!(?versions, "Resolved dependencies");
+
+        let from_index: HashMap<String, SemanticVersion> = versions
+            .iter()
+            .filter(|(name, _)| *name != ROOT_PACKAGE && !sources.contains_key(*name))
+            .map(|(name, version)| (name.clone(), *version))
+            .collect();
+        self.warn_about_sclang(provider, &from_index)?;
+        Ok(Resolution { versions, sources })
     }
 
     /// The `sclang` range of `[package]`
@@ -541,16 +576,15 @@ impl Project {
         &mut self,
         provider: &GitClient,
         names: &[String],
-    ) -> anyhow::Result<Vec<(String, Option<SemanticVersion>, Option<SemanticVersion>)>> {
+    ) -> anyhow::Result<Vec<(String, Option<LockDependency>, Option<LockDependency>)>> {
         let names: HashSet<String> = names
             .iter()
             .map(|name| MagnetManifestV1::normalize_name(name))
             .collect();
-        let locked: BTreeMap<String, SemanticVersion> = self
+        let locked: BTreeMap<String, LockDependency> = self
             .lock_file
             .iter()
-            .flat_map(|lock_file| &lock_file.dependencies)
-            .map(|(name, dependency)| (name.clone(), dependency.version))
+            .flat_map(|lock_file| lock_file.dependencies.clone())
             .collect();
         let mut unknown: Vec<&str> = names
             .iter()
@@ -564,25 +598,32 @@ impl Project {
             unknown.join(", ")
         );
 
-        let tree = self.resolve_preferring(provider, self.manifest_dependencies()?, |name| {
-            !names.is_empty() && !names.contains(name)
-        })?;
-        self.write_lock(provider, &tree)?;
+        let resolution =
+            self.resolve_preferring(provider, self.manifest_dependency_values(), |name| {
+                !names.is_empty() && !names.contains(name)
+            })?;
+        self.write_lock(provider, &resolution)?;
         self.write_language_config()?;
 
-        let updated: BTreeMap<String, SemanticVersion> = self
+        let updated: BTreeMap<String, LockDependency> = self
             .lock_file
             .iter()
-            .flat_map(|lock_file| &lock_file.dependencies)
-            .map(|(name, dependency)| (name.clone(), dependency.version))
+            .flat_map(|lock_file| lock_file.dependencies.clone())
             .collect();
         let all: std::collections::BTreeSet<&String> =
             locked.keys().chain(updated.keys()).collect();
+        let pinned = |dependency: Option<&LockDependency>| {
+            dependency.map(|dependency| (dependency.version, dependency.source.clone()))
+        };
         Ok(all
             .into_iter()
-            .filter_map(|name| {
-                let (old, new) = (locked.get(name).copied(), updated.get(name).copied());
-                (old != new).then(|| (name.clone(), old, new))
+            .filter(|name| pinned(locked.get(*name)) != pinned(updated.get(*name)))
+            .map(|name| {
+                (
+                    name.clone(),
+                    locked.get(name).cloned(),
+                    updated.get(name).cloned(),
+                )
             })
             .collect())
     }
@@ -623,21 +664,24 @@ impl Project {
         Ok(())
     }
 
-    /// Writes the lock file for a resolved tree, using the details of each release from the index
-    fn write_lock(
-        &mut self,
-        provider: &GitClient,
-        tree: &HashMap<String, SemanticVersion>,
-    ) -> anyhow::Result<()> {
+    /// Writes the lock file for a resolution, using the details of each release from the
+    /// index, and the source of git and path packages
+    fn write_lock(&mut self, provider: &GitClient, resolution: &Resolution) -> anyhow::Result<()> {
         let lock_file = LockFile::from_tree(
             provider.url().clone(),
             provider.http_url()?,
-            tree,
-            |name, version| {
-                provider
+            &resolution.versions,
+            |name, version| match resolution.sources.get(name) {
+                Some(source) => Ok(LockDependency {
+                    version: source.version,
+                    kind: source.kind.clone(),
+                    source: source.source.clone(),
+                    checksums: BTreeMap::new(),
+                }),
+                None => provider
                     .get_release(name, version)?
                     .map(|release| LockDependency::from(&release))
-                    .with_context(|| format!("{name} {version} is missing in the index"))
+                    .with_context(|| format!("{name} {version} is missing in the index")),
             },
         )?;
         lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
@@ -651,17 +695,39 @@ impl Project {
         Ok(())
     }
 
-    /// `true` if every dependency of the manifest is locked with a version which satisfies it
+    /// `true` if every dependency of the manifest, and of its git and path dependencies, is
+    /// locked with a version which satisfies it, and the git and path dependencies are locked
+    /// with their current source (for git: the same URL and reference)
     fn lock_covers_manifest(&self) -> anyhow::Result<bool> {
         let Some(lock_file) = &self.lock_file else {
             return Ok(false);
         };
-        Ok(self.manifest_dependencies()?.iter().all(|dependency| {
-            lock_file
-                .dependencies
-                .get(&MagnetManifestV1::normalize_name(&dependency.name))
-                .is_some_and(|locked| dependency.constraint.to_ranges().contains(&locked.version))
-        }))
+        let dependencies = self.manifest_dependency_values();
+        let sources = collect_sources(&self.path, &dependencies, &self.git_cache, |name| {
+            self.locked_source(name)
+        })?;
+        let sources_locked = sources.iter().all(|(name, source)| {
+            lock_file.dependencies.get(name).is_some_and(|locked| {
+                locked.source == source.source
+                    && locked.version == source.version
+                    && locked.kind == source.kind
+            })
+        });
+        let mut requirements = requirements(&dependencies)?;
+        requirements.extend(
+            sources
+                .values()
+                .flat_map(|source| source.dependencies.clone()),
+        );
+        Ok(sources_locked
+            && requirements.iter().all(|dependency| {
+                lock_file
+                    .dependencies
+                    .get(&MagnetManifestV1::normalize_name(&dependency.name))
+                    .is_some_and(|locked| {
+                        dependency.constraint.to_ranges().contains(&locked.version)
+                    })
+            }))
     }
 
     /// Installs the locked dependencies into `magnet_packages/<kind>s/<name>`, and removes the
@@ -680,12 +746,13 @@ impl Project {
                 "{MAGNET_LOCK_FILE} is missing or doesn't match {MAGNET_PROJECT_FILE}, run `magnet install` without --locked to resolve the dependencies"
             );
             info!("{MAGNET_LOCK_FILE} is missing or outdated, resolving the dependencies");
-            let tree = self.resolve(provider, self.manifest_dependencies()?)?;
-            self.write_lock(provider, &tree)?;
+            let resolution = self.resolve(provider, self.manifest_dependency_values())?;
+            self.write_lock(provider, &resolution)?;
         } else if let Some(lock_file) = &self.lock_file {
             let locked = lock_file
                 .dependencies
                 .iter()
+                .filter(|(_, dependency)| dependency.source == LockSource::Index)
                 .map(|(name, dependency)| (name.clone(), dependency.version))
                 .collect();
             self.warn_about_sclang(provider, &locked)?;
@@ -719,7 +786,7 @@ impl Project {
         let mut artifacts = vec![];
         let mut missing = vec![];
         for (name, dependency) in lock_file.dependencies.iter_mut() {
-            if overrides.contains_key(name) {
+            if overrides.contains_key(name) || dependency.source != LockSource::Index {
                 continue;
             }
             match self.select_artifact(provider, name, dependency)? {
@@ -744,18 +811,51 @@ impl Project {
         for (artifact, archive) in artifacts.iter().zip(archives) {
             self.install_package(artifact, &archive)?;
         }
-        let mut overridden = 0;
+        let mut installed = artifacts.len();
+        for (name, dependency) in &lock_file.dependencies {
+            if overrides.contains_key(name) {
+                continue;
+            }
+            match &dependency.source {
+                LockSource::Index => continue,
+                LockSource::Git { url, sha, .. } => {
+                    ensure!(
+                        dependency.kind == MagnetManifestV1PackageKind::Quark,
+                        "{name} from {url} is a {}, which can only be installed from the index or a path dependency",
+                        dependency.kind
+                    );
+                    // exported first, since a magnet project only gets its selected files
+                    let checkout = tempfile::tempdir()?;
+                    self.git_cache.export(url, sha, checkout.path())?;
+                    self.install_folder(
+                        name,
+                        &dependency.kind,
+                        checkout.path(),
+                        &format!("{url} at {}", &sha[..sha.len().min(7)]),
+                    )?;
+                }
+                LockSource::Path(path) => {
+                    self.install_folder(
+                        name,
+                        &dependency.kind,
+                        &self.path.join(path),
+                        &format!("{path:?}"),
+                    )?;
+                }
+            }
+            installed += 1;
+        }
         for (name, folder) in &overrides {
             if let Some(dependency) = lock_file.dependencies.get(name) {
-                self.install_override(name, &dependency.kind, folder)?;
-                overridden += 1;
+                self.install_folder(name, &dependency.kind, folder, "[overrides]")?;
+                installed += 1;
             }
         }
 
         self.prune_packages(&lock_file)?;
         self.copy_dev_plugins()?;
         self.write_language_config()?;
-        info!("Installed {} packages", artifacts.len() + overridden);
+        info!("Installed {installed} packages");
         Ok(())
     }
 
@@ -902,19 +1002,21 @@ impl Project {
             .collect()
     }
 
-    /// Installs a package from the folder of its override (DESIGN.md "Missing binary"): what
-    /// `magnet package` would select for this platform if the folder has a `magnet.toml`,
-    /// otherwise the folder as it is. Always copied and never checked against a checksum, so
-    /// every install copies the current files.
-    fn install_override(
+    /// Installs a package from a folder (an override (DESIGN.md "Missing binary"), a path
+    /// dependency or the checkout of a git dependency): what `magnet package` would select for
+    /// this platform if the folder has a `magnet.toml`, otherwise the folder as it is (e.g. a
+    /// legacy quark). Always copied and never checked against a checksum, so every install
+    /// copies the current files. `origin` says where the folder comes from.
+    fn install_folder(
         &self,
         name: &str,
         kind: &MagnetManifestV1PackageKind,
         folder: &Path,
+        origin: &str,
     ) -> anyhow::Result<()> {
         ensure!(
             folder.is_dir(),
-            "The override of {name} in {MAGNET_PROJECT_FILE} points to {folder:?}, which is not a folder"
+            "{name} should be installed from {folder:?} ({origin}), which is not a folder"
         );
         let manifest_path = folder.join(MAGNET_PROJECT_FILE);
         let entries = match manifest_path.is_file() {
@@ -922,12 +1024,12 @@ impl Project {
                 let manifest = ProjectManifest::open(manifest_path)?.get_manifest().clone();
                 ensure!(
                     manifest.package.kind == *kind,
-                    "The override of {name} at {folder:?} is a {}, but {name} is a {kind}",
+                    "{name} from {folder:?} ({origin}) is a {}, but {name} is a {kind}",
                     manifest.package.kind
                 );
                 if MagnetManifestV1::normalize_name(&manifest.package.name) != name {
                     warn!(
-                        "The override of {name} at {folder:?} is the project {}",
+                        "{name} from {folder:?} ({origin}) is the project {}",
                         manifest.package.name
                     );
                 }
@@ -941,7 +1043,7 @@ impl Project {
             }
             false => folder_entries(folder)?,
         };
-        info!("Install {name} from {folder:?} ([overrides])");
+        info!("Install {name} from {origin}");
         self.swap_in(kind, name, |staging| {
             for (path, source) in &entries {
                 let destination = staging.join(path);
@@ -1158,6 +1260,19 @@ fn shell_command(command: &str, args: &[String]) -> Command {
             .args(args);
         shell
     }
+}
+
+/// Manifest dependencies as requirements for the resolver
+fn requirements(dependencies: &ManifestDependencies) -> anyhow::Result<Vec<GitDependency>> {
+    dependencies
+        .iter()
+        .map(|(name, dependency)| {
+            GitDependency::try_from(NamedDependency {
+                name: name.clone(),
+                dependency: dependency.clone(),
+            })
+        })
+        .collect()
 }
 
 /// `true` if the dependency is a plain version requirement against the index
@@ -2369,6 +2484,21 @@ beta = "^1"
     }
     const ALPHA_BETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\nalpha = \"^1\"\nbeta = \"^1\"\n";
 
+    /// The changes of `update` as `(name, old version, new version)`
+    fn changed_versions(
+        changes: &[(String, Option<LockDependency>, Option<LockDependency>)],
+    ) -> Vec<(String, Option<SemanticVersion>, Option<SemanticVersion>)> {
+        changes
+            .iter()
+            .map(|(name, old, new)| {
+                let version = |dependency: &Option<LockDependency>| {
+                    dependency.as_ref().map(|dependency| dependency.version)
+                };
+                (name.clone(), version(old), version(new))
+            })
+            .collect()
+    }
+
     fn version(version: &str) -> Option<SemanticVersion> {
         Some(version.parse().unwrap())
     }
@@ -2414,7 +2544,7 @@ beta = "^1"
             .update(&fixture_index(), &["DDW_Common".to_string()])
             .unwrap();
         assert_eq!(
-            changes,
+            changed_versions(&changes),
             [("ddw-common".to_string(), version("0.9.0"), version("0.1.0"))]
         );
     }
@@ -2430,7 +2560,7 @@ beta = "^1"
             .unwrap();
         // alpha 1.1.0 would be newer, but only beta (and its new dependency) changes
         assert_eq!(
-            changes,
+            changed_versions(&changes),
             [
                 ("beta".to_string(), version("1.0.0"), version("1.2.0")),
                 ("ddw-common".to_string(), None, version("0.1.0")),
@@ -2495,5 +2625,205 @@ beta = "^1"
             .await
             .unwrap();
         assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);
+    }
+
+    /// a project at `<root>/project` with the given dependencies, whose git clones go into
+    /// `<root>/git-cache`
+    fn sources_project(root: &Path, dependencies: &str) -> Project {
+        let path = root.join("project");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join(MAGNET_PROJECT_FILE),
+            format!("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\n{dependencies}"),
+        )
+        .unwrap();
+        open_sources_project(root)
+    }
+
+    fn open_sources_project(root: &Path) -> Project {
+        let mut project = Project::open(&root.join("project")).unwrap();
+        project.set_git_cache(root.join("git-cache"));
+        project
+    }
+
+    async fn install_sources(project: &mut Project, locked: bool) -> anyhow::Result<()> {
+        let cache = tempfile::tempdir().unwrap();
+        project
+            .install(&fixture_index(), &fixture_downloader(&cache), locked)
+            .await
+    }
+
+    fn quark_manifest(name: &str, version: &str, dependencies: &str) -> String {
+        format!("magnet-version = 1\n[package]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"quark\"\n[dependencies]\n{dependencies}\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\n")
+    }
+
+    fn file_url(path: &Path) -> Url {
+        Url::from_directory_path(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_install_git_dependencies() {
+        use crate::git_client::source::tests::{commit_files, tag};
+        let root = tempfile::tempdir().unwrap();
+        let foo = root.path().join("foo");
+        let foo_sha = commit_files(
+            &foo,
+            &[
+                (
+                    "magnet.toml",
+                    &quark_manifest("foo", "0.2.0", "alpha = \"^1\""),
+                ),
+                ("Classes/Foo.sc", "Foo {}"),
+                ("notes.txt", "not selected"),
+            ],
+        );
+        tag(&foo, "v0.2.0");
+        let bar = root.path().join("bar");
+        let bar_sha = commit_files(&bar, &[("Bar.sc", "Bar {}"), ("Bar.quark", "()")]);
+        let mut project = sources_project(
+            root.path(),
+            &format!(
+                "foo = {{ git = {{ url = \"{}\", tag = \"v0.2.0\" }} }}\nbar = {{ legacy-quark = true, git = {{ url = \"{}\" }} }}\n",
+                file_url(&foo),
+                file_url(&bar)
+            ),
+        );
+        install_sources(&mut project, false).await.unwrap();
+
+        let dir = root.path().join("project");
+        let quarks = dir.join("magnet_packages/quarks");
+        assert!(quarks.join("foo/Classes/Foo.sc").is_file());
+        assert!(!quarks.join("foo/notes.txt").exists());
+        assert!(quarks.join("bar/Bar.sc").is_file());
+        assert!(quarks.join("bar/Bar.quark").is_file());
+        assert!(quarks.join("alpha").is_dir());
+        let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
+        assert!(
+            lock.contains(&format!(
+                "source = \"git+{}?tag=v0.2.0#{foo_sha}\"",
+                file_url(&foo)
+            )),
+            "{lock}"
+        );
+        assert!(
+            lock.contains(&format!(
+                "[dependencies.bar]\nversion = \"0.0.0\"\nkind = \"quark\"\nsource = \"git+{}#{bar_sha}\"\n",
+                file_url(&bar)
+            )),
+            "{lock}"
+        );
+
+        // a new commit on the branch doesn't move the lock file, only `update` does
+        let newer = commit_files(&bar, &[("Bar.sc", "Bar { baz {} }")]);
+        let mut project = open_sources_project(root.path());
+        install_sources(&mut project, false).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap(),
+            lock
+        );
+        let changes = project
+            .update(&fixture_index(), &["bar".to_string()])
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, "bar");
+        assert_eq!(
+            changes[0].2.as_ref().unwrap().label(),
+            format!("0.0.0 (git {})", &newer[..7])
+        );
+        install_sources(&mut project, false).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(quarks.join("bar/Bar.sc")).unwrap(),
+            "Bar { baz {} }"
+        );
+
+        // a fresh checkout without the cached clones installs the same files
+        let installed = installed_files_in(&dir);
+        fs::remove_dir_all(dir.join("magnet_packages")).unwrap();
+        fs::remove_dir_all(root.path().join("git-cache")).unwrap();
+        let mut project = open_sources_project(root.path());
+        install_sources(&mut project, true).await.unwrap();
+        assert_eq!(installed_files_in(&dir), installed);
+    }
+
+    fn installed_files_in(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let packages = dir.join("magnet_packages");
+        walkdir::WalkDir::new(&packages)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().strip_prefix(&packages).unwrap().to_path_buf(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_install_path_dependency() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        fs::create_dir_all(local.join("Classes")).unwrap();
+        fs::write(local.join("Classes/Local.sc"), "Local {}").unwrap();
+        fs::write(local.join("notes.txt"), "not selected").unwrap();
+        fs::write(
+            local.join(MAGNET_PROJECT_FILE),
+            quark_manifest("local", "0.3.0", "alpha = \"^1\""),
+        )
+        .unwrap();
+        let mut project = sources_project(root.path(), "local = { path = \"../local\" }\n");
+        install_sources(&mut project, false).await.unwrap();
+
+        let dir = root.path().join("project");
+        let quarks = dir.join("magnet_packages/quarks");
+        assert!(quarks.join("local/Classes/Local.sc").is_file());
+        assert!(!quarks.join("local/notes.txt").exists());
+        assert!(quarks.join("alpha").is_dir());
+        let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
+        assert!(
+            lock.contains("[dependencies.local]\nversion = \"0.3.0\"\nkind = \"quark\"\nsource = \"../local\"\n"),
+            "{lock}"
+        );
+
+        // a new version of the folder gets locked by the next install, and its files copied
+        fs::write(
+            local.join(MAGNET_PROJECT_FILE),
+            quark_manifest("local", "0.4.0", "alpha = \"^1\""),
+        )
+        .unwrap();
+        fs::write(local.join("Classes/Local.sc"), "Local { new {} }").unwrap();
+        let mut project = open_sources_project(root.path());
+        install_sources(&mut project, false).await.unwrap();
+        assert!(fs::read_to_string(dir.join(MAGNET_LOCK_FILE))
+            .unwrap()
+            .contains("version = \"0.4.0\""));
+        assert_eq!(
+            fs::read_to_string(quarks.join("local/Classes/Local.sc")).unwrap(),
+            "Local { new {} }"
+        );
+    }
+
+    #[test]
+    fn test_index_package_requiring_git_dependency() {
+        use crate::git_client::source::tests::commit_files;
+        let root = tempfile::tempdir().unwrap();
+        let ddw = root.path().join("ddw");
+        commit_files(&ddw, &[("Ddw.sc", "Ddw {}")]);
+        let mut project = sources_project(
+            root.path(),
+            &format!(
+                "beta = \"^1.2\"\nddw-common = {{ git = {{ url = \"{}\" }} }}\n",
+                file_url(&ddw)
+            ),
+        );
+        let err = project
+            .update(&fixture_index(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("beta 1.2.0 requires ddw-common from the index, but the project requires it from git+"),
+            "{err}"
+        );
     }
 }
