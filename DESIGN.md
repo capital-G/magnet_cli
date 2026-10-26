@@ -105,6 +105,20 @@ includePaths:
 
 The base directory of a global path is the part before the first wildcard, e.g. `Classes/**.sc` results in `Classes/`.
 
+### Server plugins
+
+scsynth and supernova load their plugins from their own `plugins` folder, the system and user Extensions folders and the folders of the `SC_PLUGIN_PATH` environment variable.
+If a list of plugin paths is given (`-U`, which sclang passes from `ServerOptions.ugenPluginsPath`), only these paths are loaded and all of the default paths are skipped, including the plugins of SuperCollider itself.
+`SC_PLUGIN_PATH` can only add paths, so it can not isolate a project from globally installed plugins.
+
+Like for sclang, magnet therefore lists all paths explicitly: the `plugins` folder of SuperCollider itself, `magnet_packages/leptons`, and the plugins of a lepton which is developed within the project (see below).
+These paths are set as the default of `ServerOptions.ugenPluginsPath` by a small class which magnet generates into `magnet_packages`, so it gets compiled via the include paths of `sclang_conf.yaml` and also applies when the server gets booted from the IDE.
+The class determines the paths when sclang compiles it, i.e. the `plugins` folder of the running SuperCollider (via `Platform.resourceDir`) and `magnet_packages` relative to its own file, so it does not depend on a found sclang and always matches the SuperCollider it runs in.
+It does not replace plugin paths which the user has set explicitly.
+
+When the project itself is a lepton, magnet copies the binaries of its `platform-paths` for the current platform into `magnet_packages/.dev/<name>/plugins` during `magnet install` and `magnet run`, so a local build gets loaded by the server.
+Its classes do not need to be copied since the `global-paths` of the project are already part of the include paths.
+
 ## Project manifest `magnet.toml`
 
 The project manifest is a file in the root directory of the project which describes the necessary context for the project.
@@ -613,7 +627,7 @@ This will hopefully become part of the standard library of 3.15 to make the setu
 ### scsynth / supernova
 
 Since dependencies are stored locally instead of globally it is necessary to allow loading arbitrary folders as source for plugins within scsynth/supernova.
-There maybe needs to be some work done in order to make this happen since currently these paths seem to be hardcoded.
+This is already possible via `ServerOptions.ugenPluginsPath`, though it requires to also list the plugins of SuperCollider itself (see Server plugins).
 
 ### sc-ide
 
