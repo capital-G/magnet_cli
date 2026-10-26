@@ -117,6 +117,29 @@ pub fn collect_files(
     Ok(package_files)
 }
 
+/// The binaries of `platform-paths` for `platform`, as for an artifact, and the globs which
+/// select no file (e.g. if the plugin isn't built yet)
+pub fn collect_binaries(
+    root: &Path,
+    manifest: &MagnetManifestV1,
+    platform: &Platform,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<String>)> {
+    let artifact = manifest.artifact.clone().unwrap_or_default();
+    let globs = artifact
+        .platform_paths
+        .get(platform)
+        .cloned()
+        .unwrap_or_default();
+    let mut unmatched = vec![];
+    let binaries = select(
+        &project_files(root)?,
+        &globs,
+        &glob_set(&artifact.exclude)?,
+        &mut unmatched,
+    )?;
+    Ok((binaries.into_iter().map(PathBuf::from).collect(), unmatched))
+}
+
 /// All files (and links) of the project which may be packaged, as `/`-separated paths
 /// relative to `root`
 fn project_files(root: &Path) -> anyhow::Result<Vec<String>> {

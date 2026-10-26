@@ -26,9 +26,10 @@ use crate::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             MagnetManifestV1PackageKind,
         },
+        server_options::{write_server_options, DEV_DIR},
     },
     packaging::{
-        collect::{collect_files, PackageFiles},
+        collect::{collect_binaries, collect_files, PackageFiles},
         compression,
         naming::artifact_file_name,
     },
@@ -209,9 +210,69 @@ impl Project {
         self.write_language_config_for(sclang)
     }
 
+    /// Writes `sclang_conf.yaml` and the class which isolates the server's plugins
+    /// (DESIGN.md "Server plugins"), which is compiled via the include paths of the former
     fn write_language_config_for(&self, sclang: Option<Sclang>) -> anyhow::Result<()> {
         LanguageConfig::for_project(&self.path, self.project_manifest.get_manifest(), sclang)?
-            .write(&self.path)
+            .write(&self.path)?;
+        write_server_options(
+            &self.project_dir(ProjectDirectory::Packages),
+            *self.kind() == MagnetManifestV1PackageKind::Lepton,
+        )
+    }
+
+    /// If the project is a lepton, copies its binaries of `platform-paths` for this platform
+    /// into `magnet_packages/.dev/<name>/plugins`, so the server loads the local build
+    /// (DESIGN.md "Server plugins"). A missing build only warns, since it may not exist yet.
+    fn copy_dev_plugins(&self) -> anyhow::Result<()> {
+        if *self.kind() != MagnetManifestV1PackageKind::Lepton {
+            return Ok(());
+        }
+        let manifest = self.project_manifest.get_manifest();
+        let name = MagnetManifestV1::normalize_name(&manifest.package.name);
+        let dev_dir = self
+            .project_dir(ProjectDirectory::Packages)
+            .join(DEV_DIR)
+            .join(&name);
+        if dev_dir.exists() {
+            fs::remove_dir_all(&dev_dir)
+                .with_context(|| format!("Could not remove {dev_dir:?}"))?;
+        }
+        let platform = match self.target.platform() {
+            Ok(platform) => platform,
+            Err(err) => {
+                warn!("{err:#}, so the binaries of {name} don't get loaded by the server");
+                return Ok(());
+            }
+        };
+        let (binaries, unmatched) = collect_binaries(&self.path, manifest, &platform)?;
+        if binaries.is_empty() && unmatched.is_empty() {
+            warn!("{MAGNET_PROJECT_FILE} has no `platform-paths` for {platform}, so the server doesn't load the binaries of {name}");
+        }
+        for glob in unmatched {
+            warn!(
+                "{glob} of `platform-paths` doesn't select any file, maybe {name} isn't built yet"
+            );
+        }
+        let entries = package_entries(
+            &self.path,
+            &PackageFiles {
+                files: vec![],
+                binaries,
+            },
+        )?;
+        for (path, source) in &entries {
+            let destination = dev_dir.join(path);
+            fs::create_dir_all(destination.parent().context("A plugin has a folder")?)?;
+            fs::copy(source, &destination)
+                .with_context(|| format!("Could not copy {source:?} to {destination:?}"))?;
+        }
+        debug!(
+            ?dev_dir,
+            count = entries.len(),
+            "Copied the binaries of the project"
+        );
+        Ok(())
     }
 
     pub fn manifest(&self) -> &MagnetManifestV1 {
@@ -263,6 +324,7 @@ impl Project {
                 }
             })?;
         self.ensure_installed()?;
+        self.copy_dev_plugins()?;
 
         let root = std::path::absolute(&self.path)?;
         let mut command = match entrypoint.kind {
@@ -691,6 +753,7 @@ impl Project {
         }
 
         self.prune_packages(&lock_file)?;
+        self.copy_dev_plugins()?;
         self.write_language_config()?;
         info!("Installed {} packages", artifacts.len() + overridden);
         Ok(())
@@ -1116,6 +1179,7 @@ mod tests {
     use std::env;
 
     use super::*;
+    use crate::models::server_options::server_options_class;
     use url::Url;
 
     const MANIFEST: &str = r#"# my project
@@ -1410,6 +1474,7 @@ beta = "^1"
         assert_eq!(
             installed.keys().cloned().collect::<Vec<_>>(),
             [
+                "MagnetServerOptions.sc",
                 "quarks/alpha/Classes/Alpha.sc",
                 "quarks/alpha/HelpSource/Classes/Alpha.schelp",
                 "quarks/beta/Classes/Beta.sc",
@@ -1463,7 +1528,8 @@ beta = "^1"
             ]
         );
         assert!(dir.path().join(MAGNET_LOCK_FILE).exists());
-        assert_eq!(installed_files(&dir).len(), 2);
+        // the two packages and MagnetServerOptions.sc
+        assert_eq!(installed_files(&dir).len(), 3);
     }
 
     #[tokio::test]
@@ -1784,6 +1850,67 @@ beta = "^1"
             .unwrap();
         assert_eq!(installed_plugin(&dir), "zeta 1.0.0 api3_0 macos_arm64\n");
         assert!(!dir.path().join("magnet_packages/leptons/unknown").exists());
+    }
+
+    #[tokio::test]
+    async fn test_install_writes_server_options() {
+        let class = |dir: &tempfile::TempDir| {
+            fs::read_to_string(dir.path().join("magnet_packages/MagnetServerOptions.sc")).unwrap()
+        };
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .unwrap();
+        assert_eq!(class(&dir), server_options_class(false));
+
+        // a lepton project also loads its own build
+        let (dir, _) = project(&format!(
+            "{LEPTON_MANIFEST}[dependencies]\nzeta = \"=1.0.0\"\n"
+        ));
+        write_files(&dir, &["Classes/Foo.sc", "build/Release/Foo.scx"]);
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .unwrap();
+        assert_eq!(class(&dir), server_options_class(true));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("magnet_packages/.dev/foo/plugins/Foo.scx"))
+                .unwrap(),
+            "build/Release/Foo.scx"
+        );
+        assert_eq!(installed_plugin(&dir), "zeta 1.0.0 api3_0 macos_arm64\n");
+    }
+
+    #[test]
+    fn test_run_copies_dev_plugins() {
+        let (dir, mut project) = project(&format!(
+            "{LEPTON_MANIFEST}[[entrypoint]]\nname = \"noop\"\nkind = \"system\"\ncommand = \"exit 0\"\n"
+        ));
+        project.set_target(target("macos_arm64", "api3_0"));
+        let dev = dir.path().join("magnet_packages/.dev/foo/plugins");
+        let run = |project: &Project| {
+            assert!(project
+                .run_entrypoint("noop", &[], no_sclang)
+                .unwrap()
+                .success())
+        };
+
+        // not built yet, which only warns
+        run(&project);
+        assert!(!dev.join("Foo.scx").exists());
+
+        write_files(&dir, &["build/Release/Foo.scx"]);
+        run(&project);
+        assert_eq!(
+            fs::read_to_string(dev.join("Foo.scx")).unwrap(),
+            "build/Release/Foo.scx"
+        );
+
+        // the copy follows the build, also for removed binaries
+        fs::remove_file(dir.path().join("build/Release/Foo.scx")).unwrap();
+        write_files(&dir, &["build/Release/Bar.scx"]);
+        run(&project);
+        assert!(!dev.join("Foo.scx").exists());
+        assert!(dev.join("Bar.scx").is_file());
     }
 
     #[tokio::test]

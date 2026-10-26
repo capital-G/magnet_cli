@@ -5,3 +5,4 @@ pub mod lock_file;
 pub mod package;
 pub mod project;
 pub mod project_manifest;
+pub mod server_options;
