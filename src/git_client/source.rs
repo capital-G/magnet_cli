@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{bail, ensure, Context};
 use git2::{FetchOptions, ObjectType, Oid, Repository};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::git_client::client::GitClient;
@@ -120,10 +120,28 @@ impl GitCache {
         Ok(repo)
     }
 
-    fn fetch(repo: &Repository, url: &Url) -> anyhow::Result<()> {
+    /// Fetches the single commit `wanted` points to (shallow, depth 1), and falls back to
+    /// all branches and tags with their full history if that fails, e.g. for an abbreviated
+    /// `ref`, a server which doesn't hand out commits by SHA, or a local repository (libgit2
+    /// has no shallow fetches for those)
+    fn fetch(repo: &Repository, url: &Url, wanted: &GitReference) -> anyhow::Result<()> {
         info!("Fetching {url}");
+        if let Some(refspec) = shallow_refspec(wanted) {
+            let mut options = FetchOptions::new();
+            options.depth(1).download_tags(git2::AutotagOption::None);
+            match repo
+                .find_remote("origin")?
+                .fetch(&[refspec.as_str()], Some(&mut options), None)
+            {
+                Ok(()) => return Ok(()),
+                Err(err) => debug!("Shallow fetch of {wanted} from {url} failed: {err}"),
+            }
+        }
         let mut options = FetchOptions::new();
         options.download_tags(git2::AutotagOption::All);
+        if repo.is_shallow() {
+            options.depth(UNSHALLOW);
+        }
         repo.find_remote("origin")?
             .fetch(
                 &[
@@ -165,7 +183,7 @@ impl GitCache {
                 return Ok(oid.to_string());
             }
         }
-        if let Err(err) = Self::fetch(&repo, url) {
+        if let Err(err) = Self::fetch(&repo, url, reference) {
             warn!("{err:#}, using the cached clone");
         }
         match Self::find(&repo, reference)? {
@@ -181,7 +199,7 @@ impl GitCache {
         if repo.find_commit(oid).is_ok() {
             return Ok(());
         }
-        Self::fetch(&repo, url)?;
+        Self::fetch(&repo, url, &GitReference::Ref(sha.to_string()))?;
         ensure!(
             repo.find_commit(oid).is_ok(),
             "{url} has no commit {sha}, maybe it was force-pushed away. Run `magnet update` to resolve it again"
@@ -212,6 +230,25 @@ impl GitCache {
         let repo = self.repo(url)?;
         let tree = repo.find_commit(Oid::from_str(sha)?)?.tree()?;
         export_tree(&repo, &tree, destination, Path::new(""))
+    }
+}
+
+/// `GIT_FETCH_DEPTH_UNSHALLOW`, which turns a shallow clone into a full one
+const UNSHALLOW: i32 = i32::MAX;
+
+/// The refspec which fetches only the commit of `reference`, `None` for an abbreviated `ref`,
+/// which can't be asked for
+fn shallow_refspec(reference: &GitReference) -> Option<String> {
+    match reference {
+        GitReference::DefaultBranch => Some("+HEAD:refs/remotes/origin/HEAD".to_string()),
+        GitReference::Branch(branch) => {
+            Some(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"))
+        }
+        GitReference::Tag(tag) => Some(format!("+refs/tags/{tag}:refs/tags/{tag}")),
+        GitReference::Ref(rev) if rev.len() == 40 && Oid::from_str(rev).is_ok() => {
+            Some(format!("+{rev}:refs/magnet/{rev}"))
+        }
+        GitReference::Ref(_) => None,
     }
 }
 
@@ -358,6 +395,24 @@ pub(crate) mod tests {
         assert_eq!(
             GitReference::Tag("v1".to_string()).to_url(&url).as_str(),
             "https://x.org/foo.git?tag=v1"
+        );
+    }
+
+    #[test]
+    fn test_shallow_refspec() {
+        let sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        assert_eq!(
+            shallow_refspec(&GitReference::Tag("v1".to_string())).unwrap(),
+            "+refs/tags/v1:refs/tags/v1"
+        );
+        assert_eq!(
+            shallow_refspec(&GitReference::Ref(sha.to_string())).unwrap(),
+            format!("+{sha}:refs/magnet/{sha}")
+        );
+        // an abbreviated commit can't be asked for, so it needs the full history
+        assert_eq!(
+            shallow_refspec(&GitReference::Ref("4b825dc".to_string())),
+            None
         );
     }
 
