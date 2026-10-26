@@ -60,7 +60,7 @@ When creating a new magnet project the following folders will be created
 
 * `classes/` - SC classes of the project
 * `dist/` - stores created packages of the project, `.gitignore` this
-* `docs/` - schelp documentation of the project
+* `HelpSource/` - schelp documentation of the project, since SCDoc only finds help files in folders with this name
 * `magnet_packages/` - storing all dependencies - managed by magnet, `.gitignore` this
     * `magnet_packages/quarks`
     * `magnet_packages/leptons` - which will include scsynth and supernova versions, depending on if both are available via the index
@@ -271,7 +271,7 @@ source = "../baz"
 version = "1.4.2"
 kind = "lepton"
 source = "index"
-checksums = { api3-linux_x86_64 = "abc", api3-macos_arm64 = "def", source-any = "987" }
+checksums = { api3_0-linux_x86_64 = "abc", api3_0-macos_arm64 = "def", source-any = "987" }
 ```
 
 The kind is stored in the lock file such that magnet knows the folder of each dependency within `magnet_packages` without having to consult the index.
@@ -314,7 +314,7 @@ Since magnet knows via the package manifest which files make up the package, it 
 The files of a package are selected by the globs of the `[artifact]` table of the manifest, relative to the project root, and not by a `.gitignore` file:
 
 * `global-paths` - files of every artifact, e.g. the `.sc` classes and `HelpSource`
-* `platform-paths` - the binaries of a lepton or gluon for a given platform
+* `platform-paths` - the binaries of a lepton or gluon, keyed by platform tag, e.g. `platform-paths = { macos_arm64 = ["build/*.{scx,dylib}"], linux_x86_64 = ["build/*.{scx,so}"] }`, which also selects the shared libraries a plugin needs next to it
 * `source-paths` - the files of the source package of a lepton or gluon, e.g. the C++ sources and the `CMakeLists.txt`, required for these kinds
 * `exclude` - files which are never packaged, even if a glob above selects them
 
@@ -348,23 +348,23 @@ Since Quarks are not bound to a platform or a binary interface, they use `any` f
 The supported SuperCollider versions are not a tag but the `sclang` range of the manifest (see SuperCollider version), like Python wheels keep `Requires-Python` in their metadata.
 
 For binary packages, the abi tag only describes the binary compatibility, i.e. the plugin API version of scsynth/supernova for leptons and the plugin ABI of sclang for gluons.
-The abi tag of a lepton follows what scsynth checks when it loads a plugin, which is currently the `sc_api_version` of the plugin interface, so the tag is `api` followed by this number, e.g. `api3`.
-This is not a fixed list: the number can be any integer, since it increases with every breaking change of the plugin interface.
-Two abi tags are either equal or incompatible, there is no ordering between them.
-Should SuperCollider ever ship incompatible variants of the same plugin API side by side, e.g. scsynth with 64 bit samples, scsynth needs to tell their plugins apart and the tag gets a suffix, e.g. `api5_f64`.
-
-Additions to the plugin interface which do not break existing plugins, e.g. new functions at the end of the interface table, do not change the abi tag.
-A lepton which uses such a new function sets the minimum SuperCollider version via `sclang` in its manifest (see SuperCollider version), so the resolver falls back to an older version of the lepton for older SuperCollider versions and one artifact serves all SuperCollider versions with the same abi tag.
+The abi tag of a lepton follows what scsynth checks when it loads a plugin, which is the version of the plugin API, so the tag is `api<major>_<minor>`, e.g. `api4_1`.
+Starting with SuperCollider 3.15 the plugin API uses semantic versioning: the major version increases with every breaking change of the plugin interface, the minor version with additions which do not break existing plugins, e.g. new functions at the end of the interface table.
+Earlier versions only have a single number, which counts as the major version, e.g. `api3_0`.
+This is not a fixed list: both numbers can be any integer.
+scsynth loads a plugin with the same major version and a minor version up to its own, so the minor version of a lepton artifact is the one the plugin targets, and a version of a lepton may have several artifacts for a platform, e.g. `api4_0` and `api4_2`.
+The installation picks the one with the highest minor version which the server loads.
+Should SuperCollider ever ship incompatible variants of the same plugin API side by side, e.g. scsynth with 64 bit samples, scsynth needs to tell their plugins apart and the tag gets a suffix, e.g. `api5_0_f64`.
 scsynth and supernova share the same plugin API version, so one artifact contains the binaries for both.
 
 SuperCollider | abi tag
 --- | ---
-3.6 - 3.8 | `api2`
-3.9 - 3.14 | `api3`
-3.15 | not released yet, expected to be `api4`
+3.6 - 3.8 | `api2_0`
+3.9 - 3.14 | `api3_0`
+3.15 | not released yet, expected to be `api4_0`
 
 magnet derives the abi tag from the version of the found SuperCollider via this table.
-For versions it does not know, e.g. development builds, it needs to be set explicitly, e.g. `api7`.
+For versions it does not know, e.g. development builds, it needs to be set explicitly, e.g. `api4_1`.
 
 The archive is a gzip compressed tar file in the plain *ustar* format without GNU or pax extensions, such that a small reader is enough to unpack it, e.g. within a browser.
 Long paths use the `prefix` field of ustar (155 characters for the directory in addition to the 100 characters of the name), and packaging fails for longer paths.
@@ -413,8 +413,9 @@ Package names are
 #### Missing binary
 
 Dependencies are resolved by their versions only, so the lock file does not depend on the platform.
+When choosing a version of a lepton, magnet prefers the newest allowed version with a binary for the machine, unless a version is already locked, so the lock file fits the machine which wrote it.
 Only the installation picks the artifact which matches the platform and abi tag of the machine.
-If the locked version of a lepton has no such artifact, the installation stops and names the newest version of the package which provides one (e.g. `magnet add foo@=0.3.1`), or suggests an override if there is none.
+If the locked version of a lepton has no such artifact, the installation stops and names the newest version of the package which provides one, via `magnet update foo` if the manifest allows this version and otherwise via `magnet add foo@=0.3.1`, or suggests an override if there is none.
 
 An override installs a package from a local folder instead of the index, e.g. a plugin which was built locally or downloaded for a platform which the index does not provide yet:
 

@@ -1,9 +1,9 @@
 //! The platform and abi tags of this machine, which select the binary artifacts of leptons,
 //! see DESIGN.md "Packaging"
 
-use std::{fmt, str::FromStr};
+use std::{cell::OnceCell, fmt, str::FromStr};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use pubgrub::SemanticVersion;
 use tracing::debug;
 
@@ -65,13 +65,50 @@ impl fmt::Display for PluginApi {
     }
 }
 
-/// The tags of the binary artifact for this machine. Without an override, the platform comes
-/// from the target magnet was built for and the abi from the version of the found sclang.
-pub fn binary_tags(
+/// The binary artifacts this machine can load: the platform and the plugin API of the server
+#[derive(Debug, Clone, PartialEq)]
+pub struct Target {
+    pub platform: Platform,
+    pub api: PluginApi,
+}
+
+impl Target {
+    /// The tags of the artifact which gets built for this machine
+    pub fn tags(&self) -> ArtifactTags {
+        ArtifactTags::new(&self.api.to_string(), &self.platform.to_string())
+            .expect("platform and plugin API tags are valid")
+    }
+
+    /// The artifact this machine installs out of `artifacts`: one of its platform whose
+    /// plugin API the server loads, with the highest such minor version
+    pub fn best_artifact<'a>(
+        &self,
+        artifacts: impl IntoIterator<Item = &'a ArtifactTags>,
+    ) -> Option<&'a ArtifactTags> {
+        let platform = self.platform.to_string();
+        artifacts
+            .into_iter()
+            .filter(|tags| tags.platform == platform)
+            .filter_map(|tags| Some((tags.abi.parse::<PluginApi>().ok()?, tags)))
+            .filter(|(api, _)| self.api.loads(api))
+            .max_by_key(|(api, _)| *api)
+            .map(|(_, tags)| tags)
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.platform, self.api)
+    }
+}
+
+/// The target of this machine. Without an override, the platform comes from the target magnet
+/// was built for and the plugin API from the version of the found sclang.
+pub fn detect_target(
     platform: Option<&str>,
     abi: Option<&str>,
     find_sclang: impl FnOnce() -> anyhow::Result<Option<Sclang>>,
-) -> anyhow::Result<ArtifactTags> {
+) -> anyhow::Result<Target> {
     let platform = match platform {
         Some(platform) => Platform::from_str(platform).ok().with_context(|| {
             format!(
@@ -81,7 +118,7 @@ pub fn binary_tags(
         })?,
         None => current_platform()?,
     };
-    let abi = match abi {
+    let api = match abi {
         Some(abi) => abi.parse()?,
         None => {
             let sclang = find_sclang()?.with_context(|| {
@@ -90,8 +127,58 @@ pub fn binary_tags(
             abi_for_version(&sclang.version()?)?
         }
     };
-    debug!(%platform, %abi, "Tags of the binary artifact");
-    ArtifactTags::new(&abi.to_string(), &platform.to_string())
+    let target = Target { platform, api };
+    debug!(%target, "Target of the binary artifacts");
+    Ok(target)
+}
+
+/// The target of this machine, determined on first use, since deriving the plugin API starts
+/// sclang. Only leptons need it, so quark projects work without a SuperCollider installation.
+pub struct LazyTarget {
+    platform: Option<String>,
+    abi: Option<String>,
+    find_sclang: fn() -> anyhow::Result<Option<Sclang>>,
+    target: OnceCell<Result<Target, String>>,
+}
+
+impl LazyTarget {
+    /// With the overrides of `--platform`/`--abi`, otherwise detected
+    pub fn new(platform: Option<String>, abi: Option<String>) -> Self {
+        Self::with_sclang(platform, abi, Sclang::find)
+    }
+
+    pub fn with_sclang(
+        platform: Option<String>,
+        abi: Option<String>,
+        find_sclang: fn() -> anyhow::Result<Option<Sclang>>,
+    ) -> Self {
+        Self {
+            platform,
+            abi,
+            find_sclang,
+            target: OnceCell::new(),
+        }
+    }
+
+    pub fn get(&self) -> anyhow::Result<&Target> {
+        self.target
+            .get_or_init(|| {
+                detect_target(
+                    self.platform.as_deref(),
+                    self.abi.as_deref(),
+                    self.find_sclang,
+                )
+                .map_err(|err| format!("{err:#}"))
+            })
+            .as_ref()
+            .map_err(|err| anyhow!("{err}"))
+    }
+}
+
+impl Default for LazyTarget {
+    fn default() -> Self {
+        Self::new(None, None)
+    }
 }
 
 /// The platform tag of the target magnet was built for
@@ -192,8 +279,11 @@ mod tests {
     #[test]
     fn test_overrides() {
         let no_sclang = || -> anyhow::Result<Option<Sclang>> { panic!("sclang is not needed") };
-        let tags = binary_tags(Some("linux_armv7"), Some("api4_1"), no_sclang).unwrap();
-        assert_eq!(tags, ArtifactTags::new("api4_1", "linux_armv7").unwrap());
+        let target = detect_target(Some("linux_armv7"), Some("api4_1"), no_sclang).unwrap();
+        assert_eq!(
+            target.tags(),
+            ArtifactTags::new("api4_1", "linux_armv7").unwrap()
+        );
 
         for (platform, abi) in [
             ("macos", "api3_0"),
@@ -202,7 +292,7 @@ mod tests {
             ("linux_x86_64", "any"),
         ] {
             assert!(
-                binary_tags(Some(platform), Some(abi), no_sclang).is_err(),
+                detect_target(Some(platform), Some(abi), no_sclang).is_err(),
                 "{platform} {abi}"
             );
         }
@@ -239,9 +329,68 @@ mod tests {
 
     #[test]
     fn test_abi_needs_sclang() {
-        let err = binary_tags(Some("linux_x86_64"), None, || Ok(None))
+        let err = detect_target(Some("linux_x86_64"), None, || Ok(None))
             .unwrap_err()
             .to_string();
         assert!(err.contains("--abi"), "{err}");
+
+        // the error is kept, so sclang is only looked up once
+        let target = LazyTarget::with_sclang(Some("linux_x86_64".into()), None, || Ok(None));
+        for _ in 0..2 {
+            let err = target.get().unwrap_err().to_string();
+            assert!(err.contains("--abi"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_best_artifact() {
+        let tags = |key: &str| {
+            let (abi, platform) = key.split_once('-').unwrap();
+            ArtifactTags::new(abi, platform).unwrap()
+        };
+        let artifacts: Vec<ArtifactTags> = [
+            "source-any",
+            "api3_0-linux_x86_64",
+            "api4_0-linux_x86_64",
+            "api4_2-linux_x86_64",
+            "api4_5-linux_x86_64",
+            "api4_1-macos_arm64",
+        ]
+        .map(tags)
+        .to_vec();
+        for (platform, api, best) in [
+            (
+                Platform::LinuxX8664,
+                PluginApi::new(4, 3),
+                Some("api4_2-linux_x86_64"),
+            ),
+            (
+                Platform::LinuxX8664,
+                PluginApi::new(4, 1),
+                Some("api4_0-linux_x86_64"),
+            ),
+            (
+                Platform::LinuxX8664,
+                PluginApi::new(3, 7),
+                Some("api3_0-linux_x86_64"),
+            ),
+            (Platform::LinuxX8664, PluginApi::new(5, 0), None),
+            (Platform::MacosArm64, PluginApi::new(4, 0), None),
+            (
+                Platform::MacosArm64,
+                PluginApi::new(4, 1),
+                Some("api4_1-macos_arm64"),
+            ),
+            (Platform::WindowsX8664, PluginApi::new(4, 1), None),
+        ] {
+            let target = Target { platform, api };
+            assert_eq!(
+                target
+                    .best_artifact(&artifacts)
+                    .map(|tags| tags.to_string()),
+                best.map(String::from),
+                "{target}"
+            );
+        }
     }
 }

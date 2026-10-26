@@ -11,13 +11,12 @@ use magnet::{
     config::constants::{magnet_home, CACHE_DIR},
     git_client::client::GitClient,
     models::{
-        package::ArtifactTags,
         project::Project,
         project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
     },
     resolver::package_downloader::PackageDownloader,
     sclang::Sclang,
-    target::{binary_tags, MAGNET_ABI_ENV, MAGNET_PLATFORM_ENV},
+    target::{LazyTarget, MAGNET_ABI_ENV, MAGNET_PLATFORM_ENV},
 };
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
@@ -138,6 +137,9 @@ pub struct ProjectAddDependencyArgs {
     #[arg(long)]
     no_install: bool,
 
+    #[command(flatten)]
+    target: TargetArgs,
+
     dependency: String,
 }
 
@@ -163,12 +165,13 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
+        project.set_target(self.target.lazy());
         let (name, constraint) = parse_dependency(&self.dependency)?;
 
         let index = cli_context.git_client()?;
         project.add_dependency(&index, name, constraint)?;
         if !self.no_install {
-            install_locked(&project, &index).await?;
+            install_locked(&mut project, &index).await?;
         }
         Ok(())
     }
@@ -210,6 +213,9 @@ pub struct ProjectRemoveDependencyArgs {
     #[arg(long)]
     no_install: bool,
 
+    #[command(flatten)]
+    target: TargetArgs,
+
     dependency: String,
 }
 
@@ -220,6 +226,7 @@ impl MagnetSubCommand for ProjectRemoveDependencyArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
+        project.set_target(self.target.lazy());
         let index = cli_context.git_client()?;
         // removed packages are pruned right away, other versions only change if one vanished
         let changed = project.remove_dependency(&index, &self.dependency)?;
@@ -228,7 +235,7 @@ impl MagnetSubCommand for ProjectRemoveDependencyArgs {
                 true => warn!(
                     "The versions of other dependencies changed, run `magnet install` to update them"
                 ),
-                false => install_locked(&project, &index).await?,
+                false => install_locked(&mut project, &index).await?,
             }
         }
         Ok(())
@@ -250,6 +257,9 @@ pub struct ProjectUpdateArgs {
     #[arg(long)]
     no_install: bool,
 
+    #[command(flatten)]
+    target: TargetArgs,
+
     /// Packages to update, all if none are given
     names: Vec<String>,
 }
@@ -261,6 +271,7 @@ impl MagnetSubCommand for ProjectUpdateArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
+        project.set_target(self.target.lazy());
         let index = cli_context.git_client()?;
         let changes = project.update(&index, &self.names)?;
         if changes.is_empty() {
@@ -276,7 +287,7 @@ impl MagnetSubCommand for ProjectUpdateArgs {
         }
         match self.no_install {
             true => println!("Run `magnet install` to install the new versions"),
-            false => install_locked(&project, &index).await?,
+            false => install_locked(&mut project, &index).await?,
         }
         Ok(())
     }
@@ -292,6 +303,13 @@ pub struct ProjectInstallArgs {
         default_value = None,
     )]
     path: Option<PathBuf>,
+
+    /// Fail instead of writing magnet.lock, e.g. in CI
+    #[arg(long)]
+    locked: bool,
+
+    #[command(flatten)]
+    target: TargetArgs,
 }
 
 impl MagnetSubCommand for ProjectInstallArgs {
@@ -301,8 +319,11 @@ impl MagnetSubCommand for ProjectInstallArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
+        project.set_target(self.target.lazy());
         let index = cli_context.git_client()?;
-        project.install(&index, &downloader(&index)?).await
+        project
+            .install(&index, &downloader(&index)?, self.locked)
+            .await
     }
 }
 
@@ -314,9 +335,9 @@ fn downloader(index: &GitClient) -> anyhow::Result<PackageDownloader> {
 }
 
 /// Installs the lock file which `add`, `remove` or `update` just wrote
-async fn install_locked(project: &Project, index: &GitClient) -> anyhow::Result<()> {
+async fn install_locked(project: &mut Project, index: &GitClient) -> anyhow::Result<()> {
     project
-        .install_locked(index, &downloader(index)?)
+        .install_locked(index, &downloader(index)?, false)
         .await
         .context("magnet.toml and magnet.lock are updated, but installing failed. Run `magnet install` to try again")
 }
@@ -380,7 +401,7 @@ pub struct ProjectPackageArgs {
     target: TargetArgs,
 }
 
-/// Tags of the binary artifact for this machine, by default detected
+/// The machine whose lepton binaries get packaged or installed, by default detected
 #[derive(Debug, Args)]
 pub struct TargetArgs {
     /// Platform tag of the binaries, e.g. linux_x86_64, detected by default
@@ -393,8 +414,8 @@ pub struct TargetArgs {
 }
 
 impl TargetArgs {
-    fn binary_tags(&self) -> anyhow::Result<ArtifactTags> {
-        binary_tags(self.platform.as_deref(), self.abi.as_deref(), Sclang::find)
+    fn lazy(&self) -> LazyTarget {
+        LazyTarget::new(self.platform.clone(), self.abi.clone())
     }
 }
 
@@ -404,8 +425,9 @@ impl MagnetSubCommand for ProjectPackageArgs {
             Some(path) => path,
             None => env::current_dir()?,
         };
-        let project = Project::open(&project_path)?;
-        let archives = project.create_packages(|| self.target.binary_tags())?;
+        let mut project = Project::open(&project_path)?;
+        project.set_target(self.target.lazy());
+        let archives = project.create_packages()?;
         for archive in &archives {
             let path = archive
                 .path

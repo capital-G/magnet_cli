@@ -1,10 +1,11 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, str::FromStr};
 
-use anyhow::ensure;
+use anyhow::{ensure, Context};
 
 /// The tags of an artifact, which are part of its filename and its `dl` URL,
 /// see DESIGN.md "Packaging".
-/// The lists of valid lepton and gluon tags are not fixed yet (D3.2).
+/// Binary artifacts use a platform of the schema's list (`Platform`) and the plugin API as abi
+/// (`PluginApi`, `src/target.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactTags {
     pub abi: String,
@@ -52,6 +53,18 @@ impl fmt::Display for ArtifactTags {
     }
 }
 
+/// Parses the `{abi}-{platform}` keys of the lock file's checksums
+impl FromStr for ArtifactTags {
+    type Err = anyhow::Error;
+
+    fn from_str(key: &str) -> anyhow::Result<Self> {
+        let (abi, platform) = key
+            .split_once('-')
+            .with_context(|| format!("{key:?} is not of the form {{abi}}-{{platform}}"))?;
+        Self::new(abi, platform)
+    }
+}
+
 /// An archive written by `magnet package`
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageArchive {
@@ -71,6 +84,12 @@ mod tests {
         assert_eq!(ArtifactTags::source().to_string(), "source-any");
         assert!(ArtifactTags::source().is_source());
         assert!(ArtifactTags::new("api3_0", "macos_arm64").is_ok());
+        assert_eq!(
+            "api3_0-macos_arm64".parse::<ArtifactTags>().unwrap(),
+            ArtifactTags::new("api3_0", "macos_arm64").unwrap()
+        );
+        assert!("api3_0".parse::<ArtifactTags>().is_err());
+        assert!("api3_0-macos-arm64".parse::<ArtifactTags>().is_err());
         for (abi, platform) in [
             ("api-3", "any"),
             ("any", "macOS"),

@@ -35,6 +35,7 @@ use crate::{
         package_downloader::{Artifact, PackageDownloader},
     },
     sclang::{Sclang, MAGNET_SCLANG_ENV},
+    target::{LazyTarget, Target},
 };
 
 /// number of artifacts which get downloaded at the same time
@@ -50,6 +51,8 @@ pub struct Project {
     /// `None` if the project has no lock file yet
     lock_file: Option<LockFile>,
     path: PathBuf,
+    /// this machine, for the binaries of leptons
+    target: LazyTarget,
 }
 
 impl Project {
@@ -62,6 +65,7 @@ impl Project {
             project_manifest,
             lock_file: None,
             path: path.into(),
+            target: LazyTarget::default(),
         };
         project.generate_project_directories()?;
         write_gitignore(&project.path)?;
@@ -74,7 +78,13 @@ impl Project {
             project_manifest: ProjectManifest::open(path.join(MAGNET_PROJECT_FILE))?,
             lock_file: Self::open_lock_file(path)?,
             path: path.to_path_buf(),
+            target: LazyTarget::default(),
         })
+    }
+
+    /// The machine whose binaries get packaged and installed, detected by default
+    pub fn set_target(&mut self, target: LazyTarget) {
+        self.target = target;
     }
 
     fn open_lock_file(path: &Path) -> anyhow::Result<Option<LockFile>> {
@@ -389,6 +399,7 @@ impl Project {
             dependencies,
             preferred,
             sclang: self.sclang_requirement()?,
+            target: &self.target,
         })?
         .into_iter()
         .filter(|(name, _)| name != SCLANG_PACKAGE)
@@ -590,12 +601,18 @@ impl Project {
     /// Installs the locked dependencies into `magnet_packages/<kind>s/<name>`, and removes the
     /// packages which are not locked (anymore).
     /// The dependencies only get resolved if the lock file does not cover the manifest.
+    /// With `locked`, the lock file is never written, and anything which would change it fails.
     pub async fn install(
         &mut self,
         provider: &GitClient,
         downloader: &PackageDownloader,
+        locked: bool,
     ) -> anyhow::Result<()> {
         if !self.lock_covers_manifest()? {
+            ensure!(
+                !locked,
+                "{MAGNET_LOCK_FILE} is missing or doesn't match {MAGNET_PROJECT_FILE}, run `magnet install` without --locked to resolve the dependencies"
+            );
             info!("{MAGNET_LOCK_FILE} is missing or outdated, resolving the dependencies");
             let tree = self.resolve(provider, self.manifest_dependencies()?)?;
             self.write_lock(provider, &tree)?;
@@ -607,27 +624,44 @@ impl Project {
                 .collect();
             self.warn_about_sclang(provider, &locked)?;
         }
-        self.install_locked(provider, downloader).await
+        self.install_locked(provider, downloader, locked).await
     }
 
     /// Installs exactly what the lock file holds into `magnet_packages/` and removes what it doesn't,
     /// without resolving. `add`, `remove` and `update` call this after writing the lock.
+    /// The lock file only changes if it lacks the checksum of a binary for this machine, which
+    /// got published later (DESIGN.md "Missing binary"); with `locked`, this fails instead.
     pub async fn install_locked(
-        &self,
+        &mut self,
         provider: &GitClient,
         downloader: &PackageDownloader,
+        locked: bool,
     ) -> anyhow::Result<()> {
-        let lock_file = self
+        let mut lock_file = self
             .lock_file
-            .as_ref()
+            .clone()
             .context("A lock file should exist after resolving")?;
-        self.check_locked_versions(provider, lock_file)?;
+        self.check_locked_versions(provider, &lock_file)?;
 
-        let artifacts = lock_file
-            .dependencies
-            .iter()
-            .map(|(name, dependency)| locked_artifact(name, dependency))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut artifacts = vec![];
+        let mut missing = vec![];
+        for (name, dependency) in lock_file.dependencies.iter_mut() {
+            match self.select_artifact(provider, name, dependency)? {
+                Ok(artifact) => artifacts.push(artifact),
+                Err(message) => missing.push(message),
+            }
+        }
+        ensure!(missing.is_empty(), "{}", missing.join("\n"));
+        if Some(&lock_file) != self.lock_file.as_ref() {
+            ensure!(
+                !locked,
+                "{MAGNET_LOCK_FILE} lacks the checksums of binaries for {}, which were published later. Run `magnet install` without --locked to add them",
+                self.target.get()?
+            );
+            lock_file.write(&self.path.join(MAGNET_LOCK_FILE))?;
+            self.lock_file = Some(lock_file.clone());
+        }
+
         let archives = downloader
             .download_all(&artifacts, PARALLEL_DOWNLOADS)
             .await?;
@@ -635,10 +669,138 @@ impl Project {
             self.install_package(artifact, &archive)?;
         }
 
-        self.prune_packages(lock_file)?;
+        self.prune_packages(&lock_file)?;
         self.write_language_config()?;
         info!("Installed {} packages", artifacts.len());
         Ok(())
+    }
+
+    /// The artifact of a locked package which gets installed: the `any-any` artifact of a
+    /// quark, the binary of a lepton which this machine loads (DESIGN.md "Packaging"). If the
+    /// lock file has none, the binary may have been published later, so its checksum gets
+    /// taken from the index and added to `dependency`. Without any, the error message which
+    /// suggests a version with a binary (DESIGN.md "Missing binary").
+    fn select_artifact(
+        &self,
+        provider: &GitClient,
+        name: &str,
+        dependency: &mut LockDependency,
+    ) -> anyhow::Result<Result<Artifact, String>> {
+        ensure!(
+            dependency.source == LockSource::Index,
+            "{name} has the source {}, which can not be installed yet",
+            dependency.source
+        );
+        let version = dependency.version;
+        let tags = match dependency.kind {
+            MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
+            MagnetManifestV1PackageKind::Lepton => {
+                let target = self.target.get().with_context(|| {
+                    format!("{name} is a lepton, whose binary depends on the platform and abi of this machine")
+                })?;
+                let locked: Vec<ArtifactTags> = dependency
+                    .checksums
+                    .keys()
+                    .filter_map(|key| key.parse().ok())
+                    .collect();
+                match target.best_artifact(&locked) {
+                    Some(tags) => tags.clone(),
+                    None => match self.late_checksum(provider, name, dependency, target)? {
+                        Some(tags) => tags,
+                        None => {
+                            return Ok(Err(self.missing_binary(provider, name, version, target)?))
+                        }
+                    },
+                }
+            }
+            MagnetManifestV1PackageKind::Gluon => {
+                bail!("{name} is a gluon, which can not be installed yet")
+            }
+        };
+        let sha256 = dependency
+            .checksums
+            .get(&tags.to_string())
+            .with_context(|| {
+                format!("{name} {version} has no {tags} artifact in {MAGNET_LOCK_FILE}")
+            })?;
+        Ok(Ok(Artifact {
+            name: name.to_string(),
+            version,
+            kind: dependency.kind.clone(),
+            abi: tags.abi,
+            platform: tags.platform,
+            sha256: sha256.clone(),
+        }))
+    }
+
+    /// Adds the checksum of a binary for `target` from the index to `dependency`, if the
+    /// index has one for the locked version. The checksums of the lock file never change, so
+    /// one which differs from the index is an error.
+    fn late_checksum(
+        &self,
+        provider: &GitClient,
+        name: &str,
+        dependency: &mut LockDependency,
+        target: &Target,
+    ) -> anyhow::Result<Option<ArtifactTags>> {
+        let version = dependency.version;
+        let release = provider
+            .get_release(name, &version)?
+            .with_context(|| format!("{name} {version} is missing in the index"))?;
+        for artifact in &release.artifacts {
+            if let Some(locked) = dependency.checksums.get(&artifact.key()) {
+                ensure!(
+                    *locked == artifact.sha256,
+                    "The checksum of {name} {version} {} in {MAGNET_LOCK_FILE} differs from the index, which never replaces artifacts. Check where {MAGNET_LOCK_FILE} and the index come from",
+                    artifact.key()
+                );
+            }
+        }
+        let artifacts = release.artifact_tags();
+        let Some(tags) = target.best_artifact(&artifacts) else {
+            return Ok(None);
+        };
+        let sha256 = release
+            .checksum(tags)
+            .with_context(|| format!("{name} {version} has no {tags} artifact"))?;
+        info!("Add the checksum of {name} {version} {tags} to {MAGNET_LOCK_FILE}, which was published after locking");
+        dependency
+            .checksums
+            .insert(tags.to_string(), sha256.to_string());
+        Ok(Some(tags.clone()))
+    }
+
+    /// The error for a lepton version without a binary for `target`, which names the newest
+    /// version with one, without resolving again: `magnet update` if the manifest's
+    /// requirement allows it, otherwise `magnet add` with that exact version.
+    fn missing_binary(
+        &self,
+        provider: &GitClient,
+        name: &str,
+        version: SemanticVersion,
+        target: &Target,
+    ) -> anyhow::Result<String> {
+        let message = format!("{name} {version} has no binary for {target}");
+        let newest = provider
+            .get_releases(name)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|release| {
+                !release.yanked && target.best_artifact(&release.artifact_tags()).is_some()
+            })
+            .map(|release| release.version)
+            .max();
+        let Some(newest) = newest else {
+            return Ok(format!("{message}, and no other version has one either"));
+        };
+        let allowed = self.manifest_dependencies()?.iter().any(|dependency| {
+            MagnetManifestV1::normalize_name(&dependency.name) == name
+                && dependency.constraint.to_ranges().contains(&newest)
+        });
+        Ok(match allowed {
+            true => format!("{message}. The newest version with one is {newest}, run `magnet update {name}` to move to it"),
+            false => format!("{message}. The newest version with one is {newest}, run `magnet add {name}@={newest}` to use it"),
+        })
     }
 
     /// `magnet_packages/<kind>s/<name>`
@@ -710,15 +872,14 @@ impl Project {
 
     /// Packages every archive of the project's version which can be built on this machine
     /// into `dist/`: the `any-any` artifact of a quark, the source package and the binary
-    /// artifact of a lepton (with the tags of `binary_tags`), only the source package of a
+    /// artifact of a lepton (for the target of this machine), only the source package of a
     /// gluon (reserved).
-    pub fn create_packages(
-        &self,
-        binary_tags: impl FnOnce() -> anyhow::Result<ArtifactTags>,
-    ) -> anyhow::Result<Vec<PackageArchive>> {
+    pub fn create_packages(&self) -> anyhow::Result<Vec<PackageArchive>> {
         let tags = match self.kind() {
             MagnetManifestV1PackageKind::Quark => vec![ArtifactTags::any()],
-            MagnetManifestV1PackageKind::Lepton => vec![ArtifactTags::source(), binary_tags()?],
+            MagnetManifestV1PackageKind::Lepton => {
+                vec![ArtifactTags::source(), self.target.get()?.tags()]
+            }
             MagnetManifestV1PackageKind::Gluon => vec![ArtifactTags::source()],
         };
         tags.iter().map(|tags| self.create_package(tags)).collect()
@@ -815,40 +976,6 @@ fn shell_command(command: &str, args: &[String]) -> Command {
             .args(args);
         shell
     }
-}
-
-/// The artifact of a locked package which gets installed
-fn locked_artifact(name: &str, dependency: &LockDependency) -> anyhow::Result<Artifact> {
-    if dependency.source != LockSource::Index {
-        bail!(
-            "{name} has the source {}, which can not be installed yet",
-            dependency.source
-        );
-    }
-    if dependency.kind != MagnetManifestV1PackageKind::Quark {
-        bail!(
-            "{name} is a {}, which can not be installed yet",
-            dependency.kind
-        );
-    }
-    let (abi, platform) = ("any", "any");
-    let sha256 = dependency
-        .checksums
-        .get(&format!("{abi}-{platform}"))
-        .with_context(|| {
-            format!(
-                "{name} {} has no {abi}-{platform} artifact in {MAGNET_LOCK_FILE}",
-                dependency.version
-            )
-        })?;
-    Ok(Artifact {
-        name: name.to_string(),
-        version: dependency.version,
-        kind: dependency.kind.clone(),
-        abi: abi.to_string(),
-        platform: platform.to_string(),
-        sha256: sha256.clone(),
-    })
 }
 
 /// `true` if the dependency is a plain version requirement against the index
@@ -1122,7 +1249,7 @@ beta = "^1"
         let cache = tempfile::tempdir().unwrap();
         let mut project = Project::open(dir.path()).unwrap();
         project
-            .install(&fixture_index(), &fixture_downloader(&cache))
+            .install(&fixture_index(), &fixture_downloader(&cache), false)
             .await?;
         Ok(project)
     }
@@ -1260,11 +1387,197 @@ beta = "^1"
         assert!(packages.join("quarks/beta").exists());
     }
 
+    const ZETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\n";
+
+    /// installs for the given target, see the `zeta` lepton of the fixture index
+    async fn install_for(
+        dir: &tempfile::TempDir,
+        target: LazyTarget,
+        locked: bool,
+    ) -> anyhow::Result<Project> {
+        let cache = tempfile::tempdir().unwrap();
+        let mut project = Project::open(dir.path()).unwrap();
+        project.set_target(target);
+        project
+            .install(&fixture_index(), &fixture_downloader(&cache), locked)
+            .await?;
+        Ok(project)
+    }
+
+    fn installed_plugin(dir: &tempfile::TempDir) -> String {
+        fs::read_to_string(
+            dir.path()
+                .join("magnet_packages/leptons/zeta/plugins/Zeta.scx"),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn test_install_refuses_lepton() {
-        let (dir, _) = project(&format!("{MANIFEST}gamma = \"*\"\n"));
-        let err = install(&dir).await.err().unwrap();
-        assert!(err.to_string().contains("lepton"), "{err:#}");
+    async fn test_install_lepton_binary() {
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        for (platform, abi, installed) in [
+            ("macos_arm64", "api3_0", "zeta 1.0.0 api3_0 macos_arm64\n"),
+            // the highest minor the server loads
+            ("linux_x86_64", "api4_3", "zeta 1.0.0 api4_2 linux_x86_64\n"),
+            ("linux_x86_64", "api4_1", "zeta 1.0.0 api4_0 linux_x86_64\n"),
+        ] {
+            install_for(&dir, target(platform, abi), false)
+                .await
+                .unwrap();
+            assert_eq!(installed_plugin(&dir), installed, "{platform} {abi}");
+            assert!(dir
+                .path()
+                .join("magnet_packages/leptons/zeta/classes/Zeta.sc")
+                .is_file());
+        }
+    }
+
+    #[test]
+    fn test_add_prefers_versions_with_binary() {
+        // 1.1.0 only has a linux binary, 1.2.0 is yanked
+        for (platform, version) in [("macos_arm64", "1.0.0"), ("linux_x86_64", "1.1.0")] {
+            let (dir, mut project) = project(ZETA);
+            project.set_target(target(platform, "api3_0"));
+            project
+                .add_dependency(&fixture_index(), "zeta".into(), None)
+                .unwrap();
+            assert_eq!(
+                locked_versions(&project),
+                [("zeta".to_string(), version.to_string())]
+            );
+            assert!(read_manifest(&dir).contains(&format!("zeta = \"^{version}\"")));
+        }
+
+        // without a known target, the newest version gets chosen
+        let (_dir, mut project) = project(ZETA);
+        project.set_target(LazyTarget::with_sclang(None, None, no_sclang));
+        project
+            .add_dependency(&fixture_index(), "zeta".into(), None)
+            .unwrap();
+        assert_eq!(
+            locked_versions(&project),
+            [("zeta".to_string(), "1.1.0".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_binary_suggests_version() {
+        let macos = || target("macos_arm64", "api3_0");
+        // the manifest allows 1.0.0, which has a binary
+        let (dir, _) = project(&format!("{ZETA}zeta = \"^1\"\n"));
+        write_lock_file(&dir, &[("zeta", "1.1.0")]);
+        let err = install_for(&dir, macos(), false).await.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "zeta 1.1.0 has no binary for macos_arm64 (api3_0). The newest version with one is 1.0.0, run `magnet update zeta` to move to it"
+        );
+        let mut updated = Project::open(dir.path()).unwrap();
+        updated.set_target(macos());
+        updated.update(&fixture_index(), &["zeta".into()]).unwrap();
+        assert_eq!(
+            locked_versions(&updated),
+            [("zeta".to_string(), "1.0.0".to_string())]
+        );
+
+        // the manifest doesn't allow it
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.1.0\"\n"));
+        let err = install_for(&dir, macos(), false).await.err().unwrap();
+        assert!(
+            err.to_string().ends_with(
+                "The newest version with one is 1.0.0, run `magnet add zeta@=1.0.0` to use it"
+            ),
+            "{err}"
+        );
+
+        // no version has a binary
+        let err = install_for(&dir, target("linux_x86_64", "api5_0"), false)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.to_string(),
+            "zeta 1.1.0 has no binary for linux_x86_64 (api5_0), and no other version has one either"
+        );
+        assert!(!dir.path().join("magnet_packages/leptons/zeta").exists());
+    }
+
+    /// a lock file of zeta 1.0.0 which was written before its macOS binary got published
+    fn lock_without_macos(dir: &tempfile::TempDir) {
+        write_lock_file(dir, &[("zeta", "1.0.0")]);
+        let path = dir.path().join(MAGNET_LOCK_FILE);
+        let lock = fs::read_to_string(&path).unwrap();
+        let key = "api3_0-macos_arm64 = \"";
+        let start = lock.find(key).unwrap();
+        let end = start + lock[start..].find(", ").unwrap() + 2;
+        fs::write(&path, format!("{}{}", &lock[..start], &lock[end..])).unwrap();
+        assert!(!read_lock(dir).contains("macos"));
+    }
+
+    #[tokio::test]
+    async fn test_install_adds_late_checksum() {
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        lock_without_macos(&dir);
+        let before = read_lock(&dir);
+
+        // --locked never writes the lock file
+        let err = install_for(&dir, target("macos_arm64", "api3_0"), true)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("--locked"), "{err}");
+        assert_eq!(read_lock(&dir), before);
+
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .unwrap();
+        assert_eq!(installed_plugin(&dir), "zeta 1.0.0 api3_0 macos_arm64\n");
+        // only the missing checksum got added
+        let (full, _) = project(ZETA);
+        write_lock_file(&full, &[("zeta", "1.0.0")]);
+        assert_eq!(read_lock(&dir), read_lock(&full));
+    }
+
+    #[tokio::test]
+    async fn test_install_refuses_changed_checksum() {
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        lock_without_macos(&dir);
+        let path = dir.path().join(MAGNET_LOCK_FILE);
+        let lock = fs::read_to_string(&path).unwrap();
+        let key = "api4_0-linux_x86_64 = \"";
+        let start = lock.find(key).unwrap() + key.len();
+        fs::write(
+            &path,
+            format!("{}0000{}", &lock[..start], &lock[start + 4..]),
+        )
+        .unwrap();
+        let err = install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("differs from the index"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_install_lepton_needs_target() {
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        let err = install_for(&dir, LazyTarget::with_sclang(None, None, no_sclang), false)
+            .await
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("--abi"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn test_install_locked_needs_lock() {
+        // the lock file is empty
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        let before = read_lock(&dir);
+        let err = install_for(&dir, target("macos_arm64", "api3_0"), true)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("--locked"), "{err}");
+        assert_eq!(read_lock(&dir), before);
     }
 
     /// a manifest without dependencies, with the given entrypoints
@@ -1272,6 +1585,11 @@ beta = "^1"
         format!(
             "magnet-version = 1\n\n[package]\nname = \"runner\"\nversion = \"0.1.0\"\nkind = \"quark\"\n\n{entrypoints}"
         )
+    }
+
+    /// a target with fixed tags, so tests don't depend on the machine
+    fn target(platform: &str, abi: &str) -> LazyTarget {
+        LazyTarget::with_sclang(Some(platform.into()), Some(abi.into()), no_sclang)
     }
 
     fn no_sclang() -> anyhow::Result<Option<Sclang>> {
@@ -1529,7 +1847,7 @@ beta = "^1"
                 kind.clone(),
             )
             .unwrap();
-            let project = Project::create(dir.path(), manifest).unwrap();
+            let mut project = Project::create(dir.path(), manifest).unwrap();
             let library = format!("build/libdep.{libraries}");
             write_files(
                 &dir,
@@ -1542,8 +1860,8 @@ beta = "^1"
                     &library,
                 ],
             );
-            let tags = ArtifactTags::new("api3_0", &platform.to_string()).unwrap();
-            let archives = project.create_packages(|| Ok(tags.clone())).unwrap();
+            project.set_target(target(&platform.to_string(), "api3_0"));
+            let archives = project.create_packages().unwrap();
             let files: Vec<_> = archives
                 .iter()
                 .map(|archive| archive.files.clone())
@@ -1597,7 +1915,7 @@ beta = "^1"
 
     #[test]
     fn test_create_quark_package() {
-        let (dir, project) = project(
+        let (dir, mut project) = project(
             "magnet-version = 1\n[package]\nname = \"My_Quark\"\nversion = \"0.2.0\"\nkind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"HelpSource/**/*\"]\n",
         );
         write_files(
@@ -1635,9 +1953,9 @@ beta = "^1"
         assert!(project.create_package(&ArtifactTags::source()).is_err());
 
         // the reported files are the contents of the archive
-        let archives = project
-            .create_packages(|| panic!("a quark has no binaries"))
-            .unwrap();
+        // a quark doesn't need the target, which is unknown without sclang
+        project.set_target(LazyTarget::with_sclang(None, None, no_sclang));
+        let archives = project.create_packages().unwrap();
         assert_eq!(archives.len(), 1);
         assert_eq!(archives[0].tags, ArtifactTags::any());
         assert_eq!(archives[0].files, archive_paths(&package));
@@ -1647,7 +1965,7 @@ beta = "^1"
 
     #[test]
     fn test_create_lepton_packages() {
-        let (dir, project) = project(LEPTON_MANIFEST);
+        let (dir, mut project) = project(LEPTON_MANIFEST);
         write_files(
             &dir,
             &[
@@ -1671,7 +1989,8 @@ beta = "^1"
             .unwrap()
             .path;
         assert!(source.ends_with("foo-1.0.0-lepton-source-any.tar.gz"));
-        let archives = project.create_packages(|| Ok(tags.clone())).unwrap();
+        project.set_target(target("macos_arm64", "api3_0"));
+        let archives = project.create_packages().unwrap();
         let paths: Vec<_> = archives.iter().map(|archive| &archive.path).collect();
         assert_eq!(paths, [&source, &package]);
         assert_eq!(
@@ -1816,7 +2135,7 @@ beta = "^1"
             .unwrap();
         let cache = tempfile::tempdir().unwrap();
         project
-            .install_locked(&index, &fixture_downloader(&cache))
+            .install_locked(&index, &fixture_downloader(&cache), false)
             .await
             .unwrap();
         assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);

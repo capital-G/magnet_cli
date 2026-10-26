@@ -5,10 +5,14 @@ use pubgrub::{
 };
 use semver::VersionReq;
 use std::{collections::HashMap, fmt::Display, ops::Bound};
-use tracing::error;
+use tracing::{debug, error};
 
-use crate::git_client::{client::GitClient, models::GitDependency};
-use crate::models::project_manifest::MagnetManifestV1;
+use crate::git_client::{
+    client::GitClient,
+    models::{GitDependency, GitRelease},
+};
+use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
+use crate::target::LazyTarget;
 
 pub trait ToRanges {
     fn to_ranges(&self) -> Ranges<SemanticVersion>;
@@ -202,6 +206,8 @@ pub struct RootProvider<'a> {
     /// the `sclang` range of the project. Without one, the `sclang` ranges of the
     /// dependencies are ignored (DESIGN.md "SuperCollider version").
     pub sclang: Option<VersionReq>,
+    /// this machine, whose binaries are preferred when choosing a version of a lepton
+    pub target: &'a LazyTarget,
 }
 
 impl DependencyProvider for RootProvider<'_> {
@@ -246,6 +252,9 @@ impl DependencyProvider for RootProvider<'_> {
                 return Ok(Some(*version));
             }
         }
+        if let Some(version) = self.newest_with_binary(package, range)? {
+            return Ok(Some(version));
+        }
         self.git_provider.choose_version(package, range)
     }
 
@@ -279,6 +288,43 @@ impl DependencyProvider for RootProvider<'_> {
             }
             (dependencies, _) => Ok(dependencies),
         }
+    }
+}
+
+impl RootProvider<'_> {
+    /// For a lepton, the newest version within `range` with a binary this machine loads, so
+    /// a version without one only gets chosen if no other fits (DESIGN.md "Missing binary").
+    /// This is a preference, not a constraint, so the lock file still holds on every machine.
+    /// Without a known target (e.g. no sclang), versions are chosen as for quarks.
+    fn newest_with_binary(
+        &self,
+        package: &str,
+        range: &Ranges<SemanticVersion>,
+    ) -> Result<Option<SemanticVersion>, IndexError> {
+        let releases = self.git_provider.get_releases(package)?.unwrap_or_default();
+        let mut candidates: Vec<&GitRelease> = releases
+            .iter()
+            .filter(|release| !release.yanked && range.contains(&release.version))
+            .collect();
+        if !candidates
+            .iter()
+            .any(|release| release.kind == MagnetManifestV1PackageKind::Lepton)
+        {
+            return Ok(None);
+        }
+        let target = match self.target.get() {
+            Ok(target) => target,
+            Err(err) => {
+                debug!("Choosing {package} without preferring binaries: {err:#}");
+                return Ok(None);
+            }
+        };
+        candidates.sort_by_key(|release| release.version);
+        Ok(candidates
+            .into_iter()
+            .rev()
+            .find(|release| target.best_artifact(&release.artifact_tags()).is_some())
+            .map(|release| release.version))
     }
 }
 
@@ -331,6 +377,17 @@ mod tests {
         preferred: &[(&str, &str)],
         sclang: Option<&str>,
     ) -> anyhow::Result<Vec<(String, String)>> {
+        // no known plugin API, so versions are chosen without preferring binaries
+        let target = LazyTarget::with_sclang(Some("linux_x86_64".into()), None, || Ok(None));
+        resolve_fixture_for(dependencies, preferred, sclang, &target)
+    }
+
+    fn resolve_fixture_for(
+        dependencies: &[(&str, &str)],
+        preferred: &[(&str, &str)],
+        sclang: Option<&str>,
+        target: &LazyTarget,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let index = GitClient::open_local(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
         )?;
@@ -348,6 +405,7 @@ mod tests {
                 .map(|(name, version)| (name.to_string(), version.parse().unwrap()))
                 .collect(),
             sclang: sclang.map(|sclang| sclang.parse().unwrap()),
+            target,
         };
         let mut selected: Vec<(String, String)> = resolve_dependencies(&provider)?
             .into_iter()
@@ -363,6 +421,34 @@ mod tests {
             .iter()
             .map(|(name, version)| (name.to_string(), version.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn test_resolve_prefers_versions_with_binary() {
+        // zeta 1.1.0 only has a linux binary, 1.2.0 is yanked
+        let macos =
+            LazyTarget::with_sclang(Some("macos_arm64".into()), Some("api3_0".into()), || {
+                Ok(None)
+            });
+        let zeta = |version: &str| vec![("zeta".to_string(), version.to_string())];
+        assert_eq!(
+            resolve_fixture_for(&[("zeta", "*")], &[], None, &macos).unwrap(),
+            zeta("1.0.0")
+        );
+        // a locked version is kept, the install then names the version with a binary
+        assert_eq!(
+            resolve_fixture_for(&[("zeta", "*")], &[("zeta", "1.1.0")], None, &macos).unwrap(),
+            zeta("1.1.0")
+        );
+        // without a version with a binary, the newest one is chosen
+        let api5 =
+            LazyTarget::with_sclang(Some("macos_arm64".into()), Some("api5_0".into()), || {
+                Ok(None)
+            });
+        assert_eq!(
+            resolve_fixture_for(&[("zeta", "*")], &[], None, &api5).unwrap(),
+            zeta("1.1.0")
+        );
     }
 
     #[test]

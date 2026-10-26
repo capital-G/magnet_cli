@@ -6,8 +6,11 @@ use semver::VersionReq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
-use crate::models::project_manifest::{
-    MagnetManifestV1DependenciesValue, MagnetManifestV1PackageKind, NamedDependency,
+use crate::models::{
+    package::ArtifactTags,
+    project_manifest::{
+        MagnetManifestV1DependenciesValue, MagnetManifestV1PackageKind, NamedDependency,
+    },
 };
 // This contains the structure of the json files stored in git
 
@@ -43,6 +46,24 @@ impl GitArtifact {
     /// identifies the artifact within a release, e.g. `any-any` or `source-any`
     pub fn key(&self) -> String {
         format!("{}-{}", self.abi, self.platform)
+    }
+}
+
+impl GitRelease {
+    /// The tags of the release's artifacts, without those which aren't valid tags
+    pub fn artifact_tags(&self) -> Vec<ArtifactTags> {
+        self.artifacts
+            .iter()
+            .filter_map(|artifact| ArtifactTags::new(&artifact.abi, &artifact.platform).ok())
+            .collect()
+    }
+
+    /// The sha256 of the artifact with these tags
+    pub fn checksum(&self, tags: &ArtifactTags) -> Option<&str> {
+        self.artifacts
+            .iter()
+            .find(|artifact| artifact.key() == tags.to_string())
+            .map(|artifact| artifact.sha256.as_str())
     }
 }
 
