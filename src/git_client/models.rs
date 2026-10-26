@@ -79,6 +79,14 @@ pub enum GitIndexDependency {
             skip_serializing_if = "std::ops::Not::not"
         )]
         legacy_quark: bool,
+        /// the manifest's `ignore-quark-deps`: the `.quark` file of the legacy quark is not
+        /// read, its dependencies are dependencies of the publishing package instead
+        #[serde(
+            rename = "ignore-quark-deps",
+            default,
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        ignore_quark_deps: bool,
         git: GitIndexDependencySource,
     },
 }
@@ -153,12 +161,18 @@ impl GitRelease {
             .collect()
     }
 
-    /// The git dependencies by their name as given
-    pub fn git_dependencies(&self) -> impl Iterator<Item = (&String, &GitIndexDependencySource)> {
+    /// The git dependencies by their name as given, with their `ignore-quark-deps`
+    pub fn git_dependencies(
+        &self,
+    ) -> impl Iterator<Item = (&String, &GitIndexDependencySource, bool)> {
         self.dependencies
             .iter()
             .filter_map(|(name, dependency)| match dependency {
-                GitIndexDependency::Git { git, .. } => Some((name, git)),
+                GitIndexDependency::Git {
+                    git,
+                    ignore_quark_deps,
+                    ..
+                } => Some((name, git, *ignore_quark_deps)),
                 GitIndexDependency::Version(_) => None,
             })
     }

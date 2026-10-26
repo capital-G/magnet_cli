@@ -1331,11 +1331,12 @@ fn index_git_dependencies(
         let Some(release) = provider.get_release(name, version)? else {
             continue;
         };
-        for (dependency, git) in release.git_dependencies() {
+        for (dependency, git, ignore_quark_deps) in release.git_dependencies() {
             dependencies.push(IndexGitDependency {
                 name: dependency.clone(),
                 url: git.url.clone(),
                 sha: git.ref_.clone(),
+                ignore_quark_deps,
                 required_by: format!("{name} {version}"),
             });
         }
@@ -3081,6 +3082,34 @@ beta = "^1"
                 file_url(&bar)
             )),
             "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_index_package_ignoring_quark_deps() {
+        use crate::git_client::source::tests::commit_files;
+        let root = tempfile::tempdir().unwrap();
+        let bar = root.path().join("bar");
+        let sha = commit_files(
+            &bar,
+            &[
+                ("Bar.sc", "Bar {}"),
+                ("Bar.quark", "(dependencies: [\"Beta\"])"),
+            ],
+        );
+        let (index, downloader) = index_with_eta(
+            root.path(),
+            &format!(
+                "\"Bar\": {{\"legacy-quark\": true, \"ignore-quark-deps\": true, \"git\": {{\"url\": \"{}\", \"ref\": \"{sha}\"}}}}",
+                file_url(&bar)
+            ),
+        );
+        let mut project = sources_project(root.path(), "eta = \"^0.1\"\n");
+        project.install(&index, &downloader, false).await.unwrap();
+        // beta of bar's .quark file isn't installed
+        assert_eq!(
+            installed_packages_in(&root.path().join("project")),
+            ["bar", "eta"]
         );
     }
 }

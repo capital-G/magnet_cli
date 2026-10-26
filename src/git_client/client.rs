@@ -388,6 +388,7 @@ mod tests {
             release.dependencies.get("ddwCommon"),
             Some(GitIndexDependency::Git {
                 legacy_quark: true,
+                ignore_quark_deps: false,
                 ..
             })
         ));

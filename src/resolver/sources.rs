@@ -92,6 +92,8 @@ pub struct IndexGitDependency {
     pub name: String,
     pub url: Url,
     pub sha: String,
+    /// `ignore-quark-deps` of the release's manifest
+    pub ignore_quark_deps: bool,
     /// the release which requires it, e.g. `delta 0.2.0`
     pub required_by: String,
 }
@@ -160,6 +162,17 @@ pub fn collect_sources(
             Pending::from_manifest(name, &dependency, Origin::Project, PROJECT.to_string())
         })
         .collect::<anyhow::Result<_>>()?;
+    // the .quark file of a commit is only ignored if every index release requiring it says
+    // so; a direct dependency of the project is collected first, so its flag wins anyway
+    let mut ignored: HashMap<(String, &Url, &str), bool> = HashMap::new();
+    for dependency in from_index_releases {
+        let key = (
+            MagnetManifestV1::normalize_name(&dependency.name),
+            &dependency.url,
+            dependency.sha.as_str(),
+        );
+        *ignored.entry(key).or_insert(true) &= dependency.ignore_quark_deps;
+    }
     pending.extend(from_index_releases.iter().map(|dependency| Pending {
         spelled: dependency.name.clone(),
         spec: Spec::Git(
@@ -169,7 +182,11 @@ pub fn collect_sources(
         origin: Origin::Project,
         required_by: dependency.required_by.clone(),
         from_quark: false,
-        ignore_quark_deps: false,
+        ignore_quark_deps: ignored[&(
+            MagnetManifestV1::normalize_name(&dependency.name),
+            &dependency.url,
+            dependency.sha.as_str(),
+        )],
     }));
     let mut packages: BTreeMap<String, SourcePackage> = BTreeMap::new();
     // the packages required from the index, with who requires them
@@ -531,10 +548,19 @@ mod tests {
             toml: &str,
             locked: &dyn Fn(&str) -> Option<LockSource>,
         ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
+            self.collect_all(toml, &[], locked)
+        }
+
+        fn collect_all(
+            &self,
+            toml: &str,
+            from_index_releases: &[IndexGitDependency],
+            locked: &dyn Fn(&str) -> Option<LockSource>,
+        ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
             collect_sources(
                 &self.path("project"),
                 &dependencies(toml),
-                &[],
+                from_index_releases,
                 &self.cache,
                 &self.directory(),
                 // the fixture index has alpha, and other names which these tests don't use
@@ -916,5 +942,37 @@ mod tests {
         );
         assert_eq!(find_quark_file("x", &files(&["a.quark", "b.quark"])), None);
         assert_eq!(find_quark_file("x", &files(&["x.sc"])), None);
+    }
+
+    #[test]
+    fn test_ignore_quark_deps_of_index_releases() {
+        let fixture = Fixture::new();
+        let bar_path = fixture.path("bar");
+        let sha = commit_files(&bar_path, &[("Bar.quark", "(dependencies: [\"alpha\"])")]);
+        let url = Url::from_directory_path(&bar_path).unwrap();
+        let required = |required_by: &str, ignore_quark_deps: bool| IndexGitDependency {
+            name: "Bar".to_string(),
+            url: url.clone(),
+            sha: sha.clone(),
+            ignore_quark_deps,
+            required_by: required_by.to_string(),
+        };
+        let bar_dependencies = |from_index: &[IndexGitDependency], toml: &str| {
+            dependency_names(&fixture.collect_all(toml, from_index, &|_| None).unwrap()["bar"])
+        };
+        // only if every release says so
+        assert_eq!(
+            bar_dependencies(&[required("a 1.0.0", true), required("b 1.0.0", false)], ""),
+            ["alpha"]
+        );
+        assert!(
+            bar_dependencies(&[required("a 1.0.0", true), required("b 1.0.0", true)], "")
+                .is_empty()
+        );
+        // a direct dependency of the project decides
+        let direct = format!(
+            "bar = {{ legacy-quark = true, ignore-quark-deps = true, git = {{ url = \"{url}\", ref = \"{sha}\" }} }}\n"
+        );
+        assert!(bar_dependencies(&[required("a 1.0.0", false)], &direct).is_empty());
     }
 }

@@ -293,7 +293,7 @@ impl DependencyProvider for RootProvider<'_> {
             let git: HashMap<String, &GitIndexDependencySource> = release
                 .iter()
                 .flat_map(|release| release.git_dependencies())
-                .map(|(name, git)| (MagnetManifestV1::normalize_name(name), git))
+                .map(|(name, git, _)| (MagnetManifestV1::normalize_name(name), git))
                 .collect();
             let mut names: Vec<String> = dependencies.keys().cloned().collect();
             names.sort();
