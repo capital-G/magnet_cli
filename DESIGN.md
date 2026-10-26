@@ -37,7 +37,13 @@ This is also the reason why magnet index is relying on a [flat namespace](https:
 Only authors and maintainers of those existing packages can take the name in the new magnet index, though this can be also decided on a case-by-case basis if the project is abandoned.
 
 Since the versioning of Quarks is not really existing, Quarks will be pinned by their commit hash in order to provide reproducible environments.
-Transitive dependencies of quarks will also be added as restrictions to the magnet dependency graph and will be resolved to magnet dependencies if they exist and otherwise will fall back to the most recent version available via `directory.txt`.
+A legacy dependency uses the `tag`, `ref` or `branch` of the manifest, otherwise the refspec of its entry in `directory.txt`, otherwise the default branch, and the resulting commit is stored in the lock file until `magnet update` moves it.
+
+Transitive dependencies of quarks will also be added as restrictions to the magnet dependency graph.
+Since the legacy Quark system ignores their versions, a dependency of a `.quark` file becomes `*` if a magnet package with this name exists (also if it names a version or a refspec), and otherwise falls back to the legacy quark from `directory.txt`.
+If a `.quark` file is not a plain literal (e.g. it contains code), magnet warns and treats it as having no dependencies.
+In this case the dependencies can be listed by hand in the manifest together with `ignore-quark-deps = true`.
+A package which is required from two different sources (e.g. as a legacy quark and as a magnet package) is an error, which can be resolved via `[overrides]`.
 
 In order to provide a smooth transition, published magnet packages can depend on those legacy quarks, though only via a pinned commit hash or tag, not via a branch.
 
@@ -174,6 +180,8 @@ kind = "sclang"
 jitlib-extensions = "0.5.*"
 # allows to rely on old quarks
 ddwCommon = { legacy-quark = true }
+# the dependencies of its .quark file are not used, so they need to be listed here
+someQuark = { legacy-quark = true, ignore-quark-deps = true }
 # we can also reference packages which are not part of the index via git
 outsidOfIndex = { git = { url = "http://my.git", branch = "main" } }
 # we can also refer to other local magnet projects
@@ -270,7 +278,7 @@ source = "index"
 checksums = { any-any = "abc" }
 
 [dependencies.bar]
-version = "0.2.0"
+version = "0.0.0"
 kind = "quark"
 source = "git+https://git.com/favUser/someLegacyQuark.git#4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
@@ -287,6 +295,9 @@ checksums = { api3_0-linux_x86_64 = "abc", api3_0-macos_arm64 = "def", source-an
 ```
 
 The kind is stored in the lock file such that magnet knows the folder of each dependency within `magnet_packages` without having to consult the index.
+
+Git dependencies and legacy quarks store their commit SHA in `source`.
+Legacy quarks have no semantic version, so their version is `0.0.0`.
 
 `index-http` is copied from the `http` field of the index's `config.json` (if present), such that clients without git (e.g. a browser) can install from the lock file (see `magnet-index`).
 
