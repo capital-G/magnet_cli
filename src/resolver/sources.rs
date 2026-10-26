@@ -14,6 +14,7 @@ use crate::git_client::{
     models::GitDependency,
     source::{GitCache, GitReference},
 };
+use crate::legacy::directory::QuarksDirectory;
 use crate::models::{
     lock_file::LockSource,
     project_manifest::{
@@ -55,6 +56,8 @@ enum Spec {
     Index,
     Git(Url, GitReference),
     Path(PathBuf),
+    /// a legacy quark without URL, which is looked up in the quarks directory
+    Legacy,
 }
 
 fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::Result<Spec> {
@@ -74,9 +77,7 @@ fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::R
             Ok(Spec::Git(url, reference))
         }
         (None, Some(path)) => Ok(Spec::Path(PathBuf::from(path))),
-        (None, None) if legacy_quark.unwrap_or(false) => bail!(
-            "{name} is a legacy quark without a git URL, which can't be looked up in directory.txt yet. Add its repository, e.g. {name} = {{ legacy-quark = true, git = {{ url = \"https://github.com/supercollider-quarks/{name}\" }} }}"
-        ),
+        (None, None) if legacy_quark.unwrap_or(false) => Ok(Spec::Legacy),
         (None, None) => Ok(Spec::Index),
     }
 }
@@ -84,13 +85,15 @@ fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::R
 /// Collects the git and path dependencies of `dependencies` (a manifest's) and, recursively,
 /// those of their `magnet.toml`s. `locked` returns the locked source of a package if its
 /// commit should be kept, so a git dependency whose URL and reference didn't change isn't
-/// fetched again.
+/// fetched again. A legacy quark without URL is looked up in `directory` (its repository and
+/// refspec), unless it's locked.
 /// A package which is required from two sources, or from the index as well, is an error
 /// (DESIGN.md "Backwards compatibility / Legacy Quarks").
 pub fn collect_sources(
     root: &Path,
     dependencies: &HashMap<String, MagnetManifestV1DependenciesValue>,
     cache: &GitCache,
+    directory: &QuarksDirectory,
     locked: impl Fn(&str) -> Option<LockSource>,
 ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
     let mut pending: VecDeque<(String, MagnetManifestV1DependenciesValue, Origin, String)> =
@@ -143,6 +146,28 @@ pub fn collect_sources(
                 );
                 (LockSource::Path(path), Some(folder))
             }
+            Spec::Legacy => match locked(&name) {
+                Some(source @ LockSource::Git { .. }) => (source, None),
+                _ => {
+                    let entry = directory.lookup(&spelled)?.with_context(|| {
+                        format!(
+                            "{spelled} is not in the quarks directory {}. Add its repository, e.g. {spelled} = {{ legacy-quark = true, git = {{ url = \"https://github.com/<user>/{spelled}\" }} }}",
+                            directory.url()
+                        )
+                    })?;
+                    let sha = cache
+                        .resolve(&entry.url, &entry.reference)
+                        .with_context(|| format!("Could not check out {spelled}"))?;
+                    (
+                        LockSource::Git {
+                            url: entry.url,
+                            reference: entry.reference,
+                            sha,
+                        },
+                        None,
+                    )
+                }
+            },
         };
 
         if let Some(existing) = packages.get(&name) {
@@ -301,12 +326,29 @@ mod tests {
             self.dir.path().join(name)
         }
 
+        /// the quarks directory, a repository at `quarks` (created by the tests which use it)
+        fn directory(&self) -> QuarksDirectory<'_> {
+            QuarksDirectory::new(
+                Url::from_directory_path(self.path("quarks")).unwrap(),
+                &self.cache,
+            )
+        }
+
         fn collect(&self, toml: &str) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
+            self.collect_locked(toml, &|_| None)
+        }
+
+        fn collect_locked(
+            &self,
+            toml: &str,
+            locked: &dyn Fn(&str) -> Option<LockSource>,
+        ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
             collect_sources(
                 &self.path("project"),
                 &dependencies(toml),
                 &self.cache,
-                |_| None,
+                &self.directory(),
+                locked,
             )
         }
     }
@@ -373,13 +415,7 @@ mod tests {
             move |_: &str| Some(source.clone())
         };
         let collect = |locked: &dyn Fn(&str) -> Option<LockSource>| {
-            collect_sources(
-                &fixture.path("project"),
-                &dependencies(&toml),
-                &fixture.cache,
-                locked,
-            )
-            .unwrap()
+            fixture.collect_locked(&toml, locked).unwrap()
         };
         let kept = collect(&locked(&first, GitReference::DefaultBranch));
         assert!(kept["foo"].source.to_string().ends_with(&first));
@@ -500,11 +536,56 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_quark_without_git() {
+    fn test_legacy_quark_from_directory() {
         let fixture = Fixture::new();
+        let ddw = fixture.path("ddwCommon");
+        let first = commit_files(&ddw, &[("DDW.sc", "DDW {}")]);
+        tag(&ddw, "v1");
+        commit_files(&ddw, &[("DDW.sc", "DDW { new {} }")]);
+        commit_files(
+            &fixture.path("quarks"),
+            &[(
+                "directory.txt",
+                &format!("ddwCommon={}@tags/v1\n", url(&ddw).trim_end_matches('/')),
+            )],
+        );
+        let sources = fixture
+            .collect("DDWCommon = { legacy-quark = true }\n")
+            .unwrap();
+        let ddw_common = &sources["ddwcommon"];
+        assert_eq!(ddw_common.version, SemanticVersion::zero());
+        assert_eq!(
+            ddw_common.source.to_string(),
+            format!("git+{}?tag=v1#{first}", url(&ddw).trim_end_matches('/'))
+        );
+
         let err = fixture
-            .collect("ddwCommon = { legacy-quark = true }\n")
+            .collect("unknown = { legacy-quark = true }\n")
             .unwrap_err();
-        assert!(err.to_string().contains("directory.txt"));
+        assert!(err
+            .to_string()
+            .contains("unknown is not in the quarks directory"));
+    }
+
+    #[test]
+    fn test_locked_legacy_quark_skips_directory() {
+        // there is no quarks directory, so a lookup would fail
+        let fixture = Fixture::new();
+        let ddw = fixture.path("ddw");
+        let sha = commit_files(&ddw, &[("DDW.sc", "DDW {}")]);
+        let source = LockSource::Git {
+            url: Url::from_directory_path(&ddw).unwrap(),
+            reference: GitReference::DefaultBranch,
+            sha,
+        };
+        let sources = fixture
+            .collect_locked("ddwCommon = { legacy-quark = true }\n", &|_| {
+                Some(source.clone())
+            })
+            .unwrap();
+        assert_eq!(sources["ddwcommon"].source, source);
+        assert!(fixture
+            .collect("ddwCommon = { legacy-quark = true }\n")
+            .is_err());
     }
 }

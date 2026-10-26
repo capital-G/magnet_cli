@@ -9,6 +9,7 @@ use anyhow::{bail, ensure, Context};
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{debug, info, instrument, trace, warn};
+use url::Url;
 
 use crate::models::project_manifest::{
     MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
@@ -16,6 +17,7 @@ use crate::models::project_manifest::{
 use crate::{
     config::constants::{magnet_home, GIT_DIR, MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
     git_client::{client::GitClient, models::GitDependency, source::GitCache},
+    legacy::directory::{quarks_directory_url, QuarksDirectory},
     models::{
         directories::ProjectDirectory,
         gitignore::write_gitignore,
@@ -62,6 +64,8 @@ pub struct Project {
     target: LazyTarget,
     /// clones of the git dependencies
     git_cache: GitCache,
+    /// repository of the legacy quarks directory (`directory.txt`)
+    quarks_directory: Url,
 }
 
 /// The manifest's dependencies by their spelling in it
@@ -85,6 +89,7 @@ impl Project {
             path: path.into(),
             target: LazyTarget::default(),
             git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
+            quarks_directory: quarks_directory_url()?,
         };
         project.generate_project_directories()?;
         write_gitignore(&project.path)?;
@@ -99,6 +104,7 @@ impl Project {
             path: path.to_path_buf(),
             target: LazyTarget::default(),
             git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
+            quarks_directory: quarks_directory_url()?,
         })
     }
 
@@ -110,6 +116,11 @@ impl Project {
     /// Where git dependencies get cloned, `~/.magnet/git` by default
     pub fn set_git_cache(&mut self, dir: PathBuf) {
         self.git_cache = GitCache::new(dir);
+    }
+
+    /// The repository of `directory.txt`, see [quarks_directory_url]
+    pub fn set_quarks_directory(&mut self, url: Url) {
+        self.quarks_directory = url;
     }
 
     fn open_lock_file(path: &Path) -> anyhow::Result<Option<LockFile>> {
@@ -453,6 +464,22 @@ impl Project {
         requirements(&self.manifest_dependency_values())
     }
 
+    /// The git and path packages of `dependencies`, see [collect_sources]
+    fn collect_sources(
+        &self,
+        dependencies: &ManifestDependencies,
+        locked: impl Fn(&str) -> Option<LockSource>,
+    ) -> anyhow::Result<BTreeMap<String, SourcePackage>> {
+        let directory = QuarksDirectory::new(self.quarks_directory.clone(), &self.git_cache);
+        collect_sources(
+            &self.path,
+            dependencies,
+            &self.git_cache,
+            &directory,
+            locked,
+        )
+    }
+
     /// The locked source of `name`, if the lock file has one
     fn locked_source(&self, name: &str) -> Option<LockSource> {
         self.lock_file
@@ -478,7 +505,7 @@ impl Project {
         dependencies: ManifestDependencies,
         keep: impl Fn(&str) -> bool,
     ) -> anyhow::Result<Resolution> {
-        let sources = collect_sources(&self.path, &dependencies, &self.git_cache, |name| {
+        let sources = self.collect_sources(&dependencies, |name| {
             keep(name).then(|| self.locked_source(name)).flatten()
         })?;
         let preferred = self
@@ -703,9 +730,7 @@ impl Project {
             return Ok(false);
         };
         let dependencies = self.manifest_dependency_values();
-        let sources = collect_sources(&self.path, &dependencies, &self.git_cache, |name| {
-            self.locked_source(name)
-        })?;
+        let sources = self.collect_sources(&dependencies, |name| self.locked_source(name))?;
         let sources_locked = sources.iter().all(|(name, source)| {
             lock_file.dependencies.get(name).is_some_and(|locked| {
                 locked.source == source.source
@@ -1295,7 +1320,6 @@ mod tests {
 
     use super::*;
     use crate::models::server_options::server_options_class;
-    use url::Url;
 
     const MANIFEST: &str = r#"# my project
 magnet-version = 1
