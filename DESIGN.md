@@ -269,6 +269,7 @@ The kind is stored in the lock file such that magnet knows the folder of each de
 `checksums` holds the sha256 of every artifact of that version known at lock time, keyed by `{abi}-{patform}`.
 This way the lock file can be shared and used across platforms.
 Only packages from the index have checksums: local dependencies can't be pinned and git dependencies are identified by their commit SHA.
+Binaries which get published after the lock file was written are added to it during the installation (see Missing binary).
 
 ## `magnet` as local CLI
 
@@ -397,15 +398,28 @@ Package names are
 
 #### Missing binary
 
-If a matching binary can not be obtained for the platform, the user will be asked how to continue.
-The user can either decide to use a different version which provides binaries for the platform or the user can provide a path where the binary is located.
+Dependencies are resolved by their versions only, so the lock file does not depend on the platform.
+Only the installation picks the artifact which matches the platform and abi tag of the machine.
+If the locked version of a lepton has no such artifact, the installation stops and names the newest version of the package which provides one (e.g. `magnet add foo@=0.3.1`), or suggests an override if there is none.
+
+An override installs a package from a local folder instead of the index, e.g. a plugin which was built locally or downloaded for a platform which the index does not provide yet:
 
 ```toml
 [overrides]
 foo = { path = "../foo" }
 ```
 
+If the folder contains a `magnet.toml`, e.g. the project of the lepton itself, magnet installs what `magnet package` would select for the platform, i.e. the files of its `global-paths` and its `platform-paths` binaries within `plugins/`.
+Otherwise, the folder is copied as it is, e.g. an unzipped release of a plugin.
+An override only changes what gets installed: the dependency is still resolved via the index, and the lock file keeps its entry and checksums, so it can still be shared.
+The files of an override are not checked against a checksum since they change with every build, and running `magnet install` again copies the current files.
+
 Packages which refer to packages via local paths can not be published via the index!
+
+Binaries can be added to a published version later on, so a lock file may lack the checksum for the platform of the machine.
+In this case magnet takes the checksum of the same version from the index, verifies the download against it and adds it to the lock file.
+Existing checksums are never changed, and a checksum of the lock file which differs from the index is an error.
+`magnet install --locked`, e.g. for a CI, never writes the lock file and fails instead.
 
 ### Publishing a package
 
