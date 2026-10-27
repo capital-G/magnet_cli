@@ -67,6 +67,10 @@ pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
             "pin it via `ref = \"<commit SHA>\"`, e.g. the one of {name} in {MAGNET_LOCK_FILE}"
         );
         match git {
+            // the index line needs the repository, which only the lock file knows then
+            Some(git) if git.url.is_none() => problems.push(format!(
+                "{name} is a legacy quark pinned by name, add `url = \"…\"` and `ref = \"<commit SHA>\"` to its git table, e.g. from {MAGNET_LOCK_FILE}"
+            )),
             Some(git) if git.ref_.as_deref().is_some_and(is_full_sha) => {}
             Some(git) if git.ref_.is_some() => {
                 problems.push(format!("{name} is pinned to an abbreviated commit, {hint}"))
@@ -268,7 +272,7 @@ mod tests {
     fn test_refused_dependencies() {
         let err = check_publishable(&manifest(
             "quark",
-            "a = { path = \"../a\" }\nb = { index = \"https://other.org/index\" }\nc = { git = { url = \"https://x.org/c.git\", branch = \"main\" } }\nd = { git = { url = \"https://x.org/d.git\" } }\ne = { legacy-quark = true }\ng = { git = { url = \"https://x.org/g.git\", tag = \"v1\" } }\nh = { legacy-quark = true, git = { url = \"https://x.org/h.git\", ref = \"4b825dc\" } }\n[overrides]\nf = { path = \"../f\" }\n",
+            "a = { path = \"../a\" }\nb = { index = \"https://other.org/index\" }\nc = { git = { url = \"https://x.org/c.git\", branch = \"main\" } }\nd = { git = { url = \"https://x.org/d.git\" } }\ne = { legacy-quark = true }\ng = { git = { url = \"https://x.org/g.git\", tag = \"v1\" } }\nh = { legacy-quark = true, git = { url = \"https://x.org/h.git\", ref = \"4b825dc\" } }\ni = { legacy-quark = true, git = { ref = \"4b825dc642cb6eb9a060e54bf8d69288fbee4904\" } }\n[overrides]\nf = { path = \"../f\" }\n",
         ))
         .unwrap_err()
         .to_string();
@@ -280,6 +284,7 @@ mod tests {
             "e is a legacy quark without a git URL and ref",
             "g is pinned to a git tag",
             "h is pinned to an abbreviated commit",
+            "i is a legacy quark pinned by name, add `url",
             "f is overridden by a local folder",
         ] {
             assert!(err.contains(expected), "{expected}: {err}");

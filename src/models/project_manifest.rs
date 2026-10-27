@@ -520,7 +520,7 @@ baz = {}
     fn test_dependency_object_to_toml_edit_item() {
         let dep = MagnetManifestV1DependenciesValue::Object {
             git: Some(MagnetManifestV1DependenciesValueObjectGit {
-                url: "http://my.git".to_string(),
+                url: Some("http://my.git".to_string()),
                 branch: Some("main".to_string()),
                 ref_: None,
                 tag: None,

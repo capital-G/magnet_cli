@@ -150,36 +150,25 @@ fn legacy_authors(authors: &str) -> String {
         .join(", ")
 }
 
-/// A dependency of the `.quark` file as legacy quark. A refspec only survives with a URL,
-/// since a legacy dependency by name can't pin a tag or commit in the manifest.
+/// A dependency of the `.quark` file as legacy quark, with its URL and refspec. Without a URL
+/// (`name@refspec`), the git table only pins it and the URL comes from the quarks directory.
 fn legacy_dependency(dependency: &QuarkDependency) -> MagnetManifestV1DependenciesValue {
-    let git = match (&dependency.url, &dependency.refspec) {
-        (Some(url), refspec) => {
-            let mut git = MagnetManifestV1DependenciesValueObjectGit {
-                url: url.to_string(),
-                branch: None,
-                ref_: None,
-                tag: None,
-            };
-            // read like SuperCollider does (`Quark.validateRefspec`), which knows no branches
-            match refspec.as_deref().map(parse_refspec) {
-                Some(GitReference::Tag(tag)) => git.tag = Some(tag),
-                Some(GitReference::Ref(sha)) => git.ref_ = Some(sha),
-                Some(GitReference::Branch(branch)) => git.branch = Some(branch),
-                Some(GitReference::DefaultBranch) | None => {}
-            }
-            Some(git)
-        }
-        (None, Some(refspec)) => {
-            warn!(
-                "{} is pinned to {refspec} in the .quark file, which needs its git URL in magnet.toml: \
-                 {} = {{ legacy-quark = true, git = {{ url = \"…\", tag = \"…\" }} }}",
-                dependency.name, dependency.name
-            );
-            None
-        }
-        (None, None) => None,
+    let mut git = MagnetManifestV1DependenciesValueObjectGit {
+        url: dependency.url.as_ref().map(|url| url.to_string()),
+        branch: None,
+        ref_: None,
+        tag: None,
     };
+    // read like SuperCollider does (`Quark.validateRefspec`), which knows no branches; `HEAD`
+    // is the default branch, which needs no pin
+    match dependency.refspec.as_deref().map(parse_refspec) {
+        Some(GitReference::Tag(tag)) => git.tag = Some(tag),
+        Some(GitReference::Ref(sha)) => git.ref_ = Some(sha),
+        Some(GitReference::Branch(branch)) => git.branch = Some(branch),
+        Some(GitReference::DefaultBranch) | None => {}
+    }
+    let pinned = git.tag.is_some() || git.ref_.is_some() || git.branch.is_some();
+    let git = (git.url.is_some() || pinned).then_some(git);
     MagnetManifestV1DependenciesValue::Object {
         git,
         ignore_quark_deps: None,
@@ -247,9 +236,13 @@ mod tests {
             toml(&dependency("Bjorklund", None, None)),
             "{ legacy-quark = true }"
         );
-        // without a URL the refspec gets dropped with a warning
+        // pinned by name, the URL comes from the quarks directory
         assert_eq!(
             toml(&dependency("cruciallib", None, Some("tags/4.1.4"))),
+            "{ legacy-quark = true, git = { tag = \"4.1.4\" } }"
+        );
+        assert_eq!(
+            toml(&dependency("cruciallib", None, Some("HEAD"))),
             "{ legacy-quark = true }"
         );
         let url = Some("https://github.com/user/foo.git");

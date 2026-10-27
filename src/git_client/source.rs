@@ -23,24 +23,30 @@ pub enum GitReference {
 }
 
 impl GitReference {
-    /// The URL and reference of a git dependency of a manifest
+    /// The URL and reference of a git dependency of a manifest. Without a URL (a legacy quark
+    /// pinned by name), the reference is `None` if none is given, so the quarks directory's
+    /// refspec applies.
     pub fn from_manifest(
         git: &MagnetManifestV1DependenciesValueObjectGit,
-    ) -> anyhow::Result<(Url, Self)> {
-        let url: Url = git
+    ) -> anyhow::Result<(Option<Url>, Option<Self>)> {
+        let url: Option<Url> = git
             .url
-            .parse()
-            .with_context(|| format!("{} is not a valid git URL", git.url))?;
+            .as_ref()
+            .map(|url| {
+                url.parse()
+                    .with_context(|| format!("{url} is not a valid git URL"))
+            })
+            .transpose()?;
         let references = [
             git.branch.clone().map(Self::Branch),
             git.tag.clone().map(Self::Tag),
             git.ref_.clone().map(Self::Ref),
         ];
         let mut given = references.into_iter().flatten();
-        let reference = given.next().unwrap_or(Self::DefaultBranch);
+        let reference = given.next();
         ensure!(
             given.next().is_none(),
-            "The git dependency {url} can only have one of branch, tag or ref"
+            "A git dependency can only have one of branch, tag or ref"
         );
         Ok((url, reference))
     }
@@ -376,19 +382,27 @@ pub(crate) mod tests {
     fn test_reference_from_manifest() {
         let git =
             |branch: Option<&str>, tag: Option<&str>| MagnetManifestV1DependenciesValueObjectGit {
-                url: "https://x.org/foo.git".to_string(),
+                url: Some("https://x.org/foo.git".to_string()),
                 branch: branch.map(String::from),
                 tag: tag.map(String::from),
                 ref_: None,
             };
         let (url, reference) = GitReference::from_manifest(&git(None, Some("v1"))).unwrap();
-        assert_eq!(url.as_str(), "https://x.org/foo.git");
-        assert_eq!(reference, GitReference::Tag("v1".to_string()));
+        assert_eq!(url.unwrap().as_str(), "https://x.org/foo.git");
+        assert_eq!(reference, Some(GitReference::Tag("v1".to_string())));
         assert_eq!(
             GitReference::from_manifest(&git(None, None)).unwrap().1,
-            GitReference::DefaultBranch
+            None
         );
         assert!(GitReference::from_manifest(&git(Some("main"), Some("v1"))).is_err());
+
+        // a legacy quark pinned by name
+        let mut pinned = git(None, Some("4.1.4"));
+        pinned.url = None;
+        assert_eq!(
+            GitReference::from_manifest(&pinned).unwrap(),
+            (None, Some(GitReference::Tag("4.1.4".to_string())))
+        );
     }
 
     #[test]

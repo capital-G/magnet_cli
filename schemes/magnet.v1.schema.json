@@ -118,7 +118,7 @@
                 "properties": {
                   "url": {
                     "type": "string",
-                    "description": "Git repository URL"
+                    "description": "Git repository URL - only a legacy quark can leave it out, then it is looked up in the quarks directory and only pinned by branch, tag or ref"
                   },
                   "branch": {
                     "type": "string",
@@ -133,7 +133,6 @@
                     "description": "Pin a specific git commit ID"
                   }
                 },
-                "required": ["url"],
                 "additionalProperties": false
               },
               "path": {

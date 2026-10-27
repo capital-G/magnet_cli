@@ -76,10 +76,17 @@ fn spec(name: &str, dependency: &MagnetManifestV1DependenciesValue) -> anyhow::R
     };
     match (git, path) {
         (Some(_), Some(_)) => bail!("{name} can't be a git and a path dependency at once"),
-        (Some(git), None) => {
-            let (url, reference) = GitReference::from_manifest(git)?;
-            Ok(Spec::Git(url, reference))
-        }
+        (Some(git), None) => match GitReference::from_manifest(git)? {
+            (Some(url), reference) => Ok(Spec::Git(
+                url,
+                reference.unwrap_or(GitReference::DefaultBranch),
+            )),
+            // a legacy quark pinned by name, like `name@refspec` in a .quark file
+            (None, reference) if legacy_quark.unwrap_or(false) => Ok(Spec::Legacy(reference)),
+            (None, _) => bail!(
+                "{name} is a git dependency without url, only a legacy quark (legacy-quark = true) can be pinned by name"
+            ),
+        },
         (None, Some(path)) => Ok(Spec::Path(PathBuf::from(path))),
         (None, None) if legacy_quark.unwrap_or(false) => Ok(Spec::Legacy(None)),
         (None, None) => Ok(Spec::Index),
@@ -243,7 +250,14 @@ pub fn collect_sources(
                 (LockSource::Path(path), Some(folder))
             }
             Spec::Legacy(reference) => match locked(&name) {
-                Some(source @ LockSource::Git { .. }) => (source, None),
+                // a pinned one keeps its lock only while the pin stays the same
+                Some(source @ LockSource::Git { .. })
+                    if reference.as_ref().is_none_or(|pin| {
+                        matches!(&source, LockSource::Git { reference: locked, .. } if locked == pin)
+                    }) =>
+                {
+                    (source, None)
+                }
                 _ if from_quark && packages.contains_key(&name) => {
                     // already collected, so there is nothing to look up
                     continue;
@@ -782,6 +796,58 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unknown (required by the project) is not in the quarks directory"));
+    }
+
+    /// `cruciallib = { legacy-quark = true, git = { tag = "…" } }`, like `cruciallib@tags/…`
+    /// in a .quark file: the URL comes from the directory, the pin from the manifest
+    #[test]
+    fn test_legacy_quark_pinned_by_name() {
+        let fixture = Fixture::new();
+        let crucial = fixture.path("crucial");
+        let first = commit_files(&crucial, &[("Crucial.sc", "Crucial {}")]);
+        tag(&crucial, "4.1.4");
+        let second = commit_files(&crucial, &[("Crucial.sc", "Crucial { new {} }")]);
+        tag(&crucial, "4.1.5");
+        let crucial_url = url(&crucial).trim_end_matches('/').to_string();
+        // the directory names no refspec, so it would be the default branch
+        commit_files(
+            &fixture.path("quarks"),
+            &[("directory.txt", &format!("cruciallib={crucial_url}\n"))],
+        );
+        let pinned = |tag: &str| {
+            format!("cruciallib = {{ legacy-quark = true, git = {{ tag = \"{tag}\" }} }}\n")
+        };
+
+        let sources = fixture.collect(&pinned("4.1.4")).unwrap();
+        let source = sources["cruciallib"].source.clone();
+        assert_eq!(
+            source.to_string(),
+            format!("git+{crucial_url}?tag=4.1.4#{first}")
+        );
+
+        // the lock is kept while the pin stays the same, a changed pin resolves again
+        let locked = |_: &str| Some(source.clone());
+        let kept = fixture.collect_locked(&pinned("4.1.4"), &locked).unwrap();
+        assert_eq!(kept["cruciallib"].source, source);
+        let moved = fixture.collect_locked(&pinned("4.1.5"), &locked).unwrap();
+        assert_eq!(
+            moved["cruciallib"].source.to_string(),
+            format!("git+{crucial_url}?tag=4.1.5#{second}")
+        );
+        // without a pin, any locked commit is kept, like before
+        let unpinned = fixture
+            .collect_locked("cruciallib = { legacy-quark = true }\n", &locked)
+            .unwrap();
+        assert_eq!(unpinned["cruciallib"].source, source);
+
+        // only a legacy quark can leave out the URL
+        let err = fixture
+            .collect("cruciallib = { git = { tag = \"4.1.4\" } }\n")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("git dependency without url"),
+            "{err:#}"
+        );
     }
 
     #[test]
