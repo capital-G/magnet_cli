@@ -1,0 +1,11 @@
+[book]
+title = "The Magnet Book"
+description = "Magnet, the package manager for SuperCollider"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/capital-G/magnet_cli"
