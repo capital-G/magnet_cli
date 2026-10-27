@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::Display,
     fs,
     path::{Component, Path, PathBuf},
@@ -143,6 +144,11 @@ impl GitCache {
                 Err(err) => debug!("Shallow fetch of {wanted} from {url} failed: {err}"),
             }
         }
+        Self::fetch_all(repo, url)
+    }
+
+    /// Fetches all branches and tags with their full history
+    fn fetch_all(repo: &Repository, url: &Url) -> anyhow::Result<()> {
         let mut options = FetchOptions::new();
         options.download_tags(git2::AutotagOption::All);
         if repo.is_shallow() {
@@ -229,6 +235,37 @@ impl GitCache {
         Ok(Some(content.to_string()))
     }
 
+    /// The newest `limit` commits of the default branch of `url`, newest first, with their
+    /// tags, e.g. to choose a commit to pin. Fetches the full history; if that fails (e.g.
+    /// offline), the clone is used as it is.
+    pub fn history(&self, url: &Url, limit: usize) -> anyhow::Result<Vec<CommitInfo>> {
+        let repo = self.repo(url)?;
+        info!("Fetching the history of {url}");
+        if let Err(err) = Self::fetch_all(&repo, url) {
+            warn!("{err:#}, using the cached clone");
+        }
+        let tags = tags_by_commit(&repo)?;
+        let mut walk = repo.revwalk()?;
+        walk.push(
+            repo.revparse_single("refs/remotes/origin/HEAD")
+                .with_context(|| format!("{url} has no default branch"))?
+                .peel_to_commit()?
+                .id(),
+        )?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+        walk.take(limit)
+            .map(|oid| Ok(commit_info(&repo.find_commit(oid?)?, &tags)))
+            .collect()
+    }
+
+    /// The commit `sha` of `url` with its tags
+    pub fn commit_info(&self, url: &Url, sha: &str) -> anyhow::Result<CommitInfo> {
+        self.ensure(url, sha)?;
+        let repo = self.repo(url)?;
+        let commit = repo.find_commit(Oid::from_str(sha)?)?;
+        Ok(commit_info(&commit, &tags_by_commit(&repo)?))
+    }
+
     /// The names of the files and folders at the root of the commit `sha`
     pub fn root_files(&self, url: &Url, sha: &str) -> anyhow::Result<Vec<String>> {
         self.ensure(url, sha)?;
@@ -248,6 +285,42 @@ impl GitCache {
         let tree = repo.find_commit(Oid::from_str(sha)?)?.tree()?;
         export_tree(&repo, &tree, destination, Path::new(""))
     }
+}
+
+/// A commit to choose from, see [GitCache::history]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub tags: Vec<String>,
+    /// `YYYY-MM-DD` of the commit
+    pub date: String,
+    /// the first line of the message
+    pub summary: String,
+}
+
+fn commit_info(commit: &git2::Commit, tags: &HashMap<Oid, Vec<String>>) -> CommitInfo {
+    CommitInfo {
+        sha: commit.id().to_string(),
+        tags: tags.get(&commit.id()).cloned().unwrap_or_default(),
+        date: chrono::DateTime::from_timestamp(commit.time().seconds(), 0)
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+        summary: commit.summary().unwrap_or_default().to_string(),
+    }
+}
+
+/// The tag names of every tagged commit, sorted
+fn tags_by_commit(repo: &Repository) -> anyhow::Result<HashMap<Oid, Vec<String>>> {
+    let mut tags: HashMap<Oid, Vec<String>> = HashMap::new();
+    for reference in repo.references_glob("refs/tags/*")? {
+        let reference = reference?;
+        let (Some(name), Ok(commit)) = (reference.shorthand(), reference.peel_to_commit()) else {
+            continue;
+        };
+        tags.entry(commit.id()).or_default().push(name.to_string());
+    }
+    tags.values_mut().for_each(|names| names.sort());
+    Ok(tags)
 }
 
 /// `GIT_FETCH_DEPTH_UNSHALLOW`, which turns a shallow clone into a full one
@@ -376,6 +449,44 @@ pub(crate) mod tests {
 
     fn file_url(path: &Path) -> Url {
         Url::from_directory_path(path).unwrap()
+    }
+
+    #[test]
+    fn test_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let first = commit_files(&repo, &[("A.sc", "A {}")]);
+        tag(&repo, "1.0");
+        tag(&repo, "v1.0");
+        let second = commit_files(&repo, &[("B.sc", "B {}")]);
+        let third = commit_files(&repo, &[("C.sc", "C {}")]);
+        tag(&repo, "2.0");
+        let cache = GitCache::new(dir.path().join("cache"));
+        let url = file_url(&repo);
+
+        let history = cache.history(&url, 10).unwrap();
+        let summary: Vec<(&str, Vec<&str>)> = history
+            .iter()
+            .map(|commit| {
+                (
+                    commit.sha.as_str(),
+                    commit.tags.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (third.as_str(), vec!["2.0"]),
+                (second.as_str(), vec![]),
+                (first.as_str(), vec!["1.0", "v1.0"]),
+            ]
+        );
+        assert_eq!(history[0].summary, "commit");
+        assert_eq!(history[0].date.len(), "2024-05-02".len());
+
+        assert_eq!(cache.history(&url, 1).unwrap().len(), 1);
+        assert_eq!(cache.commit_info(&url, &first).unwrap(), history[2]);
     }
 
     #[test]

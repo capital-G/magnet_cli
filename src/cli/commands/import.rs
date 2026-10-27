@@ -2,24 +2,33 @@ use std::{fs, path::PathBuf, str::FromStr};
 
 use anyhow::Context;
 use clap::Parser;
+use inquire::{Select, Text};
 use magnet::{
-    git_client::source::GitReference,
+    config::constants::{magnet_home, GIT_DIR},
+    git_client::{
+        client::GitClient,
+        source::{CommitInfo, GitCache, GitReference},
+    },
     legacy::{
-        directory::parse_refspec,
+        directory::{parse_refspec, quarks_directory_url, QuarksDirectory},
         quark_parser::{parse_dependencies, parse_fields, QuarkDependency},
     },
-    models::project_manifest::{
-        MagnetManifestV1, MagnetManifestV1DependenciesValue,
-        MagnetManifestV1DependenciesValueObjectGit, MagnetManifestV1PackageKind, ProjectLayout,
+    models::{
+        project::Project,
+        project_manifest::{
+            MagnetManifestV1, MagnetManifestV1DependenciesValue,
+            MagnetManifestV1DependenciesValueObjectGit, MagnetManifestV1PackageKind, ProjectLayout,
+        },
     },
 };
 use pubgrub::SemanticVersion;
 use tracing::warn;
+use url::Url;
 
 use crate::cli::{
     commands::project::{
         ask_create_options, ask_manifest, ask_project_name, check_project_dir, create_project,
-        InitDefaults,
+        downloader, InitDefaults,
     },
     CliContext, MagnetSubCommand,
 };
@@ -42,10 +51,14 @@ pub struct ImportLegacyQuarkArgs {
     /// The `.quark` file of the legacy quark. The project gets created in its folder, with
     /// the values of the file as answers of the `magnet init` dialog.
     quark_file: PathBuf,
+
+    /// Only write magnet.toml, don't resolve and install the dependencies
+    #[arg(long)]
+    no_install: bool,
 }
 
 impl MagnetSubCommand for ImportLegacyQuarkArgs {
-    async fn run(self, _ctx: &CliContext) -> anyhow::Result<()> {
+    async fn run(self, ctx: &CliContext) -> anyhow::Result<()> {
         let quark_file = std::path::absolute(&self.quark_file)?;
         let content = fs::read_to_string(&quark_file)
             .with_context(|| format!("Could not read {quark_file:?}"))?;
@@ -84,11 +97,26 @@ impl MagnetSubCommand for ImportLegacyQuarkArgs {
                 vec![]
             }
         };
+        // without an index, every dependency is a legacy quark and nothing gets installed
+        let index = match dependencies.is_empty() && self.no_install {
+            true => None,
+            false => match ctx.git_client() {
+                Ok(index) => Some(index),
+                Err(err) => {
+                    warn!("{err:#}, so the dependencies can only be legacy quarks and don't get installed");
+                    None
+                }
+            },
+        };
+        let cache = GitCache::new(magnet_home()?.join(GIT_DIR));
+        let directory = QuarksDirectory::new(quarks_directory_url()?, &cache);
         for dependency in &dependencies {
-            manifest
-                .dependencies
-                .entry(dependency.name.clone())
-                .or_insert_with(|| legacy_dependency(dependency));
+            if manifest.dependencies.contains_key(&dependency.name) {
+                continue;
+            }
+            if let Some(value) = ask_dependency(dependency, index.as_ref(), &directory, &cache)? {
+                manifest.dependencies.insert(dependency.name.clone(), value);
+            }
         }
 
         let options = ask_create_options(&project_path, ProjectLayout::LegacyQuark)?;
@@ -105,16 +133,231 @@ impl MagnetSubCommand for ImportLegacyQuarkArgs {
                 skipped.join(", ")
             );
         }
-        if !dependencies.is_empty() {
-            let names: Vec<&str> = dependencies.iter().map(|d| d.name.as_str()).collect();
-            println!(
-                "Added the dependencies {} as legacy quarks. Check whether they are available in the magnet index, \
-                 and switch to them via `magnet add <name>`: magnet packages have versions which magnet can resolve, \
-                 so the project stays compatible over time. Run `magnet install` to install the dependencies.",
-                names.join(", ")
-            );
+
+        match index {
+            Some(index) if !self.no_install => {
+                let mut project = Project::open(&project_path)?;
+                project
+                    .install(&index, &downloader(&index)?, false)
+                    .await
+                    .context("The project is created, but installing failed. Run `magnet install` to try again")?;
+            }
+            _ if !dependencies.is_empty() => {
+                println!("Run `magnet install` to install the dependencies")
+            }
+            _ => {}
         }
         Ok(())
+    }
+}
+
+/// Where a dependency of the `.quark` file comes from
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DependencySource {
+    MagnetPackage,
+    LegacyQuark,
+}
+
+impl std::fmt::Display for DependencySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DependencySource::MagnetPackage => {
+                write!(
+                    f,
+                    "the magnet package (recommended, has versions magnet can resolve)"
+                )
+            }
+            DependencySource::LegacyQuark => write!(f, "the legacy quark, pinned to a commit"),
+        }
+    }
+}
+
+/// Asks how a dependency of the `.quark` file becomes a dependency of the manifest: the magnet
+/// package of the index with a chosen version, if there is one, otherwise (or by choice) the
+/// legacy quark pinned to a full commit SHA, which publishing needs. `None` leaves it out.
+fn ask_dependency(
+    dependency: &QuarkDependency,
+    index: Option<&GitClient>,
+    directory: &QuarksDirectory,
+    cache: &GitCache,
+) -> anyhow::Result<Option<MagnetManifestV1DependenciesValue>> {
+    let name = &dependency.name;
+    let mut versions: Vec<SemanticVersion> = match index {
+        Some(index) => index
+            .get_releases(name)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|release| !release.yanked)
+            .map(|release| release.version)
+            .collect(),
+        None => vec![],
+    };
+    versions.sort_by(|a, b| b.cmp(a));
+    if !versions.is_empty() {
+        let source = Select::new(
+            &format!("{name} is also a magnet package. Use"),
+            vec![
+                DependencySource::MagnetPackage,
+                DependencySource::LegacyQuark,
+            ],
+        )
+        .prompt()?;
+        if source == DependencySource::MagnetPackage {
+            let version = Select::new(&format!("Version of {name}:"), versions)
+                .with_help_message("Written as ^<version>, like `magnet add` does")
+                .prompt()?;
+            return Ok(Some(MagnetManifestV1DependenciesValue::String(format!(
+                "^{version}"
+            ))));
+        }
+    }
+
+    let entry = match &dependency.url {
+        Some(_) => None,
+        None => directory.lookup(name)?,
+    };
+    let url: Url = match (&dependency.url, &entry) {
+        (Some(url), _) => url.clone(),
+        (None, Some(entry)) => entry.url.clone(),
+        (None, None) => {
+            let answer = Text::new(&format!(
+                "{name} is not in the quarks directory. Its git repository URL:"
+            ))
+            .with_help_message("Empty to leave the dependency out")
+            .prompt()?;
+            match optional_url(&answer)? {
+                Some(url) => url,
+                None => {
+                    warn!("{name} is left out, add it to magnet.toml by hand");
+                    return Ok(None);
+                }
+            }
+        }
+    };
+    // the refspec of the .quark file wins over the directory's, like in SuperCollider
+    let reference = dependency
+        .refspec
+        .as_deref()
+        .map(parse_refspec)
+        .or(entry.map(|entry| entry.reference))
+        .unwrap_or(GitReference::DefaultBranch);
+    let preselected = cache
+        .resolve(&url, &reference)
+        .with_context(|| format!("Could not check out {name}"))?;
+    let mut commits = cache.history(&url, HISTORY_LENGTH)?;
+    // e.g. an old tag of the .quark file, or a commit which isn't on the default branch
+    if !commits.iter().any(|commit| commit.sha == preselected) {
+        commits.insert(0, cache.commit_info(&url, &preselected)?);
+    }
+    let cursor = commits
+        .iter()
+        .position(|commit| commit.sha == preselected)
+        .unwrap_or_default();
+    let tag_width = commits
+        .iter()
+        .map(|commit| commit.tags.join(", ").len())
+        .max()
+        .unwrap_or_default();
+    let mut choices: Vec<PinChoice> = commits
+        .into_iter()
+        .map(|commit| PinChoice::Commit { commit, tag_width })
+        .collect();
+    choices.push(PinChoice::Other);
+    let help = match reference {
+        GitReference::DefaultBranch => format!("{url}: the latest commit is preselected, type to filter"),
+        reference => format!("{url}: {reference} (from the .quark file or the quarks directory) is preselected, type to filter"),
+    };
+    match Select::new(&format!("Pin {name} to:"), choices)
+        .with_starting_cursor(cursor)
+        .with_page_size(PAGE_SIZE)
+        .with_help_message(&help)
+        .prompt()?
+    {
+        PinChoice::Commit { commit, .. } => Ok(Some(pinned_legacy_quark(&url, &commit.sha))),
+        PinChoice::Other => loop {
+            let answer = Text::new(&format!("Tag or commit SHA of {name}:")).prompt()?;
+            match cache.resolve(&url, &pin_reference(&answer)) {
+                Ok(sha) => {
+                    let commit = cache.commit_info(&url, &sha)?;
+                    println!(
+                        "{name}: {answer} is {} {} {}",
+                        &sha[..7],
+                        commit.date,
+                        commit.summary
+                    );
+                    return Ok(Some(pinned_legacy_quark(&url, &sha)));
+                }
+                Err(err) => println!("{err:#}"),
+            }
+        },
+    }
+}
+
+/// How many commits of the default branch the pin question lists
+const HISTORY_LENGTH: usize = 100;
+const PAGE_SIZE: usize = 12;
+
+/// An entry of the pin question
+enum PinChoice {
+    Commit {
+        commit: CommitInfo,
+        tag_width: usize,
+    },
+    /// a tag or commit which isn't listed, typed by the author
+    Other,
+}
+
+impl std::fmt::Display for PinChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PinChoice::Commit { commit, tag_width } => write!(
+                f,
+                "{}  {:tag_width$}  {} {}",
+                &commit.sha[..7],
+                commit.tags.join(", "),
+                commit.date,
+                commit.summary
+            ),
+            PinChoice::Other => write!(f, "Other tag or commit…"),
+        }
+    }
+}
+
+/// What the author typed as pin: a (possibly abbreviated) commit SHA, otherwise a refspec
+/// like in a `.quark` file (a tag, with or without `tags/`)
+fn pin_reference(input: &str) -> GitReference {
+    let input = input.trim();
+    match input.len() >= 7 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+        true => GitReference::Ref(input.to_lowercase()),
+        false => parse_refspec(input),
+    }
+}
+
+fn optional_url(input: &str) -> anyhow::Result<Option<Url>> {
+    match input.trim() {
+        "" => Ok(None),
+        url => Ok(Some(
+            url.parse()
+                .with_context(|| format!("{url} is not a valid URL"))?,
+        )),
+    }
+}
+
+/// A legacy quark pinned to the full commit `sha` of `url`, which is what publishing needs
+/// (the index line copies both)
+fn pinned_legacy_quark(url: &Url, sha: &str) -> MagnetManifestV1DependenciesValue {
+    MagnetManifestV1DependenciesValue::Object {
+        git: Some(MagnetManifestV1DependenciesValueObjectGit {
+            url: Some(url.to_string()),
+            branch: None,
+            ref_: Some(sha.to_string()),
+            tag: None,
+        }),
+        ignore_quark_deps: None,
+        index: None,
+        legacy_quark: Some(true),
+        path: None,
+        version: None,
     }
 }
 
@@ -148,35 +391,6 @@ fn legacy_authors(authors: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// A dependency of the `.quark` file as legacy quark, with its URL and refspec. Without a URL
-/// (`name@refspec`), the git table only pins it and the URL comes from the quarks directory.
-fn legacy_dependency(dependency: &QuarkDependency) -> MagnetManifestV1DependenciesValue {
-    let mut git = MagnetManifestV1DependenciesValueObjectGit {
-        url: dependency.url.as_ref().map(|url| url.to_string()),
-        branch: None,
-        ref_: None,
-        tag: None,
-    };
-    // read like SuperCollider does (`Quark.validateRefspec`), which knows no branches; `HEAD`
-    // is the default branch, which needs no pin
-    match dependency.refspec.as_deref().map(parse_refspec) {
-        Some(GitReference::Tag(tag)) => git.tag = Some(tag),
-        Some(GitReference::Ref(sha)) => git.ref_ = Some(sha),
-        Some(GitReference::Branch(branch)) => git.branch = Some(branch),
-        Some(GitReference::DefaultBranch) | None => {}
-    }
-    let pinned = git.tag.is_some() || git.ref_.is_some() || git.branch.is_some();
-    let git = (git.url.is_some() || pinned).then_some(git);
-    MagnetManifestV1DependenciesValue::Object {
-        git,
-        ignore_quark_deps: None,
-        index: None,
-        legacy_quark: Some(true),
-        path: None,
-        version: None,
-    }
 }
 
 #[cfg(test)]
@@ -216,53 +430,58 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_dependency() {
-        let dependency = |name: &str, url: Option<&str>, refspec: Option<&str>| QuarkDependency {
-            name: name.to_string(),
-            url: url.map(|url| url.parse().unwrap()),
-            refspec: refspec.map(String::from),
-        };
+    fn test_pinned_legacy_quark() {
+        let sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        let url: Url = "https://github.com/user/foo.git".parse().unwrap();
         // as a line of magnet.toml
-        let toml = |dependency: &QuarkDependency| {
-            let mut table = toml_edit::Table::new();
-            table.insert("x", legacy_dependency(dependency).to_toml_edit_item());
-            table
-                .to_string()
-                .trim_start_matches("x = ")
-                .trim_end()
-                .to_string()
-        };
+        let mut table = toml_edit::Table::new();
+        table.insert("foo", pinned_legacy_quark(&url, sha).to_toml_edit_item());
         assert_eq!(
-            toml(&dependency("Bjorklund", None, None)),
-            "{ legacy-quark = true }"
+            table.to_string(),
+            format!(
+                "foo = {{ legacy-quark = true, git = {{ ref = \"{sha}\", url = \"{url}\" }} }}\n"
+            )
         );
-        // pinned by name, the URL comes from the quarks directory
+        // publishable as it is
+        let manifest: MagnetManifestV1 = toml::from_str(&format!(
+            "magnet-version = 1\n[package]\nname = \"x\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\n{table}"
+        ))
+        .unwrap();
+        magnet::packaging::publish::check_publishable(&manifest).unwrap();
+    }
+
+    #[test]
+    fn test_pin_reference() {
+        let sha = "4B825DC642cb6eb9a060e54bf8d69288fbee4904";
+        assert_eq!(pin_reference(sha), GitReference::Ref(sha.to_lowercase()));
         assert_eq!(
-            toml(&dependency("cruciallib", None, Some("tags/4.1.4"))),
-            "{ legacy-quark = true, git = { tag = \"4.1.4\" } }"
+            pin_reference(" 4b825dc "),
+            GitReference::Ref("4b825dc".to_string())
         );
+        // like a refspec of a .quark file
         assert_eq!(
-            toml(&dependency("cruciallib", None, Some("HEAD"))),
-            "{ legacy-quark = true }"
-        );
-        let url = Some("https://github.com/user/foo.git");
-        let sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string();
-        assert_eq!(
-            toml(&dependency("foo", url, Some("tags/1.0"))),
-            "{ legacy-quark = true, git = { tag = \"1.0\", url = \"https://github.com/user/foo.git\" } }"
-        );
-        assert_eq!(
-            toml(&dependency("foo", url, Some(&sha))),
-            format!("{{ legacy-quark = true, git = {{ ref = \"{sha}\", url = \"https://github.com/user/foo.git\" }} }}")
-        );
-        // like `Quark.validateRefspec`: anything else is a tag, also without `tags/`
-        assert_eq!(
-            toml(&dependency("foo", url, Some("1.0"))),
-            "{ legacy-quark = true, git = { tag = \"1.0\", url = \"https://github.com/user/foo.git\" } }"
+            pin_reference("tags/4.1.4"),
+            GitReference::Tag("4.1.4".to_string())
         );
         assert_eq!(
-            toml(&dependency("foo", url, Some("HEAD"))),
-            "{ legacy-quark = true, git = { url = \"https://github.com/user/foo.git\" } }"
+            pin_reference("4.1.4"),
+            GitReference::Tag("4.1.4".to_string())
         );
+        assert_eq!(pin_reference("HEAD"), GitReference::DefaultBranch);
+        // too short for a SHA
+        assert_eq!(pin_reference("abc"), GitReference::Tag("abc".to_string()));
+    }
+
+    #[test]
+    fn test_optional_url() {
+        assert_eq!(optional_url("  ").unwrap(), None);
+        assert_eq!(
+            optional_url(" https://github.com/user/foo ")
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "https://github.com/user/foo"
+        );
+        assert!(optional_url("not a url").is_err());
     }
 }

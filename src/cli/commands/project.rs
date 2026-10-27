@@ -669,7 +669,7 @@ impl MagnetSubCommand for ProjectInstallArgs {
     }
 }
 
-fn downloader(index: &GitClient) -> anyhow::Result<PackageDownloader> {
+pub(super) fn downloader(index: &GitClient) -> anyhow::Result<PackageDownloader> {
     Ok(PackageDownloader::new(
         magnet_home()?.join(CACHE_DIR),
         index.config()?.dl,
