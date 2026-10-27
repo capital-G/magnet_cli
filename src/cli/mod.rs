@@ -2,6 +2,7 @@ mod commands;
 mod logging;
 
 use crate::cli::commands::auth::{LoginArgs, LogoutArgs};
+use crate::cli::commands::import::ImportLegacyQuarkArgs;
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
     ProjectRemoveDependencyArgs, ProjectRunArgs, ProjectUpdateArgs,
@@ -67,6 +68,8 @@ struct GlobalArgs {
 enum Commands {
     /// Initiates a new magnet project
     Init(ProjectInitArgs),
+    /// Turns a legacy quark into a magnet project, using its .quark file as defaults for `init`
+    ImportLegacyQuark(ImportLegacyQuarkArgs),
     /// Adds a new dependency to the current magnet project
     Add(ProjectAddDependencyArgs),
     /// Removes a dependency from the current magnet project
@@ -146,6 +149,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init(init_args) => init_args.run(&cli_context).await,
+        Commands::ImportLegacyQuark(import_args) => import_args.run(&cli_context).await,
         Commands::Add(project_add_dependency_args) => {
             project_add_dependency_args.run(&cli_context).await
         }

@@ -38,6 +38,8 @@ impl MagnetManifestV1DependenciesValue {
                         inline.insert(key, v);
                     }
                 }
+                // the values keep the spacing of the parsed document otherwise
+                inline.fmt();
                 toml_edit::Item::Value(toml_edit::Value::InlineTable(inline))
             }
         }
@@ -102,18 +104,40 @@ fn serialize_metadata(metadata: &MagnetManifestV1Metadata) -> toml_edit::Table {
     table
 }
 
+/// Where the files of a new project are, which decides its `[artifact]` template
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProjectLayout {
+    /// the folders `magnet init` creates (`classes/`, `HelpSource/`)
+    Magnet,
+    /// an imported legacy quark, whose files can be anywhere (always a quark)
+    LegacyQuark,
+}
+
 /// The `[artifact]` table of a new project, as a commented starting point for the author,
 /// see DESIGN.md "Packaging". It matches the folders of a new project (`classes/`,
-/// `HelpSource/`). A lepton or gluon also gets its source package and the binaries of
+/// `HelpSource/`), or selects everything for a legacy quark, like the legacy Quark system
+/// installs it. A lepton or gluon also gets its source package and the binaries of
 /// `platform` (if known), where `build/` is a guess for the build folder.
-fn artifact_template(kind: &MagnetManifestV1PackageKind, platform: Option<Platform>) -> String {
-    let mut template = String::from(
-        "\n[artifact]\n\
-         # Only the files selected here get packaged, so add every other file the package\n\
-         # needs, e.g. \"sounds/*.wav\" or \"examples/*.scd\"\n\
-         global-paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n]\n",
-    );
-    if *kind == MagnetManifestV1PackageKind::Quark {
+fn artifact_template(
+    kind: &MagnetManifestV1PackageKind,
+    platform: Option<Platform>,
+    layout: ProjectLayout,
+) -> String {
+    let mut template = String::from("\n[artifact]\n");
+    template.push_str(match layout {
+        ProjectLayout::Magnet => {
+            "# Only the files selected here get packaged, so add every other file the package\n\
+             # needs, e.g. \"sounds/*.wav\" or \"examples/*.scd\"\n\
+             global-paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n]\n"
+        }
+        ProjectLayout::LegacyQuark => {
+            "# Every file gets packaged, like the legacy Quark system installs it (hidden files,\n\
+             # dist/ and magnet_packages/ never are). Narrow it down, e.g. to \"Classes/**\",\n\
+             # \"HelpSource/**\" and \"*.quark\", or skip files via `exclude`\n\
+             global-paths = [\"**\"]\n"
+        }
+    });
+    if *kind == MagnetManifestV1PackageKind::Quark || layout == ProjectLayout::LegacyQuark {
         return template;
     }
     template.push_str(
@@ -156,7 +180,11 @@ impl ProjectManifest {
         })
     }
 
-    pub fn write_new(path: PathBuf, manifest: &MagnetManifestV1) -> anyhow::Result<Self> {
+    pub fn write_new(
+        path: PathBuf,
+        manifest: &MagnetManifestV1,
+        layout: ProjectLayout,
+    ) -> anyhow::Result<Self> {
         let mut content = Self::serialize_manifest(manifest)?;
         if manifest.artifact.is_none() {
             let platform = match current_platform() {
@@ -166,7 +194,7 @@ impl ProjectManifest {
                     None
                 }
             };
-            content.push_str(&artifact_template(&manifest.package.kind, platform));
+            content.push_str(&artifact_template(&manifest.package.kind, platform, layout));
         }
         let file = File::create(&path).context("Could not create project file")?;
         let mut writer = BufWriter::new(file);
@@ -202,7 +230,10 @@ impl ProjectManifest {
         doc["metadata"] = toml_edit::Item::Table(metadata);
 
         let mut deps = toml_edit::Table::new();
-        for (name, value) in &manifest.dependencies {
+        // sorted, since the order of the map is random
+        let mut dependencies: Vec<_> = manifest.dependencies.iter().collect();
+        dependencies.sort_by_key(|(name, _)| name.to_lowercase());
+        for (name, value) in dependencies {
             deps.insert(name, value.to_toml_edit_item());
         }
         deps.decor_mut().set_prefix("\n");
@@ -612,9 +643,10 @@ baz = {}
         assert_eq!(parsed.tags, ["synth", "fx"]);
     }
 
-    fn manifest_with_template(
+    fn manifest_with_layout(
         kind: MagnetManifestV1PackageKind,
         platform: Option<Platform>,
+        layout: ProjectLayout,
     ) -> MagnetManifestV1 {
         let manifest = MagnetManifestV1::new(
             "foo".to_string(),
@@ -625,8 +657,15 @@ baz = {}
         )
         .unwrap();
         let content = ProjectManifest::serialize_manifest(&manifest).unwrap()
-            + &artifact_template(&kind, platform);
+            + &artifact_template(&kind, platform, layout);
         MagnetManifestV1::from_string(&content).unwrap()
+    }
+
+    fn manifest_with_template(
+        kind: MagnetManifestV1PackageKind,
+        platform: Option<Platform>,
+    ) -> MagnetManifestV1 {
+        manifest_with_layout(kind, platform, ProjectLayout::Magnet)
     }
 
     #[test]
@@ -637,6 +676,45 @@ baz = {}
         assert_eq!(artifact.global_paths, ["classes/**/*.sc", "HelpSource/**"]);
         assert!(artifact.source_paths.is_empty());
         assert!(artifact.platform_paths.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_quark_template() {
+        let artifact = manifest_with_layout(
+            MagnetManifestV1PackageKind::Quark,
+            None,
+            ProjectLayout::LegacyQuark,
+        )
+        .artifact
+        .unwrap();
+        assert_eq!(artifact.global_paths, ["**"]);
+        assert!(artifact.source_paths.is_empty());
+        assert!(artifact.platform_paths.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_sorts_dependencies() {
+        let mut manifest = MagnetManifestV1::new(
+            "foo".to_string(),
+            SemanticVersion::new(0, 1, 0),
+            None,
+            MagnetManifestV1PackageKind::Quark,
+            Default::default(),
+        )
+        .unwrap();
+        for name in ["redUniverse", "MathLib", "bjorklund"] {
+            manifest.dependencies.insert(
+                name.to_string(),
+                MagnetManifestV1DependenciesValue::String("*".to_string()),
+            );
+        }
+        let content = ProjectManifest::serialize_manifest(&manifest).unwrap();
+        assert!(
+            content.contains(
+                "[dependencies]\nbjorklund = \"*\"\nMathLib = \"*\"\nredUniverse = \"*\"\n"
+            ),
+            "{content}"
+        );
     }
 
     #[test]

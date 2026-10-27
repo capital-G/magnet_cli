@@ -26,7 +26,7 @@ use crate::{
         package::{ArtifactTags, PackageArchive},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
-            MagnetManifestV1PackageKind,
+            MagnetManifestV1PackageKind, ProjectLayout,
         },
         server_options::{write_server_options, DEV_DIR},
     },
@@ -81,19 +81,40 @@ struct Resolution {
     sources: BTreeMap<String, SourcePackage>,
 }
 
+/// What [Project::create] writes besides the manifest
+#[derive(Debug, Clone, Copy)]
+pub struct CreateOptions {
+    /// the [ProjectDirectory::SCAFFOLD] folders
+    pub directories: bool,
+    /// the `.gitignore`, or the generated files added to an existing one
+    pub gitignore: bool,
+    /// decides the `[artifact]` template
+    pub layout: ProjectLayout,
+}
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        Self {
+            directories: true,
+            gitignore: true,
+            layout: ProjectLayout::Magnet,
+        }
+    }
+}
+
 impl Project {
     #[instrument(skip(magnet_manifest))]
     /// The lock file gets created by the first `add` or `install`, since it needs an index
-    /// `with_directories` creates the [ProjectDirectory::SCAFFOLD] folders, `with_gitignore`
-    /// creates the `.gitignore` or adds the generated files to it.
     pub fn create(
         path: &Path,
         magnet_manifest: MagnetManifestV1,
-        with_directories: bool,
-        with_gitignore: bool,
+        options: CreateOptions,
     ) -> anyhow::Result<Self> {
-        let project_manifest =
-            ProjectManifest::write_new(path.join(MAGNET_PROJECT_FILE), &magnet_manifest)?;
+        let project_manifest = ProjectManifest::write_new(
+            path.join(MAGNET_PROJECT_FILE),
+            &magnet_manifest,
+            options.layout,
+        )?;
         let project = Self {
             project_manifest,
             lock_file: None,
@@ -102,8 +123,8 @@ impl Project {
             git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
             quarks_directory: quarks_directory_url()?,
         };
-        project.generate_project_directories(with_directories)?;
-        if with_gitignore {
+        project.generate_project_directories(options.directories)?;
+        if options.gitignore {
             write_gitignore(&project.path)?;
         }
         info!("Created project");
@@ -2377,7 +2398,7 @@ beta = "^1"
             missing,
             ["/dist/", "/magnet_packages/", "/sclang_conf.yaml"]
         );
-        Project::create(dir.path(), manifest.clone(), true, true).unwrap();
+        Project::create(dir.path(), manifest.clone(), CreateOptions::default()).unwrap();
         assert!(missing_gitignore_entries(dir.path()).unwrap().is_empty());
 
         assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
@@ -2394,11 +2415,57 @@ beta = "^1"
 
         // without the scaffold and the .gitignore, only the manifest and magnet_packages/
         let dir = tempfile::tempdir().unwrap();
-        Project::create(dir.path(), manifest, false, false).unwrap();
+        let options = CreateOptions {
+            directories: false,
+            gitignore: false,
+            ..Default::default()
+        };
+        Project::create(dir.path(), manifest, options).unwrap();
         assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
         for folder in ["classes", "HelpSource", "tests", ".gitignore"] {
             assert!(!dir.path().join(folder).exists(), "{folder}");
         }
+    }
+
+    /// An imported legacy quark packages all its files, wherever they are
+    #[test]
+    fn test_legacy_quark_layout_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        write_files(
+            &dir,
+            &[
+                "Foo.quark",
+                "Classes/Foo.sc",
+                "HelpSource/Classes/Foo.schelp",
+                "sounds/a.wav",
+                ".git/config",
+            ],
+        );
+        let manifest = MagnetManifestV1::new(
+            "foo".to_string(),
+            SemanticVersion::new(1, 0, 0),
+            None,
+            MagnetManifestV1PackageKind::Quark,
+            Default::default(),
+        )
+        .unwrap();
+        let options = CreateOptions {
+            directories: false,
+            gitignore: true,
+            layout: ProjectLayout::LegacyQuark,
+        };
+        let project = Project::create(dir.path(), manifest, options).unwrap();
+        let archive = project.create_package(&ArtifactTags::any()).unwrap();
+        assert_eq!(
+            archive.files,
+            [
+                "Classes/Foo.sc",
+                "Foo.quark",
+                "HelpSource/Classes/Foo.schelp",
+                "magnet.toml",
+                "sounds/a.wav",
+            ]
+        );
     }
     /// `magnet init` writes an `[artifact]` template which `magnet package` accepts once the
     /// project has its files
@@ -2423,7 +2490,8 @@ beta = "^1"
                 Default::default(),
             )
             .unwrap();
-            let mut project = Project::create(dir.path(), manifest, true, true).unwrap();
+            let mut project =
+                Project::create(dir.path(), manifest, CreateOptions::default()).unwrap();
             let library = format!("build/libdep.{libraries}");
             write_files(
                 &dir,

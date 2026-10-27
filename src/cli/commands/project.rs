@@ -20,10 +20,10 @@ use magnet::{
         directories::ProjectDirectory,
         gitignore::{missing_gitignore_entries, GITIGNORE_FILE},
         lock_file::LockDependency,
-        project::Project,
+        project::{CreateOptions, Project},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1Metadata, MagnetManifestV1MetadataAuthorsItem,
-            MagnetManifestV1PackageKind,
+            MagnetManifestV1PackageKind, ProjectLayout,
         },
     },
     resolver::package_downloader::PackageDownloader,
@@ -67,7 +67,7 @@ impl std::fmt::Display for InitLocation {
 
 /// Fails if `path` already holds a magnet project, or if it should be a new folder
 /// but exists with content
-fn check_project_dir(path: &Path, new_folder: bool) -> anyhow::Result<()> {
+pub(super) fn check_project_dir(path: &Path, new_folder: bool) -> anyhow::Result<()> {
     ensure!(
         !path.join(MAGNET_PROJECT_FILE).exists(),
         "{path:?} already contains a {MAGNET_PROJECT_FILE}"
@@ -111,28 +111,11 @@ impl MagnetSubCommand for ProjectInitArgs {
             check_project_dir(path, false)?;
         }
 
-        let mut name_prompt = Text::new("Name of the project:");
         let default_name = fixed_path
             .as_deref()
             .map(|path| std::path::absolute(path).unwrap_or(path.to_path_buf()))
             .and_then(|path| default_project_name(&path));
-        if let Some(name) = &default_name {
-            name_prompt = name_prompt.with_default(name);
-        }
-        let project_name = name_prompt
-            .with_validator(validator::ValueRequiredValidator::default())
-            .with_validator(
-                |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
-                    match MagnetManifestV1::is_valid_name(input) {
-                        true => Ok(Validation::Valid),
-                        false => Ok(Validation::Invalid(
-                            "Project name can only consist of alphanumeric characters and -_"
-                                .into(),
-                        )),
-                    }
-                },
-            )
-            .prompt()?;
+        let project_name = ask_project_name(default_name.as_deref())?;
 
         let project_path = match fixed_path {
             Some(path) => path,
@@ -144,7 +127,54 @@ impl MagnetSubCommand for ProjectInitArgs {
         };
         trace!(?project_path, "Use path");
 
-        let project_kind = Select::new(
+        let project_manifest = ask_manifest(project_name, &InitDefaults::default())?;
+        let options = ask_create_options(&project_path, ProjectLayout::Magnet)?;
+        create_project(&project_path, project_manifest, options)
+    }
+}
+
+/// Suggested answers of the init dialog, e.g. from a legacy `.quark` file
+#[derive(Debug, Default)]
+pub(super) struct InitDefaults {
+    /// a fixed kind, which isn't asked (a legacy quark is always a quark)
+    pub kind: Option<MagnetManifestV1PackageKind>,
+    pub version: Option<SemanticVersion>,
+    pub summary: Option<String>,
+    /// comma separated, like the answer
+    pub authors: Option<String>,
+    pub license: Option<String>,
+    pub repository: Option<String>,
+}
+
+pub(super) fn ask_project_name(default: Option<&str>) -> anyhow::Result<String> {
+    let mut name_prompt = Text::new("Name of the project:");
+    if let Some(name) = default {
+        name_prompt = name_prompt.with_default(name);
+    }
+    Ok(name_prompt
+        .with_validator(validator::ValueRequiredValidator::default())
+        .with_validator(
+            |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
+                match MagnetManifestV1::is_valid_name(input) {
+                    true => Ok(Validation::Valid),
+                    false => Ok(Validation::Invalid(
+                        "Project name can only consist of alphanumeric characters and -_".into(),
+                    )),
+                }
+            },
+        )
+        .prompt()?)
+}
+
+/// Asks for the kind, version, sclang range and metadata of a new project, every
+/// question can be skipped with Enter
+pub(super) fn ask_manifest(
+    project_name: String,
+    defaults: &InitDefaults,
+) -> anyhow::Result<MagnetManifestV1> {
+    let project_kind = match &defaults.kind {
+        Some(kind) => kind.clone(),
+        None => Select::new(
             "Project kind:",
             vec![
                 MagnetManifestV1PackageKind::Quark,
@@ -152,121 +182,144 @@ impl MagnetSubCommand for ProjectInitArgs {
                 MagnetManifestV1PackageKind::Lepton,
             ],
         )
+        .prompt()?,
+    };
+
+    let default_version = defaults
+        .version
+        .unwrap_or(SemanticVersion::new(0, 1, 0))
+        .to_string();
+    let version = Text::new("Version:")
+        .with_default(&default_version)
+        .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+            Ok(match SemanticVersion::from_str(input) {
+                Ok(_) => Validation::Valid,
+                Err(_) => Validation::Invalid("Expected a version like 0.1.0".into()),
+            })
+        })
+        .prompt()?;
+    let version = SemanticVersion::from_str(&version)
+        .map_err(|err| anyhow::anyhow!("Invalid version {version}: {err}"))?;
+
+    // prefilled instead of defaults, so the author can remove them
+    let default_sclang = default_sclang_requirement().unwrap_or_default();
+    let sclang = Text::new("Supported SuperCollider versions:")
+        .with_initial_value(&default_sclang)
+        .with_help_message("A version range, e.g. >=3.13, empty for any version")
+        .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+            Ok(
+                match optional(input).map(|range| VersionReq::parse(&range)) {
+                    Some(Err(err)) => Validation::Invalid(format!("{err}").into()),
+                    _ => Validation::Valid,
+                },
+            )
+        })
         .prompt()?;
 
-        let version = Text::new("Version:")
-            .with_default("0.1.0")
-            .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
-                Ok(match SemanticVersion::from_str(input) {
-                    Ok(_) => Validation::Valid,
-                    Err(_) => Validation::Invalid("Expected a version like 0.1.0".into()),
-                })
+    let summary = Text::new("Summary:")
+        .with_initial_value(defaults.summary.as_deref().unwrap_or_default())
+        .with_help_message("A single line, shown in lists and search results")
+        .prompt()?;
+    let description = Text::new("Description:").prompt()?;
+    let default_authors = defaults
+        .authors
+        .clone()
+        .or_else(git_author)
+        .unwrap_or_default();
+    let authors = Text::new("Authors:")
+        .with_initial_value(&default_authors)
+        .with_help_message("Comma separated, e.g. Jane Doe <jane@example.org>")
+        .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+            Ok(match parse_authors(input) {
+                Ok(_) => Validation::Valid,
+                Err(err) => Validation::Invalid(format!("{err}").into()),
             })
-            .prompt()?;
-        let version = SemanticVersion::from_str(&version)
-            .map_err(|err| anyhow::anyhow!("Invalid version {version}: {err}"))?;
+        })
+        .prompt()?;
+    let license = Text::new("License:")
+        .with_initial_value(defaults.license.as_deref().unwrap_or_default())
+        .with_help_message("An SPDX identifier, e.g. GPL-3.0-or-later like SuperCollider")
+        .with_autocomplete(|input: &str| -> Result<Vec<String>, CustomUserError> {
+            let input = input.to_lowercase();
+            Ok(LICENSES
+                .iter()
+                .filter(|license| license.to_lowercase().contains(&input))
+                .map(|license| license.to_string())
+                .collect())
+        })
+        .prompt()?;
+    let repository = Text::new("Repository URL:")
+        .with_initial_value(defaults.repository.as_deref().unwrap_or_default())
+        .with_help_message("Needed for publishing")
+        .prompt()?;
+    let tags = Text::new("Tags:")
+        .with_help_message("Comma separated, e.g. synthesis, granular")
+        .prompt()?;
 
-        // prefilled instead of a default, so the author can remove it
-        let default_sclang = default_sclang_requirement().unwrap_or_default();
-        let sclang = Text::new("Supported SuperCollider versions:")
-            .with_initial_value(&default_sclang)
-            .with_help_message("A version range, e.g. >=3.13, empty for any version")
-            .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
-                Ok(
-                    match optional(input).map(|range| VersionReq::parse(&range)) {
-                        Some(Err(err)) => Validation::Invalid(format!("{err}").into()),
-                        _ => Validation::Valid,
-                    },
-                )
-            })
-            .prompt()?;
+    let metadata = MagnetManifestV1Metadata {
+        authors: parse_authors(&authors)?,
+        description: optional(&description),
+        license: optional(&license),
+        readme: None,
+        repository: optional(&repository),
+        summary: optional(&summary),
+        tags: split_list(&tags),
+    };
+    MagnetManifestV1::new(
+        project_name,
+        version,
+        optional(&sclang),
+        project_kind,
+        metadata,
+    )
+}
 
-        let summary = Text::new("Summary:")
-            .with_help_message("A single line, shown in lists and search results")
-            .prompt()?;
-        let description = Text::new("Description:").prompt()?;
-        let default_author = git_author().unwrap_or_default();
-        let authors = Text::new("Authors:")
-            .with_initial_value(&default_author)
-            .with_help_message("Comma separated, e.g. Jane Doe <jane@example.org>")
-            .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
-                Ok(match parse_authors(input) {
-                    Ok(_) => Validation::Valid,
-                    Err(err) => Validation::Invalid(format!("{err}").into()),
-                })
-            })
-            .prompt()?;
-        let license = Text::new("License:")
-            .with_help_message("An SPDX identifier, e.g. GPL-3.0-or-later like SuperCollider")
-            .with_autocomplete(|input: &str| -> Result<Vec<String>, CustomUserError> {
-                let input = input.to_lowercase();
-                Ok(LICENSES
-                    .iter()
-                    .filter(|license| license.to_lowercase().contains(&input))
-                    .map(|license| license.to_string())
-                    .collect())
-            })
-            .prompt()?;
-        let repository = Text::new("Repository URL:")
-            .with_help_message("Needed for publishing")
-            .prompt()?;
-        let tags = Text::new("Tags:")
-            .with_help_message("Comma separated, e.g. synthesis, granular")
-            .prompt()?;
+/// Asks which files besides the manifest get created. The folders are suggested for a new
+/// project, but not for an existing legacy quark.
+pub(super) fn ask_create_options(
+    project_path: &Path,
+    layout: ProjectLayout,
+) -> anyhow::Result<CreateOptions> {
+    let scaffold = ProjectDirectory::SCAFFOLD
+        .map(|directory| format!("{}/", String::from(directory)))
+        .join(", ");
+    let directories = Confirm::new(&format!("Create the folders {scaffold}?"))
+        .with_default(layout == ProjectLayout::Magnet)
+        .prompt()?;
 
-        let scaffold = ProjectDirectory::SCAFFOLD
-            .map(|directory| format!("{}/", String::from(directory)))
-            .join(", ");
-        let with_directories = Confirm::new(&format!("Create the folders {scaffold}?"))
-            .with_default(true)
-            .prompt()?;
-
-        // only asked if magnet would change the .gitignore, e.g. not in an existing project
-        let ignored = missing_gitignore_entries(&project_path)?;
-        let with_gitignore = match ignored.is_empty() {
-            true => false,
-            false => {
-                let question = match project_path.join(GITIGNORE_FILE).exists() {
-                    true => format!(
-                        "Add {} to the existing {GITIGNORE_FILE}?",
-                        ignored.join(", ")
-                    ),
-                    false => format!("Create a {GITIGNORE_FILE} ignoring {}?", ignored.join(", ")),
-                };
-                Confirm::new(&question).with_default(true).prompt()?
-            }
-        };
-
-        let metadata = MagnetManifestV1Metadata {
-            authors: parse_authors(&authors)?,
-            description: optional(&description),
-            license: optional(&license),
-            readme: None,
-            repository: optional(&repository),
-            summary: optional(&summary),
-            tags: split_list(&tags),
-        };
-        let project_manifest = MagnetManifestV1::new(
-            project_name,
-            version,
-            optional(&sclang),
-            project_kind,
-            metadata,
-        )?;
-
-        if !project_path.exists() {
-            trace!(?project_path, "Create project directory");
-            fs::create_dir_all(&project_path).context("Could not create project directory")?;
+    // only asked if magnet would change the .gitignore, e.g. not in an existing project
+    let ignored = missing_gitignore_entries(project_path)?;
+    let gitignore = match ignored.is_empty() {
+        true => false,
+        false => {
+            let question = match project_path.join(GITIGNORE_FILE).exists() {
+                true => format!(
+                    "Add {} to the existing {GITIGNORE_FILE}?",
+                    ignored.join(", ")
+                ),
+                false => format!("Create a {GITIGNORE_FILE} ignoring {}?", ignored.join(", ")),
+            };
+            Confirm::new(&question).with_default(true).prompt()?
         }
-        Project::create(
-            &project_path,
-            project_manifest,
-            with_directories,
-            with_gitignore,
-        )?;
+    };
+    Ok(CreateOptions {
+        directories,
+        gitignore,
+        layout,
+    })
+}
 
-        Ok(())
+pub(super) fn create_project(
+    project_path: &Path,
+    manifest: MagnetManifestV1,
+    options: CreateOptions,
+) -> anyhow::Result<()> {
+    if !project_path.exists() {
+        trace!(?project_path, "Create project directory");
+        fs::create_dir_all(project_path).context("Could not create project directory")?;
     }
+    Project::create(project_path, manifest, options)?;
+    Ok(())
 }
 
 /// Suggestions for the license of a new project, SuperCollider's own first

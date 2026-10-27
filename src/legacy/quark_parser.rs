@@ -2,6 +2,9 @@
 //! (DESIGN.md "Backwards compatibility / Legacy Quarks"). Only the value of the
 //! `dependencies` key is read, and only if it is a plain array literal; anything else (e.g.
 //! code like `[] ++ if(…)`) is reported, so the caller can warn and assume no dependencies.
+//! [parse_fields] reads the other keys the same way, e.g. for `magnet import-legacy-quark`.
+
+use std::collections::BTreeMap;
 
 use url::Url;
 
@@ -194,6 +197,35 @@ pub fn parse_dependencies(content: &str) -> Result<Vec<QuarkDependency>, String>
     items.into_iter().map(dependency).collect()
 }
 
+/// The top-level keys of a `.quark` file, with their value if it is a single string, symbol
+/// or number (e.g. `version: 1.0`), `None` for anything else (e.g. code or arrays). The first
+/// occurrence of a key wins, like for [parse_dependencies].
+pub fn parse_fields(content: &str) -> Result<BTreeMap<String, Option<String>>, String> {
+    let tokens = tokenize(content)?;
+    let mut fields = BTreeMap::new();
+    // the keys of the event `(…)` are at depth 1
+    let mut depth = 0;
+    for (i, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Punct('(' | '[' | '{') => depth += 1,
+            Token::Punct(')' | ']' | '}') => depth -= 1,
+            Token::Word(key) | Token::Symbol(key)
+                if depth == 1 && tokens.get(i + 1) == Some(&Token::Punct(':')) =>
+            {
+                let value = match tokens.get(i + 2..i + 4) {
+                    Some(
+                        [Token::Str(value) | Token::Symbol(value) | Token::Word(value), Token::Punct(',' | ')')],
+                    ) => Some(value.clone()),
+                    _ => None,
+                };
+                fields.entry(key.clone()).or_insert(value);
+            }
+            _ => {}
+        }
+    }
+    Ok(fields)
+}
+
 fn dependency(value: Value) -> Result<QuarkDependency, String> {
     match value {
         Value::Text(text) => from_text(&text),
@@ -322,6 +354,55 @@ mod tests {
                 entry("assoc", None, None),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_fields() {
+        let field = |content: &str, key: &str| parse_fields(content).unwrap().remove(key);
+
+        let collapse = fixture("Collapse.quark");
+        assert_eq!(
+            field(&collapse, "author"),
+            Some(Some("Hanns Holger Rutz (contact@sciss.de)".to_string()))
+        );
+        assert_eq!(field(&collapse, "version"), Some(Some("1.0.1".to_string())));
+        assert_eq!(
+            field(&collapse, "isCompatible"),
+            Some(Some("true".to_string()))
+        );
+        // code is no literal
+        assert_eq!(field(&collapse, "dependencies"), Some(None));
+
+        // symbols as keys, comments in between
+        let three_dj = fixture("3Dj.quark");
+        assert_eq!(field(&three_dj, "name"), Some(Some("3Dj".to_string())));
+        assert_eq!(
+            field(&three_dj, "url"),
+            Some(Some(
+                "https://github.com/andresperezlopez/rt-spatialization".to_string()
+            ))
+        );
+        assert_eq!(field(&three_dj, "version"), None);
+
+        let fields = parse_fields(
+            r#"(
+                name: "x", // version: "commented"
+                version: 1.0,
+                summary: "a" ++ "b",
+                isCompatible: { |q| q.notNil },
+                nested: (version: "2.0"),
+                name: "second"
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(fields["name"].as_deref(), Some("x"));
+        assert_eq!(fields["version"].as_deref(), Some("1.0"));
+        assert_eq!(fields["summary"], None);
+        assert_eq!(fields["isCompatible"], None);
+        assert_eq!(fields["nested"], None);
+        assert_eq!(fields.len(), 5);
+
+        assert!(parse_fields("(name: \"x)").is_err());
     }
 
     #[test]
