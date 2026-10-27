@@ -14,6 +14,15 @@ pub enum ProjectDirectory {
     Tests,
 }
 
+impl ProjectDirectory {
+    /// The folders `magnet init` creates for the author, matching the `[artifact]` template
+    pub const SCAFFOLD: [ProjectDirectory; 3] = [
+        ProjectDirectory::Classes,
+        ProjectDirectory::HelpSource,
+        ProjectDirectory::Tests,
+    ];
+}
+
 impl From<ProjectDirectory> for String {
     fn from(value: ProjectDirectory) -> Self {
         match value {

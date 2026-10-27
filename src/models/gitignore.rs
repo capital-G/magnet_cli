@@ -22,20 +22,32 @@ fn ignores(line: &str, entry: &str) -> bool {
     normalize(line) == normalize(entry)
 }
 
+fn read_gitignore(root: &Path) -> anyhow::Result<String> {
+    let path = root.join(GITIGNORE_FILE);
+    match path.exists() {
+        true => std::fs::read_to_string(&path).with_context(|| format!("Could not read {path:?}")),
+        false => Ok(String::new()),
+    }
+}
+
+fn missing_entries(content: &str) -> Vec<String> {
+    generated_entries()
+        .into_iter()
+        .filter(|entry| !content.lines().any(|line| ignores(line, entry)))
+        .collect()
+}
+
+/// The entries [write_gitignore] would add to the `.gitignore` of `root`
+pub fn missing_gitignore_entries(root: &Path) -> anyhow::Result<Vec<String>> {
+    Ok(missing_entries(&read_gitignore(root)?))
+}
+
 /// Creates the `.gitignore` of a project, or appends the entries it lacks
 #[instrument]
 pub fn write_gitignore(root: &Path) -> anyhow::Result<()> {
     let path = root.join(GITIGNORE_FILE);
-    let mut content = match path.exists() {
-        true => {
-            std::fs::read_to_string(&path).with_context(|| format!("Could not read {path:?}"))?
-        }
-        false => String::new(),
-    };
-    let missing: Vec<String> = generated_entries()
-        .into_iter()
-        .filter(|entry| !content.lines().any(|line| ignores(line, entry)))
-        .collect();
+    let mut content = read_gitignore(root)?;
+    let missing = missing_entries(&content);
     if missing.is_empty() {
         return Ok(());
     }

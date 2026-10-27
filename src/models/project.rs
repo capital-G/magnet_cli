@@ -84,7 +84,14 @@ struct Resolution {
 impl Project {
     #[instrument(skip(magnet_manifest))]
     /// The lock file gets created by the first `add` or `install`, since it needs an index
-    pub fn create(path: &Path, magnet_manifest: MagnetManifestV1) -> anyhow::Result<Self> {
+    /// `with_directories` creates the [ProjectDirectory::SCAFFOLD] folders, `with_gitignore`
+    /// creates the `.gitignore` or adds the generated files to it.
+    pub fn create(
+        path: &Path,
+        magnet_manifest: MagnetManifestV1,
+        with_directories: bool,
+        with_gitignore: bool,
+    ) -> anyhow::Result<Self> {
         let project_manifest =
             ProjectManifest::write_new(path.join(MAGNET_PROJECT_FILE), &magnet_manifest)?;
         let project = Self {
@@ -95,8 +102,10 @@ impl Project {
             git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
             quarks_directory: quarks_directory_url()?,
         };
-        project.generate_project_directories()?;
-        write_gitignore(&project.path)?;
+        project.generate_project_directories(with_directories)?;
+        if with_gitignore {
+            write_gitignore(&project.path)?;
+        }
         info!("Created project");
         Ok(project)
     }
@@ -136,13 +145,13 @@ impl Project {
     }
 
     #[instrument(skip(self))]
-    pub fn generate_project_directories(&self) -> anyhow::Result<()> {
-        for directory in [
-            ProjectDirectory::Classes,
-            ProjectDirectory::Tests,
-            ProjectDirectory::HelpSource,
-            ProjectDirectory::Packages,
-        ] {
+    /// `magnet_packages/`, plus the [ProjectDirectory::SCAFFOLD] folders if `scaffold`
+    fn generate_project_directories(&self, scaffold: bool) -> anyhow::Result<()> {
+        let scaffold = match scaffold {
+            true => ProjectDirectory::SCAFFOLD.as_slice(),
+            false => &[],
+        };
+        for directory in scaffold.iter().cloned().chain([ProjectDirectory::Packages]) {
             trace!(?directory, "Create project folder");
             let path = self.path.join(String::from(directory));
             fs::create_dir_all(&path)
@@ -2351,29 +2360,44 @@ beta = "^1"
 
     #[test]
     fn test_create_project() {
+        use crate::models::gitignore::missing_gitignore_entries;
         let dir = tempfile::tempdir().unwrap();
         // e.g. magnet init within an existing repository
         fs::write(dir.path().join(".gitignore"), "*.bak\n").unwrap();
         let manifest = MagnetManifestV1::new(
             "my-project".to_string(),
-            None,
-            None,
             SemanticVersion::new(0, 1, 0),
             None,
             MagnetManifestV1PackageKind::Quark,
+            Default::default(),
         )
         .unwrap();
-        Project::create(dir.path(), manifest).unwrap();
+        let missing = missing_gitignore_entries(dir.path()).unwrap();
+        assert_eq!(
+            missing,
+            ["/dist/", "/magnet_packages/", "/sclang_conf.yaml"]
+        );
+        Project::create(dir.path(), manifest.clone(), true, true).unwrap();
+        assert!(missing_gitignore_entries(dir.path()).unwrap().is_empty());
 
         assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
-        assert!(dir.path().join("classes").is_dir());
-        assert!(dir.path().join("HelpSource").is_dir());
+        for folder in ["classes", "HelpSource", "tests"] {
+            assert!(dir.path().join(folder).is_dir(), "{folder}");
+        }
         // the lock file gets created by the first add or install
         assert!(!dir.path().join(MAGNET_LOCK_FILE).exists());
         let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gitignore.starts_with("*.bak\n"), "{gitignore}");
         for entry in ["/dist/", "/magnet_packages/", "/sclang_conf.yaml"] {
             assert!(gitignore.lines().any(|line| line == entry), "{gitignore}");
+        }
+
+        // without the scaffold and the .gitignore, only the manifest and magnet_packages/
+        let dir = tempfile::tempdir().unwrap();
+        Project::create(dir.path(), manifest, false, false).unwrap();
+        assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
+        for folder in ["classes", "HelpSource", "tests", ".gitignore"] {
+            assert!(!dir.path().join(folder).exists(), "{folder}");
         }
     }
     /// `magnet init` writes an `[artifact]` template which `magnet package` accepts once the
@@ -2393,14 +2417,13 @@ beta = "^1"
             let dir = tempfile::tempdir().unwrap();
             let manifest = MagnetManifestV1::new(
                 "foo".to_string(),
-                None,
-                None,
                 SemanticVersion::new(0, 1, 0),
                 None,
                 kind.clone(),
+                Default::default(),
             )
             .unwrap();
-            let mut project = Project::create(dir.path(), manifest).unwrap();
+            let mut project = Project::create(dir.path(), manifest, true, true).unwrap();
             let library = format!("build/libdep.{libraries}");
             write_files(
                 &dir,

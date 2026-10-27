@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use crate::cli::{CliContext, MagnetSubCommand};
@@ -10,15 +11,20 @@ use anyhow::{ensure, Context};
 use clap::{arg, Args, Parser};
 use inquire::{
     validator::{self, Validation},
-    Select, Text,
+    Confirm, CustomUserError, Select, Text,
 };
 use magnet::{
     config::constants::{magnet_home, CACHE_DIR, MAGNET_PROJECT_FILE},
     git_client::client::GitClient,
     models::{
+        directories::ProjectDirectory,
+        gitignore::{missing_gitignore_entries, GITIGNORE_FILE},
         lock_file::LockDependency,
         project::Project,
-        project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+        project_manifest::{
+            MagnetManifestV1, MagnetManifestV1Metadata, MagnetManifestV1MetadataAuthorsItem,
+            MagnetManifestV1PackageKind,
+        },
     },
     resolver::package_downloader::PackageDownloader,
     sclang::Sclang,
@@ -148,26 +154,179 @@ impl MagnetSubCommand for ProjectInitArgs {
         )
         .prompt()?;
 
-        // @todo select license?
+        let version = Text::new("Version:")
+            .with_default("0.1.0")
+            .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+                Ok(match SemanticVersion::from_str(input) {
+                    Ok(_) => Validation::Valid,
+                    Err(_) => Validation::Invalid("Expected a version like 0.1.0".into()),
+                })
+            })
+            .prompt()?;
+        let version = SemanticVersion::from_str(&version)
+            .map_err(|err| anyhow::anyhow!("Invalid version {version}: {err}"))?;
+
+        // prefilled instead of a default, so the author can remove it
+        let default_sclang = default_sclang_requirement().unwrap_or_default();
+        let sclang = Text::new("Supported SuperCollider versions:")
+            .with_initial_value(&default_sclang)
+            .with_help_message("A version range, e.g. >=3.13, empty for any version")
+            .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+                Ok(
+                    match optional(input).map(|range| VersionReq::parse(&range)) {
+                        Some(Err(err)) => Validation::Invalid(format!("{err}").into()),
+                        _ => Validation::Valid,
+                    },
+                )
+            })
+            .prompt()?;
+
+        let summary = Text::new("Summary:")
+            .with_help_message("A single line, shown in lists and search results")
+            .prompt()?;
+        let description = Text::new("Description:").prompt()?;
+        let default_author = git_author().unwrap_or_default();
+        let authors = Text::new("Authors:")
+            .with_initial_value(&default_author)
+            .with_help_message("Comma separated, e.g. Jane Doe <jane@example.org>")
+            .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+                Ok(match parse_authors(input) {
+                    Ok(_) => Validation::Valid,
+                    Err(err) => Validation::Invalid(format!("{err}").into()),
+                })
+            })
+            .prompt()?;
+        let license = Text::new("License:")
+            .with_help_message("An SPDX identifier, e.g. GPL-3.0-or-later like SuperCollider")
+            .with_autocomplete(|input: &str| -> Result<Vec<String>, CustomUserError> {
+                let input = input.to_lowercase();
+                Ok(LICENSES
+                    .iter()
+                    .filter(|license| license.to_lowercase().contains(&input))
+                    .map(|license| license.to_string())
+                    .collect())
+            })
+            .prompt()?;
+        let repository = Text::new("Repository URL:")
+            .with_help_message("Needed for publishing")
+            .prompt()?;
+        let tags = Text::new("Tags:")
+            .with_help_message("Comma separated, e.g. synthesis, granular")
+            .prompt()?;
+
+        let scaffold = ProjectDirectory::SCAFFOLD
+            .map(|directory| format!("{}/", String::from(directory)))
+            .join(", ");
+        let with_directories = Confirm::new(&format!("Create the folders {scaffold}?"))
+            .with_default(true)
+            .prompt()?;
+
+        // only asked if magnet would change the .gitignore, e.g. not in an existing project
+        let ignored = missing_gitignore_entries(&project_path)?;
+        let with_gitignore = match ignored.is_empty() {
+            true => false,
+            false => {
+                let question = match project_path.join(GITIGNORE_FILE).exists() {
+                    true => format!(
+                        "Add {} to the existing {GITIGNORE_FILE}?",
+                        ignored.join(", ")
+                    ),
+                    false => format!("Create a {GITIGNORE_FILE} ignoring {}?", ignored.join(", ")),
+                };
+                Confirm::new(&question).with_default(true).prompt()?
+            }
+        };
+
+        let metadata = MagnetManifestV1Metadata {
+            authors: parse_authors(&authors)?,
+            description: optional(&description),
+            license: optional(&license),
+            readme: None,
+            repository: optional(&repository),
+            summary: optional(&summary),
+            tags: split_list(&tags),
+        };
+        let project_manifest = MagnetManifestV1::new(
+            project_name,
+            version,
+            optional(&sclang),
+            project_kind,
+            metadata,
+        )?;
 
         if !project_path.exists() {
             trace!(?project_path, "Create project directory");
             fs::create_dir_all(&project_path).context("Could not create project directory")?;
         }
-
-        let project_manifest = MagnetManifestV1::new(
-            project_name,
-            None,
-            None,
-            SemanticVersion::new(0, 1, 0),
-            default_sclang_requirement(),
-            project_kind,
+        Project::create(
+            &project_path,
+            project_manifest,
+            with_directories,
+            with_gitignore,
         )?;
-
-        Project::create(&project_path, project_manifest)?;
 
         Ok(())
     }
+}
+
+/// Suggestions for the license of a new project, SuperCollider's own first
+const LICENSES: [&str; 9] = [
+    "GPL-3.0-or-later",
+    "GPL-2.0-or-later",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+];
+
+/// `None` for an empty (skipped) answer
+fn optional(input: &str) -> Option<String> {
+    Some(input.trim().to_string()).filter(|input| !input.is_empty())
+}
+
+/// The non-empty entries of a comma separated answer
+fn split_list(input: &str) -> Vec<String> {
+    input.split(',').filter_map(optional).collect()
+}
+
+/// Parses comma separated authors like `Jane Doe <jane@example.org>, John`
+fn parse_authors(input: &str) -> anyhow::Result<Vec<MagnetManifestV1MetadataAuthorsItem>> {
+    split_list(input)
+        .iter()
+        .map(|author| {
+            let (name, email) = match author.split_once('<') {
+                Some((name, email)) => {
+                    let email = email
+                        .strip_suffix('>')
+                        .with_context(|| format!("{author}: the email lacks a closing >"))?;
+                    ensure!(
+                        email.contains('@'),
+                        "{author}: {email} is not an email address"
+                    );
+                    (name.trim(), Some(email.trim().to_string()))
+                }
+                None => (author.as_str(), None),
+            };
+            ensure!(!name.is_empty(), "{author}: the name is missing");
+            Ok(MagnetManifestV1MetadataAuthorsItem {
+                name: name.to_string(),
+                email,
+            })
+        })
+        .collect()
+}
+
+/// `user.name <user.email>` of the git config, as default author
+fn git_author() -> Option<String> {
+    let config = git2::Config::open_default().ok()?;
+    let name = config.get_string("user.name").ok()?;
+    Some(match config.get_string("user.email") {
+        Ok(email) => format!("{name} <{email}>"),
+        Err(_) => name,
+    })
 }
 
 /// `>=<major>.<minor>` of the found sclang, or `None` without one (DESIGN.md
@@ -179,11 +338,11 @@ fn default_sclang_requirement() -> Option<String> {
     }) {
         Ok(Some(version)) => version,
         Ok(None) => {
-            warn!("Could not find sclang, so the manifest gets no `sclang` range");
+            warn!("Could not find sclang, so there is no default `sclang` range");
             return None;
         }
         Err(err) => {
-            warn!("{err:#}, so the manifest gets no `sclang` range");
+            warn!("{err:#}, so there is no default `sclang` range");
             return None;
         }
     };
@@ -289,6 +448,31 @@ mod tests {
         // an existing manifest never gets overwritten
         fs::write(dir.path().join(MAGNET_PROJECT_FILE), "").unwrap();
         assert!(check_project_dir(dir.path(), false).is_err());
+    }
+
+    #[test]
+    fn test_init_answers() {
+        assert_eq!(optional("  "), None);
+        assert_eq!(optional(" MIT "), Some("MIT".to_string()));
+        assert_eq!(split_list("synth, fx,, "), ["synth", "fx"]);
+        assert!(split_list("").is_empty());
+
+        assert!(parse_authors("").unwrap().is_empty());
+        let authors = parse_authors("Jane Doe <jane@example.org>, John").unwrap();
+        assert_eq!(
+            authors
+                .iter()
+                .map(|author| (author.name.as_str(), author.email.as_deref()))
+                .collect::<Vec<_>>(),
+            [("Jane Doe", Some("jane@example.org")), ("John", None)]
+        );
+        for invalid in [
+            "Jane <jane@example.org",
+            "Jane <jane>",
+            "<jane@example.org>",
+        ] {
+            assert!(parse_authors(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

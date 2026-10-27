@@ -59,6 +59,49 @@ fn serialize_toml_via_serde<T: serde::Serialize>(value: &T) -> anyhow::Result<to
     Ok(doc.into_table())
 }
 
+/// The `[metadata]` table of a new project, in the order an author reads it, with the
+/// authors as an inline array (serde would write them as `[[metadata.authors]]` tables)
+fn serialize_metadata(metadata: &MagnetManifestV1Metadata) -> toml_edit::Table {
+    let mut table = toml_edit::Table::new();
+    let strings = |values: &[String]| values.iter().collect::<toml_edit::Array>();
+    for (key, value) in [
+        ("summary", &metadata.summary),
+        ("description", &metadata.description),
+    ] {
+        if let Some(value) = value {
+            table[key] = toml_edit::value(value.as_str());
+        }
+    }
+    if !metadata.authors.is_empty() {
+        let authors: toml_edit::Array = metadata
+            .authors
+            .iter()
+            .map(|author| {
+                let mut inline = toml_edit::InlineTable::new();
+                inline.insert("name", author.name.as_str().into());
+                if let Some(email) = &author.email {
+                    inline.insert("email", email.as_str().into());
+                }
+                inline
+            })
+            .collect();
+        table["authors"] = toml_edit::value(authors);
+    }
+    for (key, value) in [
+        ("license", &metadata.license),
+        ("repository", &metadata.repository),
+        ("readme", &metadata.readme),
+    ] {
+        if let Some(value) = value {
+            table[key] = toml_edit::value(value.as_str());
+        }
+    }
+    if !metadata.tags.is_empty() {
+        table["tags"] = toml_edit::value(strings(&metadata.tags));
+    }
+    table
+}
+
 /// The `[artifact]` table of a new project, as a commented starting point for the author,
 /// see DESIGN.md "Packaging". It matches the folders of a new project (`classes/`,
 /// `HelpSource/`). A lepton or gluon also gets its source package and the binaries of
@@ -152,7 +195,7 @@ impl ProjectManifest {
         doc["package"] = toml_edit::Item::Table(package);
 
         let mut metadata = match &manifest.metadata {
-            Some(meta) => serialize_toml_via_serde(meta)?,
+            Some(meta) => serialize_metadata(meta),
             None => toml_edit::Table::new(),
         };
         metadata.decor_mut().set_prefix("\n");
@@ -238,11 +281,10 @@ impl ProjectManifest {
 impl MagnetManifestV1 {
     pub fn new(
         name: String,
-        description: Option<String>,
-        license: Option<String>,
         version: SemanticVersion,
         sclang: Option<String>,
         project_kind: MagnetManifestV1PackageKind,
+        metadata: MagnetManifestV1Metadata,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             Self::is_valid_name(&name),
@@ -250,16 +292,6 @@ impl MagnetManifestV1 {
         );
 
         let version = MagnetManifestV1PackageVersion::from_str(&version.to_string())?;
-
-        let metadata = MagnetManifestV1Metadata {
-            authors: vec![],
-            description,
-            license,
-            readme: None,
-            repository: None,
-            summary: None,
-            tags: vec![],
-        };
 
         Ok(MagnetManifestV1 {
             artifact: None,
@@ -529,17 +561,67 @@ baz = {}
         );
     }
 
+    #[test]
+    fn test_serialize_metadata() {
+        let metadata = MagnetManifestV1Metadata {
+            authors: vec![
+                MagnetManifestV1MetadataAuthorsItem {
+                    name: "Jane Doe".to_string(),
+                    email: Some("jane@example.org".to_string()),
+                },
+                MagnetManifestV1MetadataAuthorsItem {
+                    name: "John".to_string(),
+                    email: None,
+                },
+            ],
+            description: Some("Some longer text".to_string()),
+            license: Some("GPL-3.0-or-later".to_string()),
+            readme: None,
+            repository: Some("https://github.com/jane/foo".to_string()),
+            summary: Some("Does foo".to_string()),
+            tags: vec!["synth".to_string(), "fx".to_string()],
+        };
+        let manifest = MagnetManifestV1::new(
+            "foo".to_string(),
+            SemanticVersion::new(0, 1, 0),
+            None,
+            MagnetManifestV1PackageKind::Quark,
+            metadata,
+        )
+        .unwrap();
+        let content = ProjectManifest::serialize_manifest(&manifest).unwrap();
+        assert!(
+            content.contains(
+                "[metadata]\n\
+                 summary = \"Does foo\"\n\
+                 description = \"Some longer text\"\n\
+                 authors = [{ name = \"Jane Doe\", email = \"jane@example.org\" }, { name = \"John\" }]\n\
+                 license = \"GPL-3.0-or-later\"\n\
+                 repository = \"https://github.com/jane/foo\"\n\
+                 tags = [\"synth\", \"fx\"]\n"
+            ),
+            "{content}"
+        );
+
+        let parsed = MagnetManifestV1::from_string(&content)
+            .unwrap()
+            .metadata
+            .unwrap();
+        assert_eq!(parsed.authors.len(), 2);
+        assert_eq!(parsed.authors[0].email.as_deref(), Some("jane@example.org"));
+        assert_eq!(parsed.tags, ["synth", "fx"]);
+    }
+
     fn manifest_with_template(
         kind: MagnetManifestV1PackageKind,
         platform: Option<Platform>,
     ) -> MagnetManifestV1 {
         let manifest = MagnetManifestV1::new(
             "foo".to_string(),
-            None,
-            None,
             SemanticVersion::new(0, 1, 0),
             None,
             kind.clone(),
+            Default::default(),
         )
         .unwrap();
         let content = ProjectManifest::serialize_manifest(&manifest).unwrap()
