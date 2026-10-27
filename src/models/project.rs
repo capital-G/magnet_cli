@@ -189,6 +189,45 @@ impl Project {
     /// Without a `constraint`, the newest matching version is used as a caret requirement,
     /// e.g. `^1.1.0`.
     /// The manifest and the lock file are only written if the dependencies can be resolved.
+    /// Adds a git or legacy quark dependency (e.g. a legacy quark pinned to a commit), or
+    /// replaces the entry of that name, keeping its spelling. Like [Self::add_dependency],
+    /// the manifest and the lock file are only written if the dependencies can be resolved.
+    pub fn add_source_dependency(
+        &mut self,
+        provider: &GitClient,
+        name: String,
+        dependency: MagnetManifestV1DependenciesValue,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            MagnetManifestV1::is_valid_name(&name),
+            "{name} is not a valid package name"
+        );
+        let normalized_name = MagnetManifestV1::normalize_name(&name);
+        let name = self
+            .project_manifest
+            .get_manifest()
+            .dependencies
+            .keys()
+            .find(|key| MagnetManifestV1::normalize_name(key) == normalized_name)
+            .cloned()
+            .unwrap_or(name);
+
+        let mut dependencies = self.manifest_dependency_values();
+        dependencies.insert(name.clone(), dependency.clone());
+        let resolution = self
+            .resolve(provider, dependencies)
+            .with_context(|| format!("Failed to add dependency {name}"))?;
+        info!("Add {name}");
+
+        self.project_manifest
+            .add_dependency(NamedDependency { name, dependency })?;
+        self.write_lock(provider, &resolution)?;
+
+        self.reload_from_file()?;
+        self.write_language_config()?;
+        Ok(())
+    }
+
     pub fn add_dependency(
         &mut self,
         provider: &GitClient,
@@ -2832,6 +2871,76 @@ beta = "^1"
 
     fn file_url(path: &Path) -> Url {
         Url::from_directory_path(path).unwrap()
+    }
+
+    /// `magnet add foo --legacy-quark`: the pinned legacy quark gets into the manifest and the
+    /// lock, and adding it again replaces the entry (keeping its spelling)
+    #[test]
+    fn test_add_source_dependency() {
+        use crate::git_client::source::tests::commit_files;
+        use crate::models::project_manifest::MagnetManifestV1DependenciesValueObjectGit;
+        let root = tempfile::tempdir().unwrap();
+        let ddw = root.path().join("ddw");
+        let first = commit_files(&ddw, &[("DDW.sc", "DDW {}"), ("DDW.quark", "()")]);
+        let second = commit_files(&ddw, &[("DDW.sc", "DDW { new {} }")]);
+        let mut project = sources_project(root.path(), "alpha = \"^1\"\n");
+        let pinned = |sha: &str| MagnetManifestV1DependenciesValue::Object {
+            git: Some(MagnetManifestV1DependenciesValueObjectGit {
+                url: Some(file_url(&ddw).to_string()),
+                branch: None,
+                ref_: Some(sha.to_string()),
+                tag: None,
+            }),
+            ignore_quark_deps: None,
+            index: None,
+            legacy_quark: Some(true),
+            path: None,
+            version: None,
+        };
+
+        project
+            .add_source_dependency(&fixture_index(), "ddwCommon".into(), pinned(&first))
+            .unwrap();
+        let manifest =
+            fs::read_to_string(root.path().join("project").join(MAGNET_PROJECT_FILE)).unwrap();
+        assert!(
+            manifest.contains(&format!(
+                "ddwCommon = {{ legacy-quark = true, git = {{ ref = \"{first}\""
+            )),
+            "{manifest}"
+        );
+        let lock = fs::read_to_string(root.path().join("project").join(MAGNET_LOCK_FILE)).unwrap();
+        assert!(lock.contains(&format!("?ref={first}#{first}")), "{lock}");
+        assert!(lock.contains("[dependencies.alpha]"), "{lock}");
+
+        project
+            .add_source_dependency(&fixture_index(), "ddwcommon".into(), pinned(&second))
+            .unwrap();
+        let manifest =
+            fs::read_to_string(root.path().join("project").join(MAGNET_PROJECT_FILE)).unwrap();
+        assert!(
+            manifest.contains(&format!(
+                "ddwCommon = {{ legacy-quark = true, git = {{ ref = \"{second}\""
+            )),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("ddwcommon"), "{manifest}");
+
+        // nothing gets written if it can't be resolved
+        let err = project
+            .add_source_dependency(
+                &fixture_index(),
+                "broken".into(),
+                pinned("0000000000000000000000000000000000000000"),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Failed to add dependency broken"),
+            "{err:#}"
+        );
+        let after =
+            fs::read_to_string(root.path().join("project").join(MAGNET_PROJECT_FILE)).unwrap();
+        assert_eq!(after, manifest);
     }
 
     #[tokio::test]

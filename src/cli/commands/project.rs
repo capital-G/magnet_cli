@@ -6,16 +6,17 @@ use std::{
     str::FromStr,
 };
 
-use crate::cli::{CliContext, MagnetSubCommand};
-use anyhow::{ensure, Context};
+use crate::cli::{commands::import::ask_legacy_quark, CliContext, MagnetSubCommand};
+use anyhow::{bail, ensure, Context};
 use clap::{arg, Args, Parser};
 use inquire::{
     validator::{self, Validation},
     Confirm, CustomUserError, Select, Text,
 };
 use magnet::{
-    config::constants::{magnet_home, CACHE_DIR, MAGNET_PROJECT_FILE},
-    git_client::client::GitClient,
+    config::constants::{magnet_home, CACHE_DIR, GIT_DIR, MAGNET_PROJECT_FILE},
+    git_client::{client::GitClient, source::GitCache},
+    legacy::directory::{quarks_directory_url, QuarksDirectory},
     models::{
         directories::ProjectDirectory,
         gitignore::{missing_gitignore_entries, GITIGNORE_FILE},
@@ -33,6 +34,7 @@ use magnet::{
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
 use tracing::{trace, warn};
+use url::Url;
 
 #[derive(Debug, Parser)]
 pub struct ProjectInitArgs {
@@ -420,6 +422,15 @@ pub struct ProjectAddDependencyArgs {
     #[arg(long)]
     no_install: bool,
 
+    /// Add a legacy quark (from the quarks directory, or --git), pinned to a commit chosen
+    /// from its history
+    #[arg(long)]
+    legacy_quark: bool,
+
+    /// Repository of a legacy quark which isn't in the quarks directory (with --legacy-quark)
+    #[arg(long, requires = "legacy_quark")]
+    git: Option<Url>,
+
     #[command(flatten)]
     target: TargetArgs,
 
@@ -452,7 +463,23 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
         let (name, constraint) = parse_dependency(&self.dependency)?;
 
         let index = cli_context.git_client()?;
-        project.add_dependency(&index, name, constraint)?;
+        let cache = GitCache::new(magnet_home()?.join(GIT_DIR));
+        let directory = QuarksDirectory::new(quarks_directory_url()?, &cache);
+        if self.legacy_quark {
+            ensure!(
+                constraint.is_none(),
+                "A legacy quark has no versions, it gets pinned to a commit, so add it without @{}",
+                constraint.map(|c| c.to_string()).unwrap_or_default()
+            );
+            let dependency = ask_legacy_quark(&name, self.git.as_ref(), None, &directory, &cache)?
+                .context("Nothing added")?;
+            project.add_source_dependency(&index, name, dependency)?;
+        } else {
+            if index.get_releases(&name)?.is_none() && directory.lookup(&name)?.is_some() {
+                bail!("{name} is not in the magnet index, but a legacy quark: run `magnet add {name} --legacy-quark`");
+            }
+            project.add_dependency(&index, name, constraint)?;
+        }
         if !self.no_install {
             install_locked(&mut project, &index).await?;
         }

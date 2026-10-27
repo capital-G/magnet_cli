@@ -67,6 +67,20 @@ impl MagnetSubCommand for ImportLegacyQuarkArgs {
             .context("The .quark file has no folder")?
             .to_path_buf();
         check_project_dir(&project_path, false)?;
+        // before any question, since installing needs it; with --no-install, the dependencies
+        // can only be legacy quarks without an index
+        let index = match self.no_install {
+            false => Some(ctx.git_client().context(
+                "The dependencies get installed from the index, pass --no-install to only write magnet.toml",
+            )?),
+            true => match ctx.git_client() {
+                Ok(index) => Some(index),
+                Err(err) => {
+                    warn!("{err:#}, so the dependencies can only be legacy quarks");
+                    None
+                }
+            },
+        };
 
         let fields = parse_fields(&content)
             .map_err(|err| anyhow::anyhow!("Could not read {quark_file:?}: {err}"))?;
@@ -96,17 +110,6 @@ impl MagnetSubCommand for ImportLegacyQuarkArgs {
                 warn!("Could not read the dependencies of the .quark file ({err}), add them to magnet.toml by hand");
                 vec![]
             }
-        };
-        // without an index, every dependency is a legacy quark and nothing gets installed
-        let index = match dependencies.is_empty() && self.no_install {
-            true => None,
-            false => match ctx.git_client() {
-                Ok(index) => Some(index),
-                Err(err) => {
-                    warn!("{err:#}, so the dependencies can only be legacy quarks and don't get installed");
-                    None
-                }
-            },
         };
         let cache = GitCache::new(magnet_home()?.join(GIT_DIR));
         let directory = QuarksDirectory::new(quarks_directory_url()?, &cache);
@@ -211,12 +214,33 @@ fn ask_dependency(
             ))));
         }
     }
+    ask_legacy_quark(
+        name,
+        dependency.url.as_ref(),
+        dependency.refspec.as_deref(),
+        directory,
+        cache,
+    )
+}
 
-    let entry = match &dependency.url {
+/// Asks for the commit a legacy quark gets pinned to, from a list of the newest commits of
+/// its default branch, and returns it as `{ legacy-quark = true, git = { url, ref } }` (with a
+/// full SHA, which publishing needs). The repository is `url`, otherwise the quarks
+/// directory's, otherwise asked for (`None` if the author leaves it empty). Preselected is
+/// the commit of `refspec` (`name@refspec` of a `.quark` file), the directory's refspec, or the
+/// latest one.
+pub(super) fn ask_legacy_quark(
+    name: &str,
+    url: Option<&Url>,
+    refspec: Option<&str>,
+    directory: &QuarksDirectory,
+    cache: &GitCache,
+) -> anyhow::Result<Option<MagnetManifestV1DependenciesValue>> {
+    let entry = match url {
         Some(_) => None,
         None => directory.lookup(name)?,
     };
-    let url: Url = match (&dependency.url, &entry) {
+    let url: Url = match (url, &entry) {
         (Some(url), _) => url.clone(),
         (None, Some(entry)) => entry.url.clone(),
         (None, None) => {
@@ -235,9 +259,7 @@ fn ask_dependency(
         }
     };
     // the refspec of the .quark file wins over the directory's, like in SuperCollider
-    let reference = dependency
-        .refspec
-        .as_deref()
+    let reference = refspec
         .map(parse_refspec)
         .or(entry.map(|entry| entry.reference))
         .unwrap_or(GitReference::DefaultBranch);
