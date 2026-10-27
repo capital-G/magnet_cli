@@ -3,7 +3,11 @@ use std::{fs, path::PathBuf, str::FromStr};
 use anyhow::Context;
 use clap::Parser;
 use magnet::{
-    legacy::quark_parser::{parse_dependencies, parse_fields, QuarkDependency},
+    git_client::source::GitReference,
+    legacy::{
+        directory::parse_refspec,
+        quark_parser::{parse_dependencies, parse_fields, QuarkDependency},
+    },
     models::project_manifest::{
         MagnetManifestV1, MagnetManifestV1DependenciesValue,
         MagnetManifestV1DependenciesValueObjectGit, MagnetManifestV1PackageKind, ProjectLayout,
@@ -157,17 +161,12 @@ fn legacy_dependency(dependency: &QuarkDependency) -> MagnetManifestV1Dependenci
                 ref_: None,
                 tag: None,
             };
-            match refspec.as_deref() {
-                Some(refspec) => match refspec.strip_prefix("tags/") {
-                    Some(tag) => git.tag = Some(tag.to_string()),
-                    None if refspec.len() >= 7
-                        && refspec.chars().all(|c| c.is_ascii_hexdigit()) =>
-                    {
-                        git.ref_ = Some(refspec.to_string())
-                    }
-                    None => git.branch = Some(refspec.to_string()),
-                },
-                None => {}
+            // read like SuperCollider does (`Quark.validateRefspec`), which knows no branches
+            match refspec.as_deref().map(parse_refspec) {
+                Some(GitReference::Tag(tag)) => git.tag = Some(tag),
+                Some(GitReference::Ref(sha)) => git.ref_ = Some(sha),
+                Some(GitReference::Branch(branch)) => git.branch = Some(branch),
+                Some(GitReference::DefaultBranch) | None => {}
             }
             Some(git)
         }
@@ -254,17 +253,23 @@ mod tests {
             "{ legacy-quark = true }"
         );
         let url = Some("https://github.com/user/foo.git");
+        let sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string();
         assert_eq!(
             toml(&dependency("foo", url, Some("tags/1.0"))),
             "{ legacy-quark = true, git = { tag = \"1.0\", url = \"https://github.com/user/foo.git\" } }"
         );
         assert_eq!(
-            toml(&dependency("foo", url, Some("4b825dc"))),
-            "{ legacy-quark = true, git = { ref = \"4b825dc\", url = \"https://github.com/user/foo.git\" } }"
+            toml(&dependency("foo", url, Some(&sha))),
+            format!("{{ legacy-quark = true, git = {{ ref = \"{sha}\", url = \"https://github.com/user/foo.git\" }} }}")
+        );
+        // like `Quark.validateRefspec`: anything else is a tag, also without `tags/`
+        assert_eq!(
+            toml(&dependency("foo", url, Some("1.0"))),
+            "{ legacy-quark = true, git = { tag = \"1.0\", url = \"https://github.com/user/foo.git\" } }"
         );
         assert_eq!(
-            toml(&dependency("foo", url, Some("develop"))),
-            "{ legacy-quark = true, git = { branch = \"develop\", url = \"https://github.com/user/foo.git\" } }"
+            toml(&dependency("foo", url, Some("HEAD"))),
+            "{ legacy-quark = true, git = { url = \"https://github.com/user/foo.git\" } }"
         );
     }
 }
