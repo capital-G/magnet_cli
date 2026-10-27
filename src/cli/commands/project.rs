@@ -1,14 +1,19 @@
-use std::{env, error::Error, fs, path::PathBuf};
+use std::{
+    env,
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::cli::{CliContext, MagnetSubCommand};
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use clap::{arg, Args, Parser};
 use inquire::{
     validator::{self, Validation},
     Select, Text,
 };
 use magnet::{
-    config::constants::{magnet_home, CACHE_DIR},
+    config::constants::{magnet_home, CACHE_DIR, MAGNET_PROJECT_FILE},
     git_client::client::GitClient,
     models::{
         lock_file::LockDependency,
@@ -25,9 +30,9 @@ use tracing::{trace, warn};
 
 #[derive(Debug, Parser)]
 pub struct ProjectInitArgs {
-    /// Path of the project.
-    /// If not provided, a new folder with the name of the project
-    /// will be created in the current working directory.
+    /// Path of the project, created if it doesn't exist.
+    /// If not provided, magnet asks whether to create a new folder with the name
+    /// of the project or to use the current working directory.
     #[arg(
         long,
         default_value = None,
@@ -38,15 +43,77 @@ pub struct ProjectInitArgs {
     // so we don't have to maintain/implement two paths.
 }
 
+/// Where `magnet init` creates the project if no `--path` is given
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InitLocation {
+    NewFolder,
+    CurrentDirectory,
+}
+
+impl std::fmt::Display for InitLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InitLocation::NewFolder => write!(f, "In a new folder named after the project"),
+            InitLocation::CurrentDirectory => write!(f, "In the current directory"),
+        }
+    }
+}
+
+/// Fails if `path` already holds a magnet project, or if it should be a new folder
+/// but exists with content
+fn check_project_dir(path: &Path, new_folder: bool) -> anyhow::Result<()> {
+    ensure!(
+        !path.join(MAGNET_PROJECT_FILE).exists(),
+        "{path:?} already contains a {MAGNET_PROJECT_FILE}"
+    );
+    if new_folder && path.exists() {
+        let mut entries = fs::read_dir(path).with_context(|| format!("Could not read {path:?}"))?;
+        ensure!(
+            entries.next().is_none(),
+            "{path:?} already exists and isn't empty"
+        );
+    }
+    Ok(())
+}
+
+/// The folder name of `dir` if it's a valid package name, as default name of a project
+/// created in it
+fn default_project_name(dir: &Path) -> Option<String> {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| MagnetManifestV1::is_valid_name(name))
+}
+
 impl MagnetSubCommand for ProjectInitArgs {
     async fn run(self, _ctx: &CliContext) -> anyhow::Result<()> {
-        if let Some(ref path) = self.path {
-            if path.read_dir().iter().len() > 0 {
-                warn!(?path, "Specified project directory is not empty!");
-            }
+        let current_dir =
+            env::current_dir().context("Could not obtain current working directory")?;
+        // `None` means a new folder within the current directory, named after the project
+        let fixed_path = match self.path {
+            Some(path) => Some(path),
+            None => match Select::new(
+                "Where should the project be created?",
+                vec![InitLocation::NewFolder, InitLocation::CurrentDirectory],
+            )
+            .prompt()?
+            {
+                InitLocation::NewFolder => None,
+                InitLocation::CurrentDirectory => Some(current_dir.clone()),
+            },
+        };
+        if let Some(path) = &fixed_path {
+            check_project_dir(path, false)?;
         }
 
-        let project_name = Text::new("Name of the project:")
+        let mut name_prompt = Text::new("Name of the project:");
+        let default_name = fixed_path
+            .as_deref()
+            .map(|path| std::path::absolute(path).unwrap_or(path.to_path_buf()))
+            .and_then(|path| default_project_name(&path));
+        if let Some(name) = &default_name {
+            name_prompt = name_prompt.with_default(name);
+        }
+        let project_name = name_prompt
             .with_validator(validator::ValueRequiredValidator::default())
             .with_validator(
                 |input: &str| -> Result<Validation, Box<dyn Error + Send + Sync>> {
@@ -61,6 +128,16 @@ impl MagnetSubCommand for ProjectInitArgs {
             )
             .prompt()?;
 
+        let project_path = match fixed_path {
+            Some(path) => path,
+            None => {
+                let path = current_dir.join(&project_name);
+                check_project_dir(&path, true)?;
+                path
+            }
+        };
+        trace!(?project_path, "Use path");
+
         let project_kind = Select::new(
             "Project kind:",
             vec![
@@ -72,14 +149,6 @@ impl MagnetSubCommand for ProjectInitArgs {
         .prompt()?;
 
         // @todo select license?
-
-        let project_path = match self.path {
-            Some(path) => path,
-            None => std::env::current_dir()
-                .context("Could not obtain current working directory")?
-                .join(&project_name),
-        };
-        trace!(?project_path, "Use path");
 
         if !project_path.exists() {
             trace!(?project_path, "Create project directory");
@@ -202,6 +271,34 @@ mod tests {
             (name.as_str(), parsed.unwrap().to_string()),
             ("3Dj", "^1".to_string())
         );
+    }
+
+    #[test]
+    fn test_check_project_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(check_project_dir(&missing, true).is_ok());
+        assert!(check_project_dir(&missing, false).is_ok());
+
+        // an empty folder works both ways, a non-empty one only as the current directory
+        assert!(check_project_dir(dir.path(), true).is_ok());
+        fs::write(dir.path().join("README.md"), "").unwrap();
+        assert!(check_project_dir(dir.path(), true).is_err());
+        assert!(check_project_dir(dir.path(), false).is_ok());
+
+        // an existing manifest never gets overwritten
+        fs::write(dir.path().join(MAGNET_PROJECT_FILE), "").unwrap();
+        assert!(check_project_dir(dir.path(), false).is_err());
+    }
+
+    #[test]
+    fn test_default_project_name() {
+        assert_eq!(
+            default_project_name(Path::new("/home/me/MyQuark")).as_deref(),
+            Some("MyQuark")
+        );
+        assert_eq!(default_project_name(Path::new("/home/me/my.quark")), None);
+        assert_eq!(default_project_name(Path::new("/")), None);
     }
 }
 
