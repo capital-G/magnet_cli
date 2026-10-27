@@ -9,7 +9,12 @@ use crate::cli::{CliContext, MagnetSubCommand};
 
 /// Logs in to the magnet server of the index via OAuth2
 #[derive(Parser, Debug)]
-pub struct LoginArgs {}
+pub struct LoginArgs {
+    /// Paste the code shown after the login instead of receiving it on a local port, e.g.
+    /// on a machine without a browser
+    #[arg(long)]
+    no_browser: bool,
+}
 
 /// Logs out of the magnet server of the index by revoking the stored login
 #[derive(Parser, Debug)]
@@ -32,7 +37,10 @@ impl MagnetSubCommand for LoginArgs {
                 Err(err) => warn!("{err:#}"),
             }
         }
-        client.login(&path).await?;
+        match self.no_browser {
+            true => client.login_pasting_code(&path).await?,
+            false => client.login(&path).await?,
+        };
         info!("Logged in to {}", client.base_url);
         Ok(())
     }

@@ -1,7 +1,8 @@
 use std::{
     fs, io,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context};
@@ -9,6 +10,10 @@ use base64::Engine;
 use rand::{distr::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 use tracing::{debug, instrument, trace, warn};
 use url::Url;
 
@@ -152,11 +157,7 @@ struct PkceCodeChallenge {
 
 impl PkceCodeChallenge {
     pub fn new() -> Self {
-        let verifier: String = rand::rng()
-            .sample_iter(&Alphanumeric)
-            .take(64)
-            .map(char::from)
-            .collect();
+        let verifier = random_string(64);
 
         let digest = Sha256::digest(verifier.as_bytes());
 
@@ -204,13 +205,44 @@ impl MagnetClient<NoAuth> {
         Ok(client)
     }
 
-    /// Logs in via the browser and stores the token at `path`.
-    /// Requires manual intervention from the user by clicking on the URL.
+    /// Logs in via the browser and stores the token at `path`: the browser gets redirected
+    /// to a listener of this process on a random local port (RFC 8252), so nothing has to
+    /// be copied. The URL is also printed, in case no browser opens.
     #[instrument(skip(self))]
     pub async fn login(&self, path: &Path) -> anyhow::Result<MagnetClient<AuthToken>> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .context("Could not listen on a local port for the login")?;
+        let redirect_uri: Url = format!(
+            "http://127.0.0.1:{}{LOOPBACK_CALLBACK_PATH}",
+            listener.local_addr()?.port()
+        )
+        .parse()?;
         let pkce = PkceCodeChallenge::new();
+        let state = random_string(32);
 
-        let authorize_url = self.get_oauth_url(&pkce);
+        let authorize_url = self.get_oauth_url(&pkce, &redirect_uri, Some(&state));
+        println!(
+            "Log in to {} in the browser, it opens by itself. Otherwise open:",
+            self.base_url
+        );
+        println!("{authorize_url}");
+        open_browser(&authorize_url);
+
+        let code = tokio::time::timeout(LOGIN_TIMEOUT, receive_code(&listener, &state))
+            .await
+            .context("The login timed out, run `magnet login` again")??;
+        self.finish_login(&code, pkce, &redirect_uri, path).await
+    }
+
+    /// Logs in by pasting the code which the server shows after the login, for machines
+    /// without a browser (`magnet login --no-browser`)
+    #[instrument(skip(self))]
+    pub async fn login_pasting_code(&self, path: &Path) -> anyhow::Result<MagnetClient<AuthToken>> {
+        let pkce = PkceCodeChallenge::new();
+        let redirect_uri = self.display_token_uri();
+
+        let authorize_url = self.get_oauth_url(&pkce, &redirect_uri, None);
         println!("Open this URL, log in and paste the code shown afterwards:");
         println!("{authorize_url}");
 
@@ -223,7 +255,18 @@ impl MagnetClient<NoAuth> {
         if code.is_empty() {
             bail!("No code entered, the login was cancelled");
         }
-        let token_response = self.obtain_token(code, &pkce).await?;
+        self.finish_login(code, pkce, &redirect_uri, path).await
+    }
+
+    /// Exchanges the code for a token and stores it at `path`
+    async fn finish_login(
+        &self,
+        code: &str,
+        pkce: PkceCodeChallenge,
+        redirect_uri: &Url,
+        path: &Path,
+    ) -> anyhow::Result<MagnetClient<AuthToken>> {
+        let token_response = self.obtain_token(code, &pkce, redirect_uri).await?;
         let token = OAuthToken::new(token_response, pkce);
         token.store(path)?;
         Ok(self.with_state(AuthToken::Login {
@@ -236,30 +279,39 @@ impl MagnetClient<NoAuth> {
         self.base_url.join("/o/authorize/").unwrap()
     }
 
-    fn oauth_redirect_uri(&self) -> Url {
+    /// The server's page which shows the code to paste
+    fn display_token_uri(&self) -> Url {
         self.base_url.join("/users/display-token").unwrap()
     }
 
-    fn get_oauth_url(&self, pkce: &PkceCodeChallenge) -> Url {
+    fn get_oauth_url(
+        &self,
+        pkce: &PkceCodeChallenge,
+        redirect_uri: &Url,
+        state: Option<&str>,
+    ) -> Url {
         let mut authorize_url = self.oauth_authorize_url();
-        authorize_url
-            .query_pairs_mut()
-            .append_pair("response_type", "code")
-            .append_pair("code_challenge", &pkce.challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("client_id", OAUTH_APP_PUBLIC_KEY)
-            .append_pair("redirect_uri", self.oauth_redirect_uri().as_str())
-            .finish();
-
+        {
+            let mut query = authorize_url.query_pairs_mut();
+            query
+                .append_pair("response_type", "code")
+                .append_pair("code_challenge", &pkce.challenge)
+                .append_pair("code_challenge_method", "S256")
+                .append_pair("client_id", OAUTH_APP_PUBLIC_KEY)
+                .append_pair("redirect_uri", redirect_uri.as_str());
+            if let Some(state) = state {
+                query.append_pair("state", state);
+            }
+        }
         authorize_url
     }
 
-    /// Obtains the OAuthToken after user inserted the challenge
-    /// from the website.
+    /// Obtains the OAuthToken for the code of the login, with the same `redirect_uri`
     async fn obtain_token(
         &self,
         code: &str,
         pkce: &PkceCodeChallenge,
+        redirect_uri: &Url,
     ) -> anyhow::Result<TokenResponse> {
         let response = self
             .client
@@ -268,7 +320,7 @@ impl MagnetClient<NoAuth> {
                 ("client_id", OAUTH_APP_PUBLIC_KEY),
                 ("code", code),
                 ("code_verifier", &pkce.verifier),
-                ("redirect_uri", self.oauth_redirect_uri().as_str()),
+                ("redirect_uri", redirect_uri.as_str()),
                 ("grant_type", "authorization_code"),
             ])
             .send()
@@ -276,6 +328,129 @@ impl MagnetClient<NoAuth> {
             .context("Request to obtain OAuth token from server failed")?;
         parse_token_response(response).await
     }
+}
+
+/// The path of the loopback redirect URI, registered at the server as
+/// `http://127.0.0.1/callback` (any port, RFC 8252)
+const LOOPBACK_CALLBACK_PATH: &str = "/callback";
+
+/// How long `magnet login` waits for the browser
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+fn random_string(length: usize) -> String {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect()
+}
+
+/// Opens `url` in the default browser; failing silently, since the URL is printed anyway
+fn open_browser(url: &Url) {
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        // `start` takes the first quoted argument as the window title
+        command.args(["/C", "start", ""]);
+        command
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    command
+        .arg(url.as_str())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Err(err) = command.spawn() {
+        debug!("Could not open the browser: {err}");
+    }
+}
+
+/// Waits for the browser's redirect to the login's callback and returns its code. Other
+/// requests (e.g. `/favicon.ico`) get a 404; a wrong `state` or an `error` from the server
+/// ends the login.
+async fn receive_code(listener: &TcpListener, state: &str) -> anyhow::Result<String> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let Some(target) = read_request_target(&mut stream).await? else {
+            continue;
+        };
+        let url = Url::parse("http://127.0.0.1")?.join(&target)?;
+        if url.path() != LOOPBACK_CALLBACK_PATH {
+            respond(&mut stream, "404 Not Found", "Not found").await;
+            continue;
+        }
+        let query: std::collections::HashMap<String, String> =
+            url.query_pairs().into_owned().collect();
+        if query.get("state").map(String::as_str) != Some(state) {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "This login doesn't belong to the running `magnet login`.",
+            )
+            .await;
+            bail!("The browser returned a login which wasn't started by this `magnet login`");
+        }
+        if let Some(error) = query.get("error") {
+            respond(
+                &mut stream,
+                "200 OK",
+                "The login was cancelled, you can close this tab.",
+            )
+            .await;
+            bail!("The server refused the login: {error}");
+        }
+        let Some(code) = query.get("code") else {
+            respond(&mut stream, "400 Bad Request", "The redirect has no code.").await;
+            bail!("The server redirected without a code");
+        };
+        respond(
+            &mut stream,
+            "200 OK",
+            "Logged in to magnet, you can close this tab.",
+        )
+        .await;
+        return Ok(code.clone());
+    }
+}
+
+/// The target of an HTTP request (`/callback?code=…`), `None` if it isn't a GET request
+async fn read_request_target(stream: &mut TcpStream) -> anyhow::Result<Option<String>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    // the request line is all that's needed, a browser sends the headers right after it
+    while !buffer.windows(2).any(|pair| pair == b"\r\n") && buffer.len() < 16 * 1024 {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let request = String::from_utf8_lossy(&buffer);
+    let mut parts = request
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    Ok(match (parts.next(), parts.next()) {
+        (Some("GET"), Some(target)) => Some(target.to_string()),
+        _ => None,
+    })
+}
+
+async fn respond(stream: &mut TcpStream, status: &str, message: &str) {
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>magnet</title></head>\
+         <body style=\"font-family: sans-serif; margin: 3em\"><p>{message}</p></body></html>"
+    );
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    if let Err(err) = stream.write_all(response.as_bytes()).await {
+        debug!("Could not answer the browser: {err}");
+    }
+    let _ = stream.shutdown().await;
 }
 
 fn oauth_token_url(base_url: &Url) -> Url {
@@ -363,6 +538,102 @@ mod tests {
             refresh_token: "stored-refresh".to_string(),
             pkce_verifier: "verifier".to_string(),
         }
+    }
+
+    /// Starts `receive_code` on a local port, returns its URL and the running task
+    async fn callback_listener(
+        state: &'static str,
+    ) -> (Url, tokio::task::JoinHandle<anyhow::Result<String>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port())
+            .parse()
+            .unwrap();
+        let task = tokio::spawn(async move { receive_code(&listener, state).await });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn test_receive_code() {
+        let (url, task) = callback_listener("s1").await;
+        // e.g. the browser asking for a favicon first
+        let response = reqwest::get(url.join("/favicon.ico").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+        let response = reqwest::get(url.join("/callback?code=abc&state=s1").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(response.text().await.unwrap().contains("Logged in"));
+        assert_eq!(task.await.unwrap().unwrap(), "abc");
+    }
+
+    #[tokio::test]
+    async fn test_receive_code_refuses() {
+        // a redirect of another login
+        let (url, task) = callback_listener("s1").await;
+        let response = reqwest::get(url.join("/callback?code=abc&state=other").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("wasn't started by this"), "{err}");
+
+        // the server's error, e.g. a denied login
+        let (url, task) = callback_listener("s1").await;
+        reqwest::get(url.join("/callback?error=access_denied&state=s1").unwrap())
+            .await
+            .unwrap();
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("access_denied"), "{err}");
+    }
+
+    #[test]
+    fn test_oauth_url() {
+        let client =
+            MagnetClient::<NoAuth>::new("https://magnet.example.org/".parse::<Url>().unwrap());
+        let pkce = PkceCodeChallenge::new();
+        let redirect: Url = "http://127.0.0.1:53123/callback".parse().unwrap();
+        let url = client.get_oauth_url(&pkce, &redirect, Some("s1"));
+        let query: std::collections::HashMap<String, String> =
+            url.query_pairs().into_owned().collect();
+        assert_eq!(url.path(), "/o/authorize/");
+        assert_eq!(query["redirect_uri"], redirect.as_str());
+        assert_eq!(query["state"], "s1");
+        assert_eq!(query["code_challenge"], pkce.challenge);
+        // the paste flow has no state
+        let url = client.get_oauth_url(&pkce, &client.display_token_uri(), None);
+        assert!(!url.query().unwrap().contains("state="));
+    }
+
+    #[tokio::test]
+    async fn test_token_request_uses_the_redirect_uri() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/o/token/"))
+            .and(body_string_contains(
+                "redirect_uri=http%3A%2F%2F127.0.0.1%3A53123%2Fcallback",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "a", "expires_in": 3600, "token_type": "Bearer",
+                "scope": "read publish", "refresh_token": "r"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MagnetClient::<NoAuth>::new(server.uri().parse::<Url>().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("login.json");
+        client
+            .finish_login(
+                "code",
+                PkceCodeChallenge::new(),
+                &"http://127.0.0.1:53123/callback".parse().unwrap(),
+                &credentials,
+            )
+            .await
+            .unwrap();
+        assert_eq!(OAuthToken::load(&credentials).unwrap().access_token, "a");
     }
 
     #[test]
