@@ -257,7 +257,7 @@ impl Project {
 
     /// Writes the `sclang_conf.yaml` for the current state of the project
     /// Without a usable sclang, the config is still written, but without isolation
-    fn write_language_config(&self) -> anyhow::Result<()> {
+    pub fn write_language_config(&self) -> anyhow::Result<()> {
         let sclang = match Sclang::find() {
             Ok(Some(sclang)) => Some(sclang),
             Ok(None) => {

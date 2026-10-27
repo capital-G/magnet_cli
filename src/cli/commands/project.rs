@@ -318,8 +318,9 @@ pub(super) fn create_project(
         trace!(?project_path, "Create project directory");
         fs::create_dir_all(project_path).context("Could not create project directory")?;
     }
-    Project::create(project_path, manifest, options)?;
-    Ok(())
+    let project = Project::create(project_path, manifest, options)?;
+    // so the IDE can use the project right away, before the first install
+    project.write_language_config()
 }
 
 /// Suggestions for the license of a new project, SuperCollider's own first
