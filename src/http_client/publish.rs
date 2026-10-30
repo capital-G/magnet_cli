@@ -12,7 +12,7 @@ use crate::{
         basic::{AuthToken, MagnetClient},
         models::{ApiError, PublishedVersion},
     },
-    models::package::ArtifactTags,
+    models::package::ArtifactKey,
 };
 
 /// Header which carries the sha256 of an uploaded artifact, to guard the transfer
@@ -61,19 +61,20 @@ impl MagnetClient<AuthToken> {
         self.parse(response).await
     }
 
-    /// Uploads an artifact with its sha256, which the server compares with its own
+    /// Uploads the artifact `key` with its sha256, which the server compares with its own
     #[instrument(skip(self, content))]
     pub async fn upload_artifact(
         &self,
         name: &str,
         version: &str,
-        tags: &ArtifactTags,
+        key: &ArtifactKey,
         content: Vec<u8>,
         sha256: &str,
     ) -> anyhow::Result<Upload> {
-        let url = self
-            .version_url(name, version)?
-            .join(&format!("artifacts/{}/{}/", tags.abi, tags.platform))?;
+        let url = self.version_url(name, version)?.join(&format!(
+            "artifacts/{}/{}/{}/",
+            key.kind, key.tags.abi, key.tags.platform
+        ))?;
         // the whole body is sent with its Content-Length, which a WSGI server needs
         let response = self
             .send(

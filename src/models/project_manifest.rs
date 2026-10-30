@@ -13,7 +13,7 @@ use std::{
 use toml_edit::DocumentMut;
 use tracing::{error, instrument, trace, warn};
 
-use crate::models::package::{ArtifactKind, PackageKind};
+use crate::models::package::ArtifactKind;
 use crate::target::current_platform;
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
@@ -339,16 +339,6 @@ impl MagnetManifestV1 {
                 version,
             },
         })
-    }
-
-    /// The kind of the package in the index and the lock file, which still have one kind per
-    /// package: a lepton if the manifest has `[artifact.lepton]`, otherwise a quark.
-    /// They will list the artifact kinds of each version instead (new_implementation_plan.md C8.3).
-    pub fn package_kind(&self) -> PackageKind {
-        match self.lepton_platform_paths() {
-            Some(_) => PackageKind::Lepton,
-            None => PackageKind::Quark,
-        }
     }
 
     /// The kinds of artifacts the version contains, i.e. whose `[artifact]` tables it has.
@@ -793,7 +783,7 @@ baz = {}
         assert!(!content.contains("lepton"), "{content}");
         let manifest = MagnetManifestV1::from_string(&content).unwrap();
         assert_eq!(manifest.quark_paths(), ["**"]);
-        assert_eq!(manifest.package_kind(), PackageKind::Quark);
+        assert_eq!(manifest.artifact_kinds(), [ArtifactKind::Quark]);
     }
 
     #[test]
@@ -831,7 +821,10 @@ baz = {}
         ] {
             let content = template_content(platform, ProjectLayout::Magnet);
             let manifest = MagnetManifestV1::from_string(&uncommented_lepton(&content)).unwrap();
-            assert_eq!(manifest.package_kind(), PackageKind::Lepton);
+            assert_eq!(
+                manifest.artifact_kinds(),
+                [ArtifactKind::Quark, ArtifactKind::Lepton]
+            );
             assert_eq!(manifest.quark_paths(), ["classes/**/*.sc", "HelpSource/**"]);
             assert_eq!(
                 manifest.lepton_platform_paths().unwrap(),
@@ -844,21 +837,21 @@ baz = {}
     }
 
     #[test]
-    fn test_package_kind() {
+    fn test_artifact_kinds() {
         let manifest = |artifact: &str| {
             MagnetManifestV1::from_string(&format!(
                 "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n{artifact}"
             ))
             .unwrap()
         };
-        assert_eq!(manifest("").package_kind(), PackageKind::Quark);
+        assert!(manifest("").artifact_kinds().is_empty());
         assert_eq!(
-            manifest("[artifact.quark]\npaths = [\"*.sc\"]\n").package_kind(),
-            PackageKind::Quark
+            manifest("[artifact.quark]\npaths = [\"*.sc\"]\n").artifact_kinds(),
+            [ArtifactKind::Quark]
         );
         // a lepton without classes, e.g. one which only ships binaries
         let lepton = manifest("[artifact.lepton.platform-paths]\nmacos_arm64 = [\"*.scx\"]\n");
-        assert_eq!(lepton.package_kind(), PackageKind::Lepton);
+        assert_eq!(lepton.artifact_kinds(), [ArtifactKind::Lepton]);
         assert!(lepton.quark_paths().is_empty());
         assert_eq!(
             lepton.source().from,

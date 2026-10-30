@@ -463,9 +463,9 @@ mod tests {
                 "foo = {{ legacy-quark = true, git = {{ ref = \"{sha}\", url = \"{url}\" }} }}\n"
             )
         );
-        // publishable as it is
+        // publishable as it is, with the quark the import writes
         let manifest: MagnetManifestV1 = toml::from_str(&format!(
-            "magnet-version = 1\n[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\n{table}"
+            "magnet-version = 1\n[package]\nname = \"x\"\nversion = \"0.1.0\"\n[artifact.quark]\npaths = [\"**\"]\n[dependencies]\n{table}"
         ))
         .unwrap();
         magnet::packaging::publish::check_publishable(&manifest).unwrap();

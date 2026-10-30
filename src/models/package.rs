@@ -3,27 +3,6 @@ use std::{fmt, path::PathBuf, str::FromStr};
 use anyhow::{ensure, Context};
 use serde::{Deserialize, Serialize};
 
-/// The kind of a package in the publish flow, until it follows the kinds of a version
-/// (new_implementation_plan.md C8.6): a lepton if the version contains one, otherwise a quark
-/// (`MagnetManifestV1::package_kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PackageKind {
-    Quark,
-    Lepton,
-    Gluon,
-}
-
-impl fmt::Display for PackageKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            PackageKind::Quark => "quark",
-            PackageKind::Lepton => "lepton",
-            PackageKind::Gluon => "gluon",
-        })
-    }
-}
-
 /// The tags of an artifact, which are part of its filename and its `dl` URL,
 /// see DESIGN.md "Packaging".
 /// Binary artifacts use a platform of the schema's list (`Platform`) and the plugin API as abi
@@ -53,15 +32,9 @@ impl ArtifactTags {
         })
     }
 
-    /// The only artifact of a quark
+    /// The tags of the platform-independent artifacts, the source and the quark
     pub fn any() -> Self {
         Self::new("any", "any").unwrap()
-    }
-
-    /// The tags of the source in the publish API, until it takes the kind of an artifact
-    /// (new_implementation_plan.md C8.6)
-    pub fn source() -> Self {
-        Self::new("source", "any").unwrap()
     }
 }
 
@@ -170,7 +143,6 @@ mod tests {
     #[test]
     fn test_tags() {
         assert_eq!(ArtifactTags::any().to_string(), "any-any");
-        assert_eq!(ArtifactTags::source().to_string(), "source-any");
         assert!(ArtifactTags::new("api3_0", "macos_arm64").is_ok());
         assert_eq!(
             "api3_0-macos_arm64".parse::<ArtifactTags>().unwrap(),

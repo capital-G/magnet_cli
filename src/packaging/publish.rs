@@ -21,7 +21,7 @@ use crate::{
     },
     models::{
         directories::ProjectDirectory,
-        package::{ArtifactKey, ArtifactKind, ArtifactTags, PackageKind},
+        package::{ArtifactKey, ArtifactKind, ArtifactTags},
         project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue},
     },
     packaging::naming::artifact_file_name,
@@ -36,13 +36,8 @@ pub struct PublishArchive {
 }
 
 impl PublishArchive {
-    /// The tags the server's publish API knows. Until it takes the kind of an artifact
-    /// (new_implementation_plan.md C8.6), the source is uploaded as `source-any`.
-    fn upload_tags(&self) -> ArtifactTags {
-        match self.kind {
-            ArtifactKind::Source => ArtifactTags::source(),
-            _ => self.tags.clone(),
-        }
+    pub fn key(&self) -> ArtifactKey {
+        ArtifactKey::new(self.kind, self.tags.clone())
     }
 }
 
@@ -55,6 +50,10 @@ fn is_full_sha(rev: &str) -> bool {
 }
 
 pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
+    ensure!(
+        !manifest.artifact_kinds().is_empty(),
+        "{MAGNET_PROJECT_FILE} has neither [artifact.quark] nor [artifact.lepton], so the version would contain no kind of artifact"
+    );
     let mut problems = vec![];
     for (name, dependency) in &manifest.dependencies {
         let MagnetManifestV1DependenciesValue::Object {
@@ -190,17 +189,34 @@ fn file_name_artifact(path: &Path, prefix: &str) -> Option<(ArtifactKind, Artifa
     Some((kind.parse().ok()?, ArtifactTags::new(abi, platform).ok()?))
 }
 
-/// The artifact a version needs before it can be finalised, until the finalise rules of
-/// artifact kinds follow (new_implementation_plan.md C8.6)
-fn required_key(kind: &PackageKind) -> ArtifactKey {
-    match kind {
-        PackageKind::Quark => ArtifactKey::any(ArtifactKind::Quark),
-        _ => ArtifactKey::any(ArtifactKind::Source),
+/// What a version with `kinds` lacks before it can be finalised (DESIGN.md "Publishing a
+/// package"): its source, its quark if it contains one, and at least one binary of a lepton
+/// if it contains one, which other platforms can be added to later
+fn missing_for_finalise(kinds: &[ArtifactKind], artifacts: &[GitArtifact]) -> Vec<String> {
+    let keys: Vec<ArtifactKey> = artifacts
+        .iter()
+        .filter_map(GitArtifact::artifact_key)
+        .collect();
+    let has = |kind: ArtifactKind| keys.iter().any(|key| key.kind == kind);
+    let mut missing = vec![];
+    if !has(ArtifactKind::Source) {
+        missing.push("the source".to_string());
     }
+    for kind in kinds {
+        match kind {
+            ArtifactKind::Quark if !has(*kind) => missing.push("the quark".to_string()),
+            ArtifactKind::Lepton if !has(*kind) => {
+                missing.push("a binary of the lepton".to_string())
+            }
+            _ => {}
+        }
+    }
+    missing
 }
 
 /// Creates (or reuses) the draft, uploads the archives and finalises the version once it has
-/// its required artifact. Every step can be repeated, e.g. by the jobs of a CI matrix.
+/// the artifacts it needs ([missing_for_finalise]). Every step can be repeated, e.g. by the jobs
+/// of a CI matrix.
 pub async fn publish(
     client: &MagnetClient<AuthToken>,
     manifest: &MagnetManifestV1,
@@ -219,15 +235,15 @@ pub async fn publish(
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
+        let key = archive.key();
         match client
-            .upload_artifact(&name, &version, &archive.upload_tags(), content, &sha256)
+            .upload_artifact(&name, &version, &key, content, &sha256)
             .await
             .with_context(|| format!("Could not upload {file}"))?
         {
             Upload::Created => info!("Uploaded {file}"),
             Upload::AlreadyPresent => info!("{file} was already uploaded"),
         }
-        let key = ArtifactKey::new(archive.kind, archive.tags.clone());
         published
             .artifacts
             .retain(|artifact| artifact.key() != key.to_string());
@@ -240,15 +256,14 @@ pub async fn publish(
     }
 
     if published.state == VersionState::Draft {
-        let required = required_key(&manifest.package_kind());
-        if published
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.key() == required.to_string())
-        {
+        let missing = missing_for_finalise(&manifest.artifact_kinds(), &published.artifacts);
+        if missing.is_empty() {
             published = client.finalise(&name, &version).await?;
         } else {
-            info!("{name} {version} stays a draft until its {required} package is published");
+            info!(
+                "{name} {version} stays a draft until {} got published",
+                missing.join(" and ")
+            );
         }
     }
     Ok(published)
@@ -263,16 +278,25 @@ mod tests {
 
     use super::*;
 
-    /// a manifest whose `[artifact]` tables make it a package of `kind`
-    fn manifest(kind: &str, dependencies: &str) -> MagnetManifestV1 {
-        let artifact = match kind {
-            "lepton" => "[artifact.lepton]\nplatform-paths = {}\n",
-            _ => "",
-        };
+    /// a manifest whose `[artifact]` tables declare `kinds` (`quark`, `lepton` or both)
+    fn manifest(kinds: &str, dependencies: &str) -> MagnetManifestV1 {
+        let mut artifact = String::new();
+        if kinds.contains("quark") {
+            artifact.push_str("[artifact.quark]\npaths = [\"*.sc\"]\n");
+        }
+        if kinds.contains("lepton") {
+            artifact.push_str("[artifact.lepton]\nplatform-paths = {}\n");
+        }
         MagnetManifestV1::from_string(&format!(
             "magnet-version = 1\n[package]\nname = \"Foo_Bar\"\nversion = \"1.2.0\"\n{artifact}[dependencies]\n{dependencies}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn test_publishable_needs_a_kind() {
+        let err = check_publishable(&manifest("", "")).unwrap_err();
+        assert!(err.to_string().contains("no kind of artifact"), "{err}");
     }
 
     #[test]
@@ -426,10 +450,13 @@ mod tests {
             .with_state(AuthToken::Env("token".to_string()))
     }
 
-    async fn expect_upload(server: &MockServer, tags: &str, content: &[u8], status: u16) {
-        let (abi, platform) = tags.split_once('-').unwrap();
+    async fn expect_upload(server: &MockServer, key: &str, content: &[u8], status: u16) {
+        let key: ArtifactKey = key.parse().unwrap();
         Mock::given(method("PUT"))
-            .and(path(format!("{VERSIONS}1.2.0/artifacts/{abi}/{platform}/")))
+            .and(path(format!(
+                "{VERSIONS}1.2.0/artifacts/{}/{}/{}/",
+                key.kind, key.tags.abi, key.tags.platform
+            )))
             .and(header("authorization", "Bearer token"))
             .and(header(
                 crate::http_client::publish::SHA256_HEADER,
@@ -458,12 +485,14 @@ mod tests {
     }
 
     const QUARK: &str = "foo-bar-1.2.0-quark-any-any.tar.gz";
+    const SOURCE: &str = "foo-bar-1.2.0-source-any-any.tar.gz";
 
     #[tokio::test]
     async fn test_fresh_publish() {
-        let dir = dist(&[QUARK]);
+        let dir = dist(&[QUARK, SOURCE]);
         let server = server((201, version("draft", serde_json::json!([])))).await;
-        expect_upload(&server, "any-any", QUARK.as_bytes(), 201).await;
+        expect_upload(&server, "source-any-any", SOURCE.as_bytes(), 201).await;
+        expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 201).await;
         expect_finalise(&server, 1, serde_json::json!([])).await;
 
         let published = publish(
@@ -478,12 +507,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_again_is_fine() {
-        let dir = dist(&[QUARK]);
-        let sha = format!("{:x}", Sha256::digest(QUARK.as_bytes()));
-        let artifacts =
-            serde_json::json!([{"kind": "quark", "abi": "any", "platform": "any", "sha256": sha}]);
+        let dir = dist(&[QUARK, SOURCE]);
+        let sha = |file: &str| format!("{:x}", Sha256::digest(file.as_bytes()));
+        let artifacts = serde_json::json!([
+            {"kind": "source", "abi": "any", "platform": "any", "sha256": sha(SOURCE)},
+            {"kind": "quark", "abi": "any", "platform": "any", "sha256": sha(QUARK)},
+        ]);
         let server = server((200, version("final", artifacts))).await;
-        expect_upload(&server, "any-any", QUARK.as_bytes(), 200).await;
+        expect_upload(&server, "source-any-any", SOURCE.as_bytes(), 200).await;
+        expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 200).await;
         // a final version is not finalised again
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
@@ -503,7 +535,13 @@ mod tests {
         let dir = dist(&[binary]);
         let artifacts = serde_json::json!([{"kind": "source", "abi": "any", "platform": "any", "sha256": "abc"}]);
         let server = server((200, version("final", artifacts))).await;
-        expect_upload(&server, "api3_0-linux_x86_64", binary.as_bytes(), 201).await;
+        expect_upload(
+            &server,
+            "lepton-api3_0-linux_x86_64",
+            binary.as_bytes(),
+            201,
+        )
+        .await;
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
         let archives = publish_archives(dir.path(), &manifest("lepton", ""), &[]).unwrap();
@@ -518,7 +556,13 @@ mod tests {
         let binary = "foo-bar-1.2.0-lepton-api3_0-linux_x86_64.tar.gz";
         let dir = dist(&[binary]);
         let server = server((201, version("draft", serde_json::json!([])))).await;
-        expect_upload(&server, "api3_0-linux_x86_64", binary.as_bytes(), 201).await;
+        expect_upload(
+            &server,
+            "lepton-api3_0-linux_x86_64",
+            binary.as_bytes(),
+            201,
+        )
+        .await;
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
         let archives = publish_archives(dir.path(), &manifest("lepton", ""), &[]).unwrap();
@@ -528,11 +572,72 @@ mod tests {
         assert_eq!(published.state, VersionState::Draft);
     }
 
+    /// e.g. the jobs of a CI matrix: the first one finalises once the version has everything
+    #[tokio::test]
+    async fn test_quark_and_lepton_in_several_jobs() {
+        let binary = "foo-bar-1.2.0-lepton-api3_0-linux_x86_64.tar.gz";
+        let dir = dist(&[SOURCE, QUARK, binary]);
+        let server = server((201, version("draft", serde_json::json!([])))).await;
+        for (key, file) in [
+            ("source-any-any", SOURCE),
+            ("quark-any-any", QUARK),
+            ("lepton-api3_0-linux_x86_64", binary),
+        ] {
+            expect_upload(&server, key, file.as_bytes(), 201).await;
+        }
+        expect_finalise(&server, 1, serde_json::json!([])).await;
+        let manifest = manifest("quark lepton", "");
+        let archives = publish_archives(dir.path(), &manifest, &[]).unwrap();
+        let published = publish(&client(&server), &manifest, &archives)
+            .await
+            .unwrap();
+        assert_eq!(published.state, VersionState::Final);
+    }
+
+    #[test]
+    fn test_missing_for_finalise() {
+        let artifact = |key: &str| {
+            let key: ArtifactKey = key.parse().unwrap();
+            GitArtifact {
+                kind: key.kind.to_string(),
+                abi: key.tags.abi,
+                platform: key.tags.platform,
+                sha256: "abc".to_string(),
+            }
+        };
+        let both = [ArtifactKind::Quark, ArtifactKind::Lepton];
+        assert_eq!(
+            missing_for_finalise(&both, &[]),
+            ["the source", "the quark", "a binary of the lepton"]
+        );
+        assert_eq!(
+            missing_for_finalise(
+                &both,
+                &[artifact("source-any-any"), artifact("quark-any-any")]
+            ),
+            ["a binary of the lepton"]
+        );
+        // any platform will do, others can follow
+        assert!(missing_for_finalise(
+            &both,
+            &[
+                artifact("source-any-any"),
+                artifact("quark-any-any"),
+                artifact("lepton-api3_0-macos_arm64"),
+            ]
+        )
+        .is_empty());
+        assert!(
+            missing_for_finalise(&[ArtifactKind::Quark], &[artifact("quark-any-any")])
+                == ["the source"]
+        );
+    }
+
     #[tokio::test]
     async fn test_checksum_conflict() {
         let dir = dist(&[QUARK]);
         let server = server((200, version("final", serde_json::json!([])))).await;
-        expect_upload(&server, "any-any", QUARK.as_bytes(), 409).await;
+        expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 409).await;
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
         let err = publish(
