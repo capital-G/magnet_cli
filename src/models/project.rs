@@ -1929,8 +1929,26 @@ beta = "^1"
         Ok(project)
     }
 
+    /// The content of zeta's binary, which has to be the only one installed, in
+    /// `plugins/<platform>/<abi>/` like in its artifact
     fn installed_plugin(dir: &tempfile::TempDir) -> String {
-        fs::read_to_string(dir.path().join("magnet_packages/zeta/plugins/Zeta.scx")).unwrap()
+        let plugins = dir.path().join("magnet_packages/zeta/plugins");
+        let binaries: Vec<PathBuf> = walkdir::WalkDir::new(&plugins)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().strip_prefix(&plugins).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(binaries.len(), 1, "{binaries:?}");
+        let content = fs::read_to_string(plugins.join(&binaries[0])).unwrap();
+        // zeta's binaries contain their version, abi and platform
+        let tags: Vec<&str> = content.split_whitespace().skip(2).collect();
+        assert_eq!(
+            binaries[0],
+            PathBuf::from(format!("{}/{}/Zeta.scx", tags[1], tags[0])),
+            "{content}"
+        );
+        content
     }
 
     #[tokio::test]

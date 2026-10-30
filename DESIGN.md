@@ -122,13 +122,15 @@ If a list of plugin paths is given (`-U`, which sclang passes from `ServerOption
 
 Like for sclang, magnet therefore lists all paths explicitly: the `plugins` folder of SuperCollider itself, the plugins of each dependency, and the plugins of a lepton which is developed within the project (see below).
 Since scsynth also loads the plugins of all sub folders, only the folder `plugins/<platform>/<abi>` of each dependency which matches the server gets listed, i.e. of its platform and with the same major and the highest minor version of the plugin API which is not newer than the one of the server.
+The plugin API of the server is the one given via `--abi` or `MAGNET_ABI` when installing, e.g. for an older scsynth, otherwise the one of the version of the running SuperCollider.
+If it is not known, the newest binaries of each package get loaded and a warning is shown.
 These paths are set as `ServerOptions.ugenPluginsPath` of every server by a subclass of `ServerOptions` which magnet generates into `magnet_packages`: it becomes the default options class of `Server` and sets the paths on the servers which already exist.
 It gets compiled via the include paths of `sclang_conf.yaml`, so it also applies when the server gets booted from the IDE.
 Options which user code creates via `ServerOptions.new` keep the default plugin paths of SuperCollider.
 The class determines the paths when sclang compiles it, i.e. the `plugins` folder of the running SuperCollider (via `Platform.resourceDir`) and `magnet_packages` relative to its own file, so it does not depend on a found sclang and always matches the SuperCollider it runs in.
 It does not replace plugin paths which the user has set explicitly.
 
-When the project itself contains a lepton, magnet copies the binaries of its `[artifact.lepton]` for the current platform into `magnet_packages/.dev/<name>/plugins` during `magnet install` and `magnet run`, so a local build gets loaded by the server.
+When the project itself contains a lepton, magnet copies the binaries of its `[artifact.lepton]` for the current platform into `magnet_packages/.dev/<name>/plugins/<platform>/<abi>` during `magnet install` and `magnet run`, so a local build gets loaded by the server.
 Its classes do not need to be copied since the paths of `[artifact.quark]` of the project are already part of the include paths.
 
 ## Project manifest `magnet.toml`
