@@ -653,6 +653,44 @@ mod tests {
         assert!(err.contains("another checksum"), "{err}");
     }
 
+    /// e.g. after the server was reset: the stored login is removed, so `magnet login` doesn't
+    /// consider itself logged in anymore
+    #[tokio::test]
+    async fn test_rejected_login() {
+        let dir = dist(&[QUARK]);
+        let server = server((
+            401,
+            serde_json::json!({"detail": "Authentication credentials were not provided."}),
+        ))
+        .await;
+        let path = dir.path().join("credentials.json");
+        let token = crate::http_client::basic::OAuthToken {
+            // the mock server expects `Bearer token`
+            access_token: "token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: u64::MAX,
+            scope: "read publish".to_string(),
+            refresh_token: "stale-refresh".to_string(),
+            pkce_verifier: "verifier".to_string(),
+        };
+        token.store(&path).unwrap();
+        let client = MagnetClient::new(server.uri().parse::<url::Url>().unwrap()).with_state(
+            AuthToken::Login {
+                token,
+                path: path.clone(),
+            },
+        );
+        let err = publish(&client, &manifest("quark", ""), &quark_archive(&dir))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "The server rejected the stored login, so it was removed. Run `magnet login` again: Authentication credentials were not provided."
+        );
+        assert!(!path.exists());
+    }
+
     #[tokio::test]
     async fn test_rejected_token() {
         let dir = dist(&[QUARK]);

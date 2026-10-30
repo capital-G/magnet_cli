@@ -3,7 +3,7 @@
 
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 use url::Url;
 
 use crate::{
@@ -121,13 +121,18 @@ impl MagnetClient<AuthToken> {
             Err(_) => String::new(),
         };
         match status {
-            StatusCode::UNAUTHORIZED => match self.state {
+            StatusCode::UNAUTHORIZED => match &self.state {
                 AuthToken::Env(_) => {
                     anyhow::anyhow!("The server rejected {MAGNET_TOKEN_ENV}{detail}")
                 }
-                AuthToken::Login { .. } => {
+                // the stored token can't become valid again (e.g. the server was reset), so
+                // it's removed and the next `magnet login` logs in anew
+                AuthToken::Login { path, .. } => {
+                    if let Err(err) = std::fs::remove_file(path) {
+                        warn!("Could not remove the rejected login {path:?}: {err}");
+                    }
                     anyhow::anyhow!(
-                        "The server rejected the login, run `magnet login` again: {detail}"
+                        "The server rejected the stored login, so it was removed. Run `magnet login` again{detail}"
                     )
                 }
             },
