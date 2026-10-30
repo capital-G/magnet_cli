@@ -28,7 +28,7 @@ pub struct PluginApi {
 }
 
 impl PluginApi {
-    pub fn new(major: u32, minor: u32) -> Self {
+    pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
 
@@ -155,7 +155,13 @@ impl LazyTarget {
         }
     }
 
-    /// Only the platform, which doesn't need sclang, e.g. for overrides
+    /// The abi given via `--abi`/`MAGNET_ABI`, which may differ from the one of the found
+    /// sclang, e.g. for an older scsynth or a development build
+    pub fn abi_override(&self) -> anyhow::Result<Option<PluginApi>> {
+        self.abi.as_deref().map(str::parse).transpose()
+    }
+
+    /// Only the platform, which doesn't need sclang
     pub fn platform(&self) -> anyhow::Result<Platform> {
         match &self.platform {
             Some(platform) => parse_platform(platform),
@@ -219,15 +225,23 @@ fn detect_platform(os: &str, arch: &str) -> anyhow::Result<Platform> {
 /// The plugin API of a released SuperCollider version, see the table in DESIGN.md "Packaging".
 /// Releases before the plugin API was versioned semantically count as minor version 0.
 /// Other versions (e.g. development builds) can't be derived.
+/// The plugin API of the released SuperCollider versions: `(major, first minor, last minor,
+/// plugin API)`, see DESIGN.md "Packaging". The generated `MagnetServerOptions` class uses the
+/// same table (`src/models/server_options.rs`).
+pub const PLUGIN_APIS: [(u32, u32, u32, PluginApi); 2] = [
+    (3, 6, 8, PluginApi::new(2, 0)),
+    (3, 9, 14, PluginApi::new(3, 0)),
+];
+
 fn abi_for_version(version: &SemanticVersion) -> anyhow::Result<PluginApi> {
     let (major, minor, _) = (*version).into();
-    Ok(match (major, minor) {
-        (3, 6..=8) => PluginApi::new(2, 0),
-        (3, 9..=14) => PluginApi::new(3, 0),
-        _ => bail!(
-            "The abi tag of SuperCollider {version} is not known, set it via --abi or {MAGNET_ABI_ENV}, e.g. api4_0 (the plugin API version in include/plugin_interface/SC_InterfaceTable.h of its sources)"
-        ),
-    })
+    PLUGIN_APIS
+        .iter()
+        .find(|(sc_major, first, last, _)| major == *sc_major && (*first..=*last).contains(&minor))
+        .map(|(.., api)| *api)
+        .with_context(|| {
+            format!("The abi tag of SuperCollider {version} is not known, set it via --abi or {MAGNET_ABI_ENV}, e.g. api4_0 (the plugin API version in include/plugin_interface/SC_InterfaceTable.h of its sources)")
+        })
 }
 
 fn platforms() -> String {

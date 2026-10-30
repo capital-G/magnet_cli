@@ -701,6 +701,9 @@ pub struct ProjectRunArgs {
     )]
     path: Option<PathBuf>,
 
+    #[command(flatten)]
+    target: TargetArgs,
+
     /// Name of the entrypoint. If not provided, the entrypoints get listed.
     name: Option<String>,
 
@@ -715,7 +718,9 @@ impl MagnetSubCommand for ProjectRunArgs {
             Some(path) => path,
             None => env::current_dir()?,
         };
-        let project = Project::open(&project_path)?;
+        let mut project = Project::open(&project_path)?;
+        // the binaries of a lepton project get copied for this machine
+        project.set_target(self.target.lazy());
         let Some(name) = self.name else {
             for entrypoint in project.entrypoints() {
                 println!(

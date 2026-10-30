@@ -321,12 +321,14 @@ impl Project {
         write_server_options(
             &self.project_dir(ProjectDirectory::Packages),
             self.has_lepton(),
+            self.target.abi_override()?,
         )
     }
 
     /// If the project is a lepton, copies its binaries of `platform-paths` for this platform
-    /// into `magnet_packages/.dev/<name>/plugins`, so the server loads the local build
-    /// (DESIGN.md "Server plugins"). A missing build only warns, since it may not exist yet.
+    /// into `magnet_packages/.dev/<name>/plugins/<platform>/<abi>`, so the server loads the
+    /// local build (DESIGN.md "Server plugins"). A missing build only warns, since it may not
+    /// exist yet, and so does an unknown abi of this machine.
     fn copy_dev_plugins(&self) -> anyhow::Result<()> {
         if !self.has_lepton() {
             return Ok(());
@@ -341,13 +343,14 @@ impl Project {
             fs::remove_dir_all(&dev_dir)
                 .with_context(|| format!("Could not remove {dev_dir:?}"))?;
         }
-        let platform = match self.target.platform() {
-            Ok(platform) => platform,
+        let target = match self.target.get() {
+            Ok(target) => target,
             Err(err) => {
                 warn!("{err:#}, so the binaries of {name} don't get loaded by the server");
                 return Ok(());
             }
         };
+        let platform = target.platform;
         let (binaries, unmatched) = collect_binaries(&self.path, manifest, &platform)?;
         if binaries.is_empty() && unmatched.is_empty() {
             warn!("{MAGNET_PROJECT_FILE} has no `platform-paths` for {platform}, so the server doesn't load the binaries of {name}");
@@ -363,7 +366,7 @@ impl Project {
                 files: vec![],
                 binaries,
             },
-            PLUGINS_DIR,
+            &format!("{PLUGINS_DIR}/{platform}/{}", target.api),
         )?;
         for (path, source) in &entries {
             let destination = dev_dir.join(path);
@@ -1514,6 +1517,7 @@ mod tests {
 
     use super::*;
     use crate::models::server_options::server_options_class;
+    use crate::target::PluginApi;
 
     const MANIFEST: &str = r#"# my project
 magnet-version = 1
@@ -2205,7 +2209,9 @@ beta = "^1"
         install_for(&dir, target("macos_arm64", "api3_0"), false)
             .await
             .unwrap();
-        assert_eq!(class(&dir), server_options_class(false));
+        // the abi given for this machine is written into the class
+        let api = Some(PluginApi::new(3, 0));
+        assert_eq!(class(&dir), server_options_class(false, api));
 
         // a lepton project also loads its own build
         let (dir, _) = project(&format!(
@@ -2215,10 +2221,13 @@ beta = "^1"
         install_for(&dir, target("macos_arm64", "api3_0"), false)
             .await
             .unwrap();
-        assert_eq!(class(&dir), server_options_class(true));
+        assert_eq!(class(&dir), server_options_class(true, api));
         assert_eq!(
-            fs::read_to_string(dir.path().join("magnet_packages/.dev/foo/plugins/Foo.scx"))
-                .unwrap(),
+            fs::read_to_string(
+                dir.path()
+                    .join("magnet_packages/.dev/foo/plugins/macos_arm64/api3_0/Foo.scx")
+            )
+            .unwrap(),
             "build/Release/Foo.scx"
         );
         assert_eq!(installed_plugin(&dir), "zeta 1.0.0 api3_0 macos_arm64\n");
@@ -2230,7 +2239,9 @@ beta = "^1"
             "{LEPTON_MANIFEST}[[entrypoint]]\nname = \"noop\"\nkind = \"system\"\ncommand = \"exit 0\"\n"
         ));
         project.set_target(target("macos_arm64", "api3_0"));
-        let dev = dir.path().join("magnet_packages/.dev/foo/plugins");
+        let dev = dir
+            .path()
+            .join("magnet_packages/.dev/foo/plugins/macos_arm64/api3_0");
         let run = |project: &Project| {
             assert!(project
                 .run_entrypoint("noop", &[], no_sclang)
