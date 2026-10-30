@@ -21,7 +21,7 @@ use crate::{
     },
     models::{
         directories::ProjectDirectory,
-        package::{ArtifactKind, ArtifactTags, PackageKind},
+        package::{ArtifactKey, ArtifactKind, ArtifactTags, PackageKind},
         project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue},
     },
     packaging::naming::artifact_file_name,
@@ -190,11 +190,12 @@ fn file_name_artifact(path: &Path, prefix: &str) -> Option<(ArtifactKind, Artifa
     Some((kind.parse().ok()?, ArtifactTags::new(abi, platform).ok()?))
 }
 
-/// The artifact a version needs before it can be finalised
-fn required_tags(kind: &PackageKind) -> ArtifactTags {
+/// The artifact a version needs before it can be finalised, until the finalise rules of
+/// artifact kinds follow (new_implementation_plan.md C8.6)
+fn required_key(kind: &PackageKind) -> ArtifactKey {
     match kind {
-        PackageKind::Quark => ArtifactTags::any(),
-        _ => ArtifactTags::source(),
+        PackageKind::Quark => ArtifactKey::any(ArtifactKind::Quark),
+        _ => ArtifactKey::any(ArtifactKind::Source),
     }
 }
 
@@ -226,19 +227,20 @@ pub async fn publish(
             Upload::Created => info!("Uploaded {file}"),
             Upload::AlreadyPresent => info!("{file} was already uploaded"),
         }
-        let tags = archive.upload_tags();
+        let key = ArtifactKey::new(archive.kind, archive.tags.clone());
         published
             .artifacts
-            .retain(|artifact| artifact.key() != tags.to_string());
+            .retain(|artifact| artifact.key() != key.to_string());
         published.artifacts.push(GitArtifact {
-            abi: tags.abi,
-            platform: tags.platform,
+            kind: key.kind.to_string(),
+            abi: key.tags.abi,
+            platform: key.tags.platform,
             sha256,
         });
     }
 
     if published.state == VersionState::Draft {
-        let required = required_tags(&manifest.package_kind());
+        let required = required_key(&manifest.package_kind());
         if published
             .artifacts
             .iter()
@@ -478,7 +480,8 @@ mod tests {
     async fn test_publish_again_is_fine() {
         let dir = dist(&[QUARK]);
         let sha = format!("{:x}", Sha256::digest(QUARK.as_bytes()));
-        let artifacts = serde_json::json!([{"abi": "any", "platform": "any", "sha256": sha}]);
+        let artifacts =
+            serde_json::json!([{"kind": "quark", "abi": "any", "platform": "any", "sha256": sha}]);
         let server = server((200, version("final", artifacts))).await;
         expect_upload(&server, "any-any", QUARK.as_bytes(), 200).await;
         // a final version is not finalised again
@@ -498,7 +501,7 @@ mod tests {
     async fn test_append_to_final_version() {
         let binary = "foo-bar-1.2.0-lepton-api3_0-linux_x86_64.tar.gz";
         let dir = dist(&[binary]);
-        let artifacts = serde_json::json!([{"abi": "source", "platform": "any", "sha256": "abc"}]);
+        let artifacts = serde_json::json!([{"kind": "source", "abi": "any", "platform": "any", "sha256": "abc"}]);
         let server = server((200, version("final", artifacts))).await;
         expect_upload(&server, "api3_0-linux_x86_64", binary.as_bytes(), 201).await;
         expect_finalise(&server, 0, serde_json::json!([])).await;

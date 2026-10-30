@@ -23,7 +23,7 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{ArtifactKind, ArtifactTags, PackageArchive, PackageKind},
+        package::{ArtifactKey, ArtifactKind, ArtifactTags, PackageArchive, PackageKind},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             ProjectLayout,
@@ -474,7 +474,7 @@ impl Project {
                 lock_file
                     .dependencies
                     .iter()
-                    .all(|(name, dependency)| self.package_dir(&dependency.kind, name).is_dir())
+                    .all(|(name, dependency)| self.package_dir(&dependency.folder(), name).is_dir())
             });
         ensure!(
             installed,
@@ -794,7 +794,7 @@ impl Project {
             |name, version| match resolution.sources.get(name) {
                 Some(source) => Ok(LockDependency {
                     version: source.version,
-                    kind: source.kind.clone(),
+                    kinds: source.kinds.clone(),
                     source: source.source.clone(),
                     checksums: BTreeMap::new(),
                 }),
@@ -840,7 +840,7 @@ impl Project {
             lock_file.dependencies.get(name).is_some_and(|locked| {
                 locked.source == source.source
                     && locked.version == source.version
-                    && locked.kind == source.kind
+                    && locked.kinds == source.kinds
             })
         });
         let mut requirements = requirements(&dependencies)?;
@@ -939,7 +939,8 @@ impl Project {
             .download_all(&artifacts, PARALLEL_DOWNLOADS)
             .await?;
         for (artifact, archive) in artifacts.iter().zip(archives) {
-            self.install_package(artifact, &archive)?;
+            let folder = lock_file.dependencies[&artifact.name].folder();
+            self.install_package(&folder, artifact, &archive)?;
         }
         let mut installed = artifacts.len();
         for (name, dependency) in &lock_file.dependencies {
@@ -950,16 +951,15 @@ impl Project {
                 LockSource::Index => continue,
                 LockSource::Git { url, sha, .. } => {
                     ensure!(
-                        dependency.kind == PackageKind::Quark,
-                        "{name} from {url} is a {}, which can only be installed from the index or a path dependency",
-                        dependency.kind
+                        !dependency.kinds.contains(&ArtifactKind::Lepton),
+                        "{name} from {url} contains a lepton, which can only be installed from the index or a path dependency"
                     );
                     // exported first, since a magnet project only gets its selected files
                     let checkout = tempfile::tempdir()?;
                     self.git_cache.export(url, sha, checkout.path())?;
                     self.install_folder(
                         name,
-                        &dependency.kind,
+                        &dependency.folder(),
                         checkout.path(),
                         &format!("{url} at {}", &sha[..sha.len().min(7)]),
                     )?;
@@ -967,7 +967,7 @@ impl Project {
                 LockSource::Path(path) => {
                     self.install_folder(
                         name,
-                        &dependency.kind,
+                        &dependency.folder(),
                         &self.path.join(path),
                         &format!("{path:?}"),
                     )?;
@@ -977,7 +977,7 @@ impl Project {
         }
         for (name, folder) in &overrides {
             if let Some(dependency) = lock_file.dependencies.get(name) {
-                self.install_folder(name, &dependency.kind, folder, "[overrides]")?;
+                self.install_folder(name, &dependency.folder(), folder, "[overrides]")?;
                 installed += 1;
             }
         }
@@ -989,11 +989,13 @@ impl Project {
         Ok(())
     }
 
-    /// The artifact of a locked package which gets installed: the `any-any` artifact of a
-    /// quark, the binary of a lepton which this machine loads (DESIGN.md "Packaging"). If the
-    /// lock file has none, the binary may have been published later, so its checksum gets
-    /// taken from the index and added to `dependency`. Without any, the error message which
-    /// suggests a version with a binary (DESIGN.md "Missing binary").
+    /// The artifact of a locked package which gets installed: the binary of a lepton which
+    /// this machine loads, otherwise the quark (DESIGN.md "Packaging"). Until every kind gets
+    /// installed (new_implementation_plan.md C8.4), a version with a lepton only gets its
+    /// lepton artifact. If the lock file has no binary for this machine, it may have been
+    /// published later, so its checksum gets taken from the index and added to `dependency`.
+    /// Without any, the error message which suggests a version with a binary (DESIGN.md
+    /// "Missing binary").
     fn select_artifact(
         &self,
         provider: &GitClient,
@@ -1006,18 +1008,19 @@ impl Project {
             dependency.source
         );
         let version = dependency.version;
-        let tags = match dependency.kind {
-            PackageKind::Quark => ArtifactTags::any(),
+        let key = match dependency.folder() {
             PackageKind::Lepton => {
                 let target = self.target.get().with_context(|| {
-                    format!("{name} is a lepton, whose binary depends on the platform and abi of this machine")
+                    format!("{name} contains a lepton, whose binary depends on the platform and abi of this machine")
                 })?;
                 let locked: Vec<ArtifactTags> = dependency
                     .checksums
                     .keys()
-                    .filter_map(|key| key.parse().ok())
+                    .filter_map(|key| key.parse::<ArtifactKey>().ok())
+                    .filter(|key| key.kind == ArtifactKind::Lepton)
+                    .map(|key| key.tags)
                     .collect();
-                match target.best_artifact(&locked) {
+                let tags = match target.best_artifact(&locked) {
                     Some(tags) => tags.clone(),
                     None => match self.late_checksum(provider, name, dependency, target)? {
                         Some(tags) => tags,
@@ -1025,24 +1028,29 @@ impl Project {
                             return Ok(Err(self.missing_binary(provider, name, version, target)?))
                         }
                     },
-                }
+                };
+                ArtifactKey::new(ArtifactKind::Lepton, tags)
             }
-            PackageKind::Gluon => {
-                bail!("{name} is a gluon, which can not be installed yet")
+            _ => {
+                ensure!(
+                    dependency.kinds.contains(&ArtifactKind::Quark),
+                    "{name} {version} contains neither a quark nor a lepton"
+                );
+                ArtifactKey::any(ArtifactKind::Quark)
             }
         };
         let sha256 = dependency
             .checksums
-            .get(&tags.to_string())
+            .get(&key.to_string())
             .with_context(|| {
-                format!("{name} {version} has no {tags} artifact in {MAGNET_LOCK_FILE}")
+                format!("{name} {version} has no {key} artifact in {MAGNET_LOCK_FILE}")
             })?;
         Ok(Ok(Artifact {
             name: name.to_string(),
             version,
-            kind: dependency.kind.clone(),
-            abi: tags.abi,
-            platform: tags.platform,
+            kind: key.kind,
+            abi: key.tags.abi,
+            platform: key.tags.platform,
             sha256: sha256.clone(),
         }))
     }
@@ -1070,17 +1078,18 @@ impl Project {
                 );
             }
         }
-        let artifacts = release.artifact_tags();
+        let artifacts = release.artifact_tags(ArtifactKind::Lepton);
         let Some(tags) = target.best_artifact(&artifacts) else {
             return Ok(None);
         };
+        let key = ArtifactKey::new(ArtifactKind::Lepton, tags.clone());
         let sha256 = release
-            .checksum(tags)
-            .with_context(|| format!("{name} {version} has no {tags} artifact"))?;
-        info!("Add the checksum of {name} {version} {tags} to {MAGNET_LOCK_FILE}, which was published after locking");
+            .checksum(&key)
+            .with_context(|| format!("{name} {version} has no {key} artifact"))?;
+        info!("Add the checksum of {name} {version} {key} to {MAGNET_LOCK_FILE}, which was published after locking");
         dependency
             .checksums
-            .insert(tags.to_string(), sha256.to_string());
+            .insert(key.to_string(), sha256.to_string());
         Ok(Some(tags.clone()))
     }
 
@@ -1100,7 +1109,10 @@ impl Project {
             .unwrap_or_default()
             .into_iter()
             .filter(|release| {
-                !release.yanked && target.best_artifact(&release.artifact_tags()).is_some()
+                !release.yanked
+                    && target
+                        .best_artifact(&release.artifact_tags(ArtifactKind::Lepton))
+                        .is_some()
             })
             .map(|release| release.version)
             .max();
@@ -1207,8 +1219,13 @@ impl Project {
 
     /// Extracts the archive of a package next to its directory and swaps it in afterwards,
     /// so a broken archive never replaces a working package
-    fn install_package(&self, artifact: &Artifact, archive: &Path) -> anyhow::Result<()> {
-        self.swap_in(&artifact.kind, &artifact.name, |staging| {
+    fn install_package(
+        &self,
+        folder: &PackageKind,
+        artifact: &Artifact,
+        archive: &Path,
+    ) -> anyhow::Result<()> {
+        self.swap_in(folder, &artifact.name, |staging| {
             compression::extract(archive, staging)
         })
     }
@@ -1248,7 +1265,7 @@ impl Project {
         let locked: HashSet<PathBuf> = lock_file
             .dependencies
             .iter()
-            .map(|(name, dependency)| self.package_dir(&dependency.kind, name))
+            .map(|(name, dependency)| self.package_dir(&dependency.folder(), name))
             .collect();
 
         for kind in [PackageKind::Quark, PackageKind::Lepton, PackageKind::Gluon] {
@@ -1573,7 +1590,7 @@ beta = "^1"
             .unwrap()
             .unwrap();
         assert!(lock.contains(&format!(
-            "checksums = {{ any-any = \"{}\" }}",
+            "checksums = {{ quark-any-any = \"{}\" }}",
             alpha.artifacts[0].sha256
         )));
     }
@@ -1983,7 +2000,7 @@ beta = "^1"
         write_lock_file(dir, &[("zeta", "1.0.0")]);
         let path = dir.path().join(MAGNET_LOCK_FILE);
         let lock = fs::read_to_string(&path).unwrap();
-        let key = "api3_0-macos_arm64 = \"";
+        let key = "lepton-api3_0-macos_arm64 = \"";
         let start = lock.find(key).unwrap();
         let end = start + lock[start..].find(", ").unwrap() + 2;
         fs::write(&path, format!("{}{}", &lock[..start], &lock[end..])).unwrap();
@@ -2020,7 +2037,7 @@ beta = "^1"
         lock_without_macos(&dir);
         let path = dir.path().join(MAGNET_LOCK_FILE);
         let lock = fs::read_to_string(&path).unwrap();
-        let key = "api4_0-linux_x86_64 = \"";
+        let key = "lepton-api4_0-linux_x86_64 = \"";
         let start = lock.find(key).unwrap() + key.len();
         fs::write(
             &path,
@@ -3063,7 +3080,7 @@ beta = "^1"
         );
         assert!(
             lock.contains(&format!(
-                "[dependencies.bar]\nversion = \"0.0.0\"\nkind = \"quark\"\nsource = \"git+{}#{bar_sha}\"\n",
+                "[dependencies.bar]\nversion = \"0.0.0\"\nkinds = [\"quark\"]\nsource = \"git+{}#{bar_sha}\"\n",
                 file_url(&bar)
             )),
             "{lock}"
@@ -3138,7 +3155,7 @@ beta = "^1"
         assert!(quarks.join("alpha").is_dir());
         let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
         assert!(
-            lock.contains("[dependencies.local]\nversion = \"0.3.0\"\nkind = \"quark\"\nsource = \"../local\"\n"),
+            lock.contains("[dependencies.local]\nversion = \"0.3.0\"\nkinds = [\"quark\"]\nsource = \"../local\"\n"),
             "{lock}"
         );
 
@@ -3270,7 +3287,7 @@ beta = "^1"
         );
         fs::write(
             index.join("e/eta.jsonl"),
-            format!("{{\"name\": \"eta\", \"version\": \"0.1.0\", \"kind\": \"quark\", \"dependencies\": {{{dependency}}}, \"artifacts\": [{{\"abi\": \"any\", \"platform\": \"any\", \"sha256\": \"{sha256}\"}}]}}\n"),
+            format!("{{\"name\": \"eta\", \"version\": \"0.1.0\", \"kinds\": [\"quark\"], \"dependencies\": {{{dependency}}}, \"artifacts\": [{{\"kind\": \"quark\", \"abi\": \"any\", \"platform\": \"any\", \"sha256\": \"{sha256}\"}}]}}\n"),
         )
         .unwrap();
         let downloader = PackageDownloader::new(

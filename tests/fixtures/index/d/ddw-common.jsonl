@@ -1,1 +1,1 @@
-{"name": "ddw-common", "version": "0.1.0", "kind": "quark", "dependencies": {}, "yanked": false, "artifacts": [{"abi": "any", "platform": "any", "sha256": "b090cc2f387a4b08c33643d00fc5cac4b4930da554b033cd96bfa65f1a5e1e17"}]}
+{"name": "ddw-common", "version": "0.1.0", "kinds": ["quark"], "dependencies": {}, "yanked": false, "artifacts": [{"kind": "quark", "abi": "any", "platform": "any", "sha256": "b090cc2f387a4b08c33643d00fc5cac4b4930da554b033cd96bfa65f1a5e1e17"}]}

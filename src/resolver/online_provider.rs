@@ -15,7 +15,7 @@ use crate::git_client::{
     client::GitClient,
     models::{GitDependency, GitIndexDependencySource, GitRelease},
 };
-use crate::models::package::PackageKind;
+use crate::models::package::ArtifactKind;
 use crate::models::project_manifest::MagnetManifestV1;
 use crate::resolver::sources::SourcePackage;
 use crate::target::LazyTarget;
@@ -356,7 +356,7 @@ impl RootProvider<'_> {
             .collect();
         if !candidates
             .iter()
-            .any(|release| release.kind == PackageKind::Lepton)
+            .any(|release| release.kinds().contains(&ArtifactKind::Lepton))
         {
             return Ok(None);
         }
@@ -371,7 +371,11 @@ impl RootProvider<'_> {
         Ok(candidates
             .into_iter()
             .rev()
-            .find(|release| target.best_artifact(&release.artifact_tags()).is_some())
+            .find(|release| {
+                target
+                    .best_artifact(&release.artifact_tags(ArtifactKind::Lepton))
+                    .is_some()
+            })
             .map(|release| release.version))
     }
 }

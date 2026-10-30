@@ -3,15 +3,25 @@ use std::{fmt, path::PathBuf, str::FromStr};
 use anyhow::{ensure, Context};
 use serde::{Deserialize, Serialize};
 
-/// The kind of a package in the index and the lock file, see DESIGN.md "Package kinds".
-/// A project doesn't declare it anymore, it follows from its `[artifact]` tables
-/// (`MagnetManifestV1::package_kind`).
+/// The folder of an installed package, `magnet_packages/<kind>s/<name>`, which follows from
+/// the kinds of its version until all kinds share one folder (new_implementation_plan.md C8.4):
+/// a lepton if the version contains one, otherwise a quark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageKind {
     Quark,
     Lepton,
     Gluon,
+}
+
+impl PackageKind {
+    /// The folder of a version with these kinds
+    pub fn of_kinds(kinds: &[ArtifactKind]) -> Self {
+        match kinds.contains(&ArtifactKind::Lepton) {
+            true => PackageKind::Lepton,
+            false => PackageKind::Quark,
+        }
+    }
 }
 
 impl fmt::Display for PackageKind {
@@ -58,24 +68,21 @@ impl ArtifactTags {
         Self::new("any", "any").unwrap()
     }
 
-    /// The source package of a lepton or gluon
+    /// The tags of the source in the publish API, until it takes the kind of an artifact
+    /// (new_implementation_plan.md C8.6)
     pub fn source() -> Self {
         Self::new("source", "any").unwrap()
     }
-
-    pub fn is_source(&self) -> bool {
-        *self == Self::source()
-    }
 }
 
-/// `{abi}-{platform}`, as used for the checksums of the lock file
+/// `{abi}-{platform}`, the end of an artifact's filename
 impl fmt::Display for ArtifactTags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.abi, self.platform)
     }
 }
 
-/// Parses the `{abi}-{platform}` keys of the lock file's checksums
+/// Parses `{abi}-{platform}`
 impl FromStr for ArtifactTags {
     type Err = anyhow::Error;
 
@@ -89,7 +96,8 @@ impl FromStr for ArtifactTags {
 
 /// The kind of an artifact, which is part of its filename and its `dl` URL, see DESIGN.md
 /// "Artifact kinds". The source is no kind a version contains, but every version has one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     Source,
     Quark,
@@ -119,6 +127,42 @@ impl FromStr for ArtifactKind {
     }
 }
 
+/// Identifies an artifact within a version: `{kind}-{abi}-{platform}`, the keys of the lock
+/// file's checksums (DESIGN.md "Checksums")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactKey {
+    pub kind: ArtifactKind,
+    pub tags: ArtifactTags,
+}
+
+impl ArtifactKey {
+    pub fn new(kind: ArtifactKind, tags: ArtifactTags) -> Self {
+        Self { kind, tags }
+    }
+
+    /// The artifact of a platform-independent kind, i.e. the source or the quark
+    pub fn any(kind: ArtifactKind) -> Self {
+        Self::new(kind, ArtifactTags::any())
+    }
+}
+
+impl fmt::Display for ArtifactKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.kind, self.tags)
+    }
+}
+
+impl FromStr for ArtifactKey {
+    type Err = anyhow::Error;
+
+    fn from_str(key: &str) -> anyhow::Result<Self> {
+        let (kind, tags) = key
+            .split_once('-')
+            .with_context(|| format!("{key:?} is not of the form {{kind}}-{{abi}}-{{platform}}"))?;
+        Ok(Self::new(kind.parse()?, tags.parse()?))
+    }
+}
+
 /// An archive written by `magnet package`
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageArchive {
@@ -137,7 +181,6 @@ mod tests {
     fn test_tags() {
         assert_eq!(ArtifactTags::any().to_string(), "any-any");
         assert_eq!(ArtifactTags::source().to_string(), "source-any");
-        assert!(ArtifactTags::source().is_source());
         assert!(ArtifactTags::new("api3_0", "macos_arm64").is_ok());
         assert_eq!(
             "api3_0-macos_arm64".parse::<ArtifactTags>().unwrap(),
@@ -156,5 +199,34 @@ mod tests {
                 "{abi} {platform}"
             );
         }
+    }
+
+    #[test]
+    fn test_keys() {
+        let lepton = ArtifactKey::new(
+            ArtifactKind::Lepton,
+            ArtifactTags::new("api3_0", "macos_arm64").unwrap(),
+        );
+        assert_eq!(lepton.to_string(), "lepton-api3_0-macos_arm64");
+        assert_eq!(
+            "lepton-api3_0-macos_arm64".parse::<ArtifactKey>().unwrap(),
+            lepton
+        );
+        assert_eq!(
+            ArtifactKey::any(ArtifactKind::Source).to_string(),
+            "source-any-any"
+        );
+        // keys of other kinds or of the old `{abi}-{platform}` form
+        for key in ["gluon-any-any", "any-any", "api3_0-macos_arm64"] {
+            assert!(key.parse::<ArtifactKey>().is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn test_folder_of_kinds() {
+        use ArtifactKind::*;
+        assert_eq!(PackageKind::of_kinds(&[Quark]), PackageKind::Quark);
+        assert_eq!(PackageKind::of_kinds(&[Quark, Lepton]), PackageKind::Lepton);
+        assert_eq!(PackageKind::of_kinds(&[]), PackageKind::Quark);
     }
 }

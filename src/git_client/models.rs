@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use crate::models::{
-    package::{ArtifactTags, PackageKind},
+    package::{ArtifactKey, ArtifactKind, ArtifactTags},
     project_manifest::{MagnetManifestV1DependenciesValue, NamedDependency},
 };
 // This contains the structure of the json files stored in git
@@ -30,36 +30,69 @@ pub struct GitIndexConfig {
     pub api: Option<Url>,
 }
 
-/// abi and platform are kept as plain strings, so an index line which
-/// contains a platform unknown to this client can still be read.
+/// kind, abi and platform are kept as plain strings, so an index line which contains a kind
+/// or platform unknown to this client can still be read.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct GitArtifact {
+    pub kind: String,
     pub abi: String,
     pub platform: String,
     pub sha256: String,
 }
 
 impl GitArtifact {
-    /// identifies the artifact within a release, e.g. `any-any` or `source-any`
+    /// identifies the artifact within a release, e.g. `quark-any-any`, see [ArtifactKey]
     pub fn key(&self) -> String {
-        format!("{}-{}", self.abi, self.platform)
+        format!("{}-{}-{}", self.kind, self.abi, self.platform)
+    }
+
+    /// The parsed key, if the kind and tags are known
+    pub fn artifact_key(&self) -> Option<ArtifactKey> {
+        self.key().parse().ok()
     }
 }
 
 impl GitRelease {
-    /// The tags of the release's artifacts, without those which aren't valid tags
-    pub fn artifact_tags(&self) -> Vec<ArtifactTags> {
-        self.artifacts
+    /// The kinds of artifacts this version contains which this client knows (DESIGN.md
+    /// "Artifact kinds"), see [Self::unknown_kinds]
+    pub fn kinds(&self) -> Vec<ArtifactKind> {
+        self.kinds
             .iter()
-            .filter_map(|artifact| ArtifactTags::new(&artifact.abi, &artifact.platform).ok())
+            .filter_map(|kind| kind.parse().ok())
+            .filter(|kind| *kind != ArtifactKind::Source)
             .collect()
     }
 
-    /// The sha256 of the artifact with these tags
-    pub fn checksum(&self, tags: &ArtifactTags) -> Option<&str> {
+    /// The kinds this client doesn't know, e.g. of a newer magnet. Such a version can't be
+    /// installed, since it would be installed only partially.
+    pub fn unknown_kinds(&self) -> Vec<&str> {
+        self.kinds
+            .iter()
+            .filter(|kind| {
+                !matches!(
+                    kind.parse::<ArtifactKind>(),
+                    Ok(ArtifactKind::Quark | ArtifactKind::Lepton)
+                )
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The tags of the release's artifacts of `kind`, without those which aren't valid tags
+    pub fn artifact_tags(&self, kind: ArtifactKind) -> Vec<ArtifactTags> {
         self.artifacts
             .iter()
-            .find(|artifact| artifact.key() == tags.to_string())
+            .filter_map(GitArtifact::artifact_key)
+            .filter(|key| key.kind == kind)
+            .map(|key| key.tags)
+            .collect()
+    }
+
+    /// The sha256 of the artifact with this key
+    pub fn checksum(&self, key: &ArtifactKey) -> Option<&str> {
+        self.artifacts
+            .iter()
+            .find(|artifact| artifact.key() == key.to_string())
             .map(|artifact| artifact.sha256.as_str())
     }
 }
@@ -131,7 +164,8 @@ pub struct GitRelease {
         serialize_with = "serialize_semantic_version"
     )]
     pub version: SemanticVersion,
-    pub kind: PackageKind,
+    /// the kinds of artifacts of this version, as plain strings like the artifacts' kinds
+    pub kinds: Vec<String>,
     /// supported SuperCollider versions, see DESIGN.md "SuperCollider version"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sclang: Option<VersionReq>,

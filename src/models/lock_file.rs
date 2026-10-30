@@ -17,7 +17,7 @@ use crate::git_client::models::{
     deserialize_semantic_version, serialize_semantic_version, GitRelease,
 };
 use crate::git_client::source::GitReference;
-use crate::models::package::PackageKind;
+use crate::models::package::{ArtifactKind, PackageKind};
 use crate::models::project_manifest::MagnetManifestV1;
 use crate::resolver::online_provider::{ROOT_PACKAGE, SCLANG_PACKAGE};
 
@@ -45,11 +45,13 @@ pub struct LockDependency {
         serialize_with = "serialize_semantic_version"
     )]
     pub version: SemanticVersion,
-    /// determines the folder within `magnet_packages`, so no index lookup is necessary on install
-    pub kind: PackageKind,
+    /// the kinds of artifacts of this version (DESIGN.md "Artifact kinds"), so installing
+    /// knows which artifacts it needs without an index lookup, also when a binary is missing
+    pub kinds: Vec<ArtifactKind>,
     pub source: LockSource,
-    /// sha256 of every artifact of this version, keyed by `{abi}-{platform}`,
-    /// so the same lock file can be installed on every platform.
+    /// sha256 of every artifact of this version, keyed by `{kind}-{abi}-{platform}`
+    /// ([ArtifactKey](crate::models::package::ArtifactKey)), so the same lock file can be
+    /// installed on every platform.
     /// Empty for git (pinned by its commit) and path sources.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checksums: BTreeMap<String, String>,
@@ -135,16 +137,29 @@ impl From<LockSource> for String {
     }
 }
 
+impl LockDependency {
+    /// The folder the package gets installed into, see [PackageKind::of_kinds]
+    pub fn folder(&self) -> PackageKind {
+        PackageKind::of_kinds(&self.kinds)
+    }
+}
+
 impl From<&GitRelease> for LockDependency {
     fn from(release: &GitRelease) -> Self {
         Self {
             version: release.version,
-            kind: release.kind.clone(),
+            kinds: release.kinds(),
             source: LockSource::Index,
+            // artifacts of unknown kinds can't be installed, so they're left out
             checksums: release
                 .artifacts
                 .iter()
-                .map(|artifact| (artifact.key(), artifact.sha256.clone()))
+                .filter_map(|artifact| {
+                    Some((
+                        artifact.artifact_key()?.to_string(),
+                        artifact.sha256.clone(),
+                    ))
+                })
                 .collect(),
         }
     }
@@ -273,12 +288,12 @@ mod tests {
             ),
             _ => (
                 LockSource::Index,
-                BTreeMap::from([("any-any".to_string(), "abc".to_string())]),
+                BTreeMap::from([("quark-any-any".to_string(), "abc".to_string())]),
             ),
         };
         Ok(LockDependency {
             version: *version,
-            kind: PackageKind::Quark,
+            kinds: vec![ArtifactKind::Quark],
             source,
             checksums,
         })
@@ -312,20 +327,20 @@ mod tests {
              \n\
              [dependencies.bar]\n\
              version = \"0.2.0\"\n\
-             kind = \"quark\"\n\
+             kinds = [\"quark\"]\n\
              source = \"git+https://github.com/foo/bar.git?tag=v1#1a2b3c\"\n\
              \n\
              [dependencies.ddw-common]\n\
              version = \"1.2.3\"\n\
-             kind = \"quark\"\n\
+             kinds = [\"quark\"]\n\
              source = \"index\"\n\
-             checksums = { any-any = \"abc\" }\n\
+             checksums = { quark-any-any = \"abc\" }\n\
              \n\
              [dependencies.foo]\n\
              version = \"0.1.0\"\n\
-             kind = \"quark\"\n\
+             kinds = [\"quark\"]\n\
              source = \"index\"\n\
-             checksums = { any-any = \"abc\" }\n"
+             checksums = { quark-any-any = \"abc\" }\n"
         );
         assert!(!content.contains(ROOT_PACKAGE));
         assert!(!content.contains(SCLANG_PACKAGE));
@@ -335,20 +350,27 @@ mod tests {
     #[test]
     fn test_from_git_release() {
         let release: GitRelease = serde_json::from_str(
-            r#"{"name": "gamma", "version": "0.3.0", "kind": "lepton", "artifacts": [
-                {"abi": "api3_0", "platform": "linux_x86_64", "sha256": "abc"},
-                {"abi": "source", "platform": "any", "sha256": "def"}]}"#,
+            r#"{"name": "gamma", "version": "0.3.0", "kinds": ["quark", "lepton"], "artifacts": [
+                {"kind": "source", "abi": "any", "platform": "any", "sha256": "def"},
+                {"kind": "quark", "abi": "any", "platform": "any", "sha256": "ghi"},
+                {"kind": "lepton", "abi": "api3_0", "platform": "linux_x86_64", "sha256": "abc"},
+                {"kind": "gluon", "abi": "lang1_0", "platform": "linux_x86_64", "sha256": "jkl"}]}"#,
         )
         .unwrap();
         let dependency = LockDependency::from(&release);
         assert_eq!(dependency.version, SemanticVersion::new(0, 3, 0));
-        assert_eq!(dependency.kind, PackageKind::Lepton);
+        assert_eq!(
+            dependency.kinds,
+            [ArtifactKind::Quark, ArtifactKind::Lepton]
+        );
         assert_eq!(dependency.source, LockSource::Index);
+        // the artifact of an unknown kind is left out
         assert_eq!(
             dependency.checksums,
             BTreeMap::from([
-                ("api3_0-linux_x86_64".to_string(), "abc".to_string()),
-                ("source-any".to_string(), "def".to_string()),
+                ("lepton-api3_0-linux_x86_64".to_string(), "abc".to_string()),
+                ("quark-any-any".to_string(), "ghi".to_string()),
+                ("source-any-any".to_string(), "def".to_string()),
             ])
         );
     }

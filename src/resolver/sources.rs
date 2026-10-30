@@ -20,7 +20,7 @@ use crate::legacy::{
 };
 use crate::models::{
     lock_file::LockSource,
-    package::PackageKind,
+    package::ArtifactKind,
     project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue, NamedDependency},
 };
 
@@ -33,7 +33,8 @@ const PROJECT: &str = "the project";
 #[derive(Debug, Clone)]
 pub struct SourcePackage {
     pub version: SemanticVersion,
-    pub kind: PackageKind,
+    /// the kinds of its `magnet.toml`, a quark for a legacy quark
+    pub kinds: Vec<ArtifactKind>,
     pub source: LockSource,
     /// the dependencies of its `magnet.toml`, as requirements for the resolver
     pub dependencies: Vec<GitDependency>,
@@ -323,16 +324,11 @@ pub fn collect_sources(
                         manifest.package.name
                     );
                 }
-                let kind = manifest.package_kind();
-                match (&kind, &source) {
-                    (PackageKind::Quark, _) => {}
-                    (PackageKind::Lepton, LockSource::Path(_)) => {}
-                    (PackageKind::Lepton, _) => bail!(
-                        "{spelled} ({source}) is a lepton, whose binaries need a build. Build it locally and use a path dependency instead, e.g. {spelled} = {{ path = \"../{name}\" }}"
-                    ),
-                    (PackageKind::Gluon, _) => {
-                        bail!("{spelled} ({source}) is a gluon, which can not be installed yet")
-                    }
+                let kinds = manifest.artifact_kinds();
+                if kinds.contains(&ArtifactKind::Lepton) && !matches!(source, LockSource::Path(_)) {
+                    bail!(
+                        "{spelled} ({source}) contains a lepton, whose binaries need a build. Build it locally and use a path dependency instead, e.g. {spelled} = {{ path = \"../{name}\" }}"
+                    );
                 }
                 let nested_origin = match &source {
                     LockSource::Git { url, .. } => Origin::Git(url.clone()),
@@ -349,7 +345,7 @@ pub fn collect_sources(
                 }
                 SourcePackage {
                     version: SemanticVersion::try_from(manifest.package.version.clone())?,
-                    kind,
+                    kinds,
                     source,
                     dependencies: sorted(&manifest.dependencies)
                         .map(|(name, dependency)| {
@@ -402,7 +398,7 @@ pub fn collect_sources(
                 }
                 SourcePackage {
                     version: SemanticVersion::zero(),
-                    kind: PackageKind::Quark,
+                    kinds: vec![ArtifactKind::Quark],
                     source,
                     dependencies,
                     sclang: None,
@@ -629,7 +625,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(sources["bar"].version, SemanticVersion::zero());
-        assert_eq!(sources["bar"].kind, PackageKind::Quark);
+        assert_eq!(sources["bar"].kinds, [ArtifactKind::Quark]);
         assert!(sources["bar"].dependencies.is_empty());
     }
 

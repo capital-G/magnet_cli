@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, instrument, warn};
 use url::Url;
 
-use crate::models::package::PackageKind;
+use crate::models::package::ArtifactKind;
 use crate::models::project_manifest::MagnetManifestV1;
 
 /// A single artifact of a package version, as listed in the index
@@ -17,7 +17,7 @@ use crate::models::project_manifest::MagnetManifestV1;
 pub struct Artifact {
     pub name: String,
     pub version: SemanticVersion,
-    pub kind: PackageKind,
+    pub kind: ArtifactKind,
     pub abi: String,
     pub platform: String,
     pub sha256: String,
@@ -256,7 +256,7 @@ mod tests {
         Artifact {
             name: name.to_string(),
             version: SemanticVersion::new(1, 2, 3),
-            kind: PackageKind::Quark,
+            kind: ArtifactKind::Quark,
             abi: "any".to_string(),
             platform: "any".to_string(),
             sha256: sha256(content),

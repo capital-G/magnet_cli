@@ -172,7 +172,16 @@ impl GitClient {
                     .with_context(|| format!("Could not open git index file {release_path:?}"))?
                     .lines()
                     .filter(|line| !line.trim().is_empty())
-                    .filter_map(|line| match serde_json::from_str(line) {
+                    .filter_map(|line| match serde_json::from_str::<GitRelease>(line) {
+                        Ok(release) if !release.unknown_kinds().is_empty() => {
+                            warn!(
+                                "{} {} contains {}, which this version of magnet doesn't know, so it's skipped. Update magnet to use it",
+                                release.name,
+                                release.version,
+                                release.unknown_kinds().join(", ")
+                            );
+                            None
+                        }
                         Ok(release) => Some(release),
                         Err(err) => {
                             warn!(
@@ -207,7 +216,7 @@ impl GitClient {
 mod tests {
     use super::*;
     use crate::git_client::models::GitIndexDependency;
-    use crate::models::package::PackageKind;
+    use crate::models::package::ArtifactKind;
 
     fn fixture_index() -> GitClient {
         GitClient::open_local(
@@ -339,13 +348,13 @@ mod tests {
 
         let release = &releases[1];
         assert_eq!(release.version, SemanticVersion::new(1, 1, 0));
-        assert_eq!(release.kind, PackageKind::Quark);
+        assert_eq!(release.kinds(), [ArtifactKind::Quark]);
         assert!(!release.yanked);
         assert_eq!(
             release.dependencies.get("beta"),
             Some(&GitIndexDependency::Version("^1.0.0".parse().unwrap()))
         );
-        assert_eq!(release.artifacts[0].key(), "any-any");
+        assert_eq!(release.artifacts[0].key(), "quark-any-any");
 
         assert!(releases[2].yanked);
     }
@@ -370,12 +379,46 @@ mod tests {
             .get_release("gamma", &SemanticVersion::new(0, 3, 0))
             .unwrap()
             .unwrap();
-        assert_eq!(release.kind, PackageKind::Lepton);
+        assert_eq!(release.kinds(), [ArtifactKind::Lepton]);
         let keys: Vec<String> = release.artifacts.iter().map(|a| a.key()).collect();
         assert_eq!(
             keys,
-            ["api3_0-linux_x86_64", "api3_0-macos_arm64", "source-any"]
+            [
+                "lepton-api3_0-linux_x86_64",
+                "lepton-api3_0-macos_arm64",
+                "source-any-any"
+            ]
         );
+        assert_eq!(release.artifact_tags(ArtifactKind::Lepton).len(), 2);
+        assert!(release.artifact_tags(ArtifactKind::Quark).is_empty());
+    }
+
+    /// a version with a kind of a newer magnet would only be installed partially
+    #[test]
+    fn test_unknown_kinds_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index/config.json"),
+            dir.path().join("config.json"),
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("f")).unwrap();
+        std::fs::write(
+            dir.path().join("f/foo.jsonl"),
+            [
+                r#"{"name": "foo", "version": "1.0.0", "kinds": ["quark"], "artifacts": []}"#,
+                r#"{"name": "foo", "version": "2.0.0", "kinds": ["quark", "gluon"], "artifacts": []}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let releases = GitClient::open_local(dir.path().to_path_buf())
+            .unwrap()
+            .get_releases("foo")
+            .unwrap()
+            .unwrap();
+        let versions: Vec<_> = releases.iter().map(|release| release.version).collect();
+        assert_eq!(versions, [SemanticVersion::new(1, 0, 0)]);
     }
 
     #[test]

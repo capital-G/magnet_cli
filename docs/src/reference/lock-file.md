@@ -16,28 +16,28 @@ index-http = "https://static.magnet.example/index"
 
 [dependencies.foo]
 version = "0.1.0"
-kind = "quark"
+kinds = ["quark"]
 source = "index"
-checksums = { any-any = "abc" }
+checksums = { source-any-any = "987", quark-any-any = "abc" }
 
 [dependencies.bar]
 version = "0.0.0"
-kind = "quark"
+kinds = ["quark"]
 source = "git+https://git.com/favUser/someLegacyQuark.git#4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 [dependencies.baz]
 version = "0.3.0"
-kind = "lepton"
+kinds = ["quark", "lepton"]
 source = "../baz"
 
 [dependencies.zoo]
 version = "1.4.2"
-kind = "lepton"
+kinds = ["lepton"]
 source = "index"
-checksums = { api3_0-linux_x86_64 = "abc", api3_0-macos_arm64 = "def", source-any = "987" }
+checksums = { lepton-api3_0-linux_x86_64 = "abc", lepton-api3_0-macos_arm64 = "def", source-any-any = "987" }
 ```
 
-The kind is stored in the lock file such that magnet knows the folder of each dependency within `magnet_packages` without having to consult the index.
+The kinds of artifacts are stored in the lock file such that magnet knows which artifacts of each dependency it needs without having to consult the index, also if one is missing for the machine.
 
 Git dependencies and legacy quarks store their commit SHA in `source`.
 Legacy quarks have no semantic version, so their version is `0.0.0`.
@@ -46,7 +46,7 @@ Legacy quarks have no semantic version, so their version is `0.0.0`.
 
 ## Checksums
 
-`checksums` holds the sha256 of every artifact of that version known at lock time, keyed by `{abi}-{patform}`.
+`checksums` holds the sha256 of every artifact of that version known at lock time, keyed by `{kind}-{abi}-{platform}`.
 This way the lock file can be shared and used across platforms.
 Only packages from the index have checksums: local dependencies can't be pinned and git dependencies are identified by their commit SHA.
 Binaries which get published after the lock file was written are added to it during the installation (see [Missing binary](../guide/leptons.md#missing-binary)).
