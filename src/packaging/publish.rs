@@ -21,10 +21,8 @@ use crate::{
     },
     models::{
         directories::ProjectDirectory,
-        package::ArtifactTags,
-        project_manifest::{
-            MagnetManifestV1, MagnetManifestV1DependenciesValue, MagnetManifestV1PackageKind,
-        },
+        package::{ArtifactTags, PackageKind},
+        project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue},
     },
     packaging::naming::artifact_file_name,
 };
@@ -163,7 +161,7 @@ fn file_name_prefix(manifest: &MagnetManifestV1) -> anyhow::Result<String> {
     let any = artifact_file_name(
         &manifest.package.name,
         &version,
-        &manifest.package.kind,
+        &manifest.package_kind(),
         &tags,
     );
     Ok(any
@@ -183,9 +181,9 @@ fn file_name_tags(path: &Path, prefix: &str) -> Option<ArtifactTags> {
 }
 
 /// The artifact a version needs before it can be finalised
-fn required_tags(kind: &MagnetManifestV1PackageKind) -> ArtifactTags {
+fn required_tags(kind: &PackageKind) -> ArtifactTags {
     match kind {
-        MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
+        PackageKind::Quark => ArtifactTags::any(),
         _ => ArtifactTags::source(),
     }
 }
@@ -229,7 +227,7 @@ pub async fn publish(
     }
 
     if published.state == VersionState::Draft {
-        let required = required_tags(&manifest.package.kind);
+        let required = required_tags(&manifest.package_kind());
         if published
             .artifacts
             .iter()
@@ -252,9 +250,14 @@ mod tests {
 
     use super::*;
 
+    /// a manifest whose `[artifact]` tables make it a package of `kind`
     fn manifest(kind: &str, dependencies: &str) -> MagnetManifestV1 {
+        let artifact = match kind {
+            "lepton" => "[artifact.lepton]\nplatform-paths = {}\n",
+            _ => "",
+        };
         MagnetManifestV1::from_string(&format!(
-            "magnet-version = 1\n[package]\nname = \"Foo_Bar\"\nversion = \"1.2.0\"\nkind = \"{kind}\"\n[dependencies]\n{dependencies}"
+            "magnet-version = 1\n[package]\nname = \"Foo_Bar\"\nversion = \"1.2.0\"\n{artifact}[dependencies]\n{dependencies}"
         ))
         .unwrap()
     }

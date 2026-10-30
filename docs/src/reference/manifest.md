@@ -20,8 +20,6 @@ magnet-version = 1
 [package]
 name = "magnet-test"
 version = "0.1.0"
-# can either be quark or lepton (a server plugin)
-kind = "quark"
 # supported versions of SuperCollider
 sclang = ">=3.13"
 
@@ -52,8 +50,12 @@ outsidOfIndex = { git = { url = "http://my.git", branch = "main" } }
 # can not publish to index if local package present!
 myLocalDependency = { path = "../mySecretProject" }
 
-[artifact]
-global-paths = ["Classes/**.sc", "examples/*"]
+[artifact.quark]
+paths = ["Classes/**.sc", "examples/*"]
+
+# uncomment this once the project builds server plugins
+# [artifact.lepton]
+# platform-paths = { macos_arm64 = ["build/*.{scx,dylib}"] }
 
 [metadata]
 license = "GPL-3.0"
@@ -81,13 +83,15 @@ The `kind` of an entrypoint defaults to `sclang`, whose `command` is the path of
 A `system` entrypoint runs its `command` via the shell.
 Both run in the project root, and additional arguments are passed on, e.g. `magnet run test a b`.
 
-## Package kinds
+## Artifact kinds
 
-A package can be one of 2 kinds, *quark* or *lepton* (aka server plugins).
+A version of a package contains one or more kinds of artifacts, *quark* (sclang classes) or *lepton* (aka server plugins), each declared by its table in `[artifact]` (see [Packaging](../guide/publishing.md#packaging)).
 In the future it would be possible to extend this e.g. with *gluon*, which would be a binary plugin for sclang.
+Each kind has its own artifacts and its own abi tag, such that the binaries of different kinds never need to be combined.
 
-The kind of package does not take part in the dependency resolution, there can only be one kind of package for a given name.
-In case a future *gluon* package also requires a *lepton* package, these should be two separate magnet projects which depend on each other.
+The kinds do not take part in the dependency resolution and can change between versions, e.g. a quark can also contain a lepton from its next version on.
+A package can also be split into several packages, e.g. a lepton without classes on which a quark depends, but this is never required.
+The source is not a kind, since every version has one.
 
 ## Valid package names
 

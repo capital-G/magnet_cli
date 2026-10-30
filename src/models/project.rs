@@ -23,10 +23,10 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{ArtifactTags, PackageArchive},
+        package::{ArtifactTags, PackageArchive, PackageKind},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
-            MagnetManifestV1PackageKind, ProjectLayout,
+            ProjectLayout,
         },
         server_options::{write_server_options, DEV_DIR},
     },
@@ -320,7 +320,7 @@ impl Project {
             .write(&self.path)?;
         write_server_options(
             &self.project_dir(ProjectDirectory::Packages),
-            *self.kind() == MagnetManifestV1PackageKind::Lepton,
+            self.kind() == PackageKind::Lepton,
         )
     }
 
@@ -328,7 +328,7 @@ impl Project {
     /// into `magnet_packages/.dev/<name>/plugins`, so the server loads the local build
     /// (DESIGN.md "Server plugins"). A missing build only warns, since it may not exist yet.
     fn copy_dev_plugins(&self) -> anyhow::Result<()> {
-        if *self.kind() != MagnetManifestV1PackageKind::Lepton {
+        if self.kind() != PackageKind::Lepton {
             return Ok(());
         }
         let manifest = self.project_manifest.get_manifest();
@@ -387,8 +387,9 @@ impl Project {
         &self.path
     }
 
-    pub fn kind(&self) -> &MagnetManifestV1PackageKind {
-        &self.project_manifest.get_manifest().package.kind
+    /// The kind of the project in the index, see [MagnetManifestV1::package_kind]
+    pub fn kind(&self) -> PackageKind {
+        self.project_manifest.get_manifest().package_kind()
     }
 
     /// The entrypoints of the project, which can be started via `magnet run`
@@ -948,7 +949,7 @@ impl Project {
                 LockSource::Index => continue,
                 LockSource::Git { url, sha, .. } => {
                     ensure!(
-                        dependency.kind == MagnetManifestV1PackageKind::Quark,
+                        dependency.kind == PackageKind::Quark,
                         "{name} from {url} is a {}, which can only be installed from the index or a path dependency",
                         dependency.kind
                     );
@@ -1005,8 +1006,8 @@ impl Project {
         );
         let version = dependency.version;
         let tags = match dependency.kind {
-            MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
-            MagnetManifestV1PackageKind::Lepton => {
+            PackageKind::Quark => ArtifactTags::any(),
+            PackageKind::Lepton => {
                 let target = self.target.get().with_context(|| {
                     format!("{name} is a lepton, whose binary depends on the platform and abi of this machine")
                 })?;
@@ -1025,7 +1026,7 @@ impl Project {
                     },
                 }
             }
-            MagnetManifestV1PackageKind::Gluon => {
+            PackageKind::Gluon => {
                 bail!("{name} is a gluon, which can not be installed yet")
             }
         };
@@ -1138,7 +1139,7 @@ impl Project {
     fn install_folder(
         &self,
         name: &str,
-        kind: &MagnetManifestV1PackageKind,
+        kind: &PackageKind,
         folder: &Path,
         origin: &str,
     ) -> anyhow::Result<()> {
@@ -1151,9 +1152,9 @@ impl Project {
             true => {
                 let manifest = ProjectManifest::open(manifest_path)?.get_manifest().clone();
                 ensure!(
-                    manifest.package.kind == *kind,
+                    manifest.package_kind() == *kind,
                     "{name} from {folder:?} ({origin}) is a {}, but {name} is a {kind}",
-                    manifest.package.kind
+                    manifest.package_kind()
                 );
                 if MagnetManifestV1::normalize_name(&manifest.package.name) != name {
                     warn!(
@@ -1164,7 +1165,7 @@ impl Project {
                 // only the platform matters for selecting the files, so a local build also
                 // works with a SuperCollider whose abi isn't known
                 let tags = match kind {
-                    MagnetManifestV1PackageKind::Quark => ArtifactTags::any(),
+                    PackageKind::Quark => ArtifactTags::any(),
                     _ => ArtifactTags::new("any", &self.target.platform()?.to_string())?,
                 };
                 package_entries(folder, &collect_files(folder, &manifest, &tags)?)?
@@ -1187,7 +1188,7 @@ impl Project {
     }
 
     /// `magnet_packages/<kind>s/<name>`
-    fn package_dir(&self, kind: &MagnetManifestV1PackageKind, name: &str) -> PathBuf {
+    fn package_dir(&self, kind: &PackageKind, name: &str) -> PathBuf {
         self.project_dir(ProjectDirectory::Packages)
             .join(format!("{kind}s"))
             .join(MagnetManifestV1::normalize_name(name))
@@ -1204,7 +1205,7 @@ impl Project {
     /// Fills a new directory via `fill` and replaces the package directory by it afterwards
     fn swap_in(
         &self,
-        kind: &MagnetManifestV1PackageKind,
+        kind: &PackageKind,
         name: &str,
         fill: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
@@ -1239,11 +1240,7 @@ impl Project {
             .map(|(name, dependency)| self.package_dir(&dependency.kind, name))
             .collect();
 
-        for kind in [
-            MagnetManifestV1PackageKind::Quark,
-            MagnetManifestV1PackageKind::Lepton,
-            MagnetManifestV1PackageKind::Gluon,
-        ] {
+        for kind in [PackageKind::Quark, PackageKind::Lepton, PackageKind::Gluon] {
             let kind_dir = self
                 .project_dir(ProjectDirectory::Packages)
                 .join(format!("{kind}s"));
@@ -1271,11 +1268,11 @@ impl Project {
     /// gluon (reserved).
     pub fn create_packages(&self) -> anyhow::Result<Vec<PackageArchive>> {
         let tags = match self.kind() {
-            MagnetManifestV1PackageKind::Quark => vec![ArtifactTags::any()],
-            MagnetManifestV1PackageKind::Lepton => {
+            PackageKind::Quark => vec![ArtifactTags::any()],
+            PackageKind::Lepton => {
                 vec![ArtifactTags::source(), self.target.get()?.tags()]
             }
-            MagnetManifestV1PackageKind::Gluon => vec![ArtifactTags::source()],
+            PackageKind::Gluon => vec![ArtifactTags::source()],
         };
         tags.iter().map(|tags| self.create_package(tags)).collect()
     }
@@ -1287,9 +1284,8 @@ impl Project {
     #[instrument(skip(self))]
     pub fn create_package(&self, tags: &ArtifactTags) -> anyhow::Result<PackageArchive> {
         let manifest = self.project_manifest.get_manifest();
-        let kind = &manifest.package.kind;
         ensure!(
-            *kind != MagnetManifestV1PackageKind::Quark || *tags == ArtifactTags::any(),
+            manifest.package_kind() != PackageKind::Quark || *tags == ArtifactTags::any(),
             "A quark only has an {} artifact, not {tags}",
             ArtifactTags::any()
         );
@@ -1301,7 +1297,7 @@ impl Project {
         let package_path = dist.join(artifact_file_name(
             &manifest.package.name,
             &SemanticVersion::try_from(manifest.package.version.clone())?,
-            kind,
+            &manifest.package_kind(),
             tags,
         ));
         // written next to the target and renamed, so a failure leaves no half-written package
@@ -1454,7 +1450,6 @@ magnet-version = 1
 [package]
 name = "my-project"
 version = "0.1.0"
-kind = "quark"
 
 [dependencies]
 # keep this comment
@@ -1557,8 +1552,8 @@ beta = "^1"
     fn test_add_respects_sclang_range() {
         let with_sclang = |sclang: &str| {
             MANIFEST.replace(
-                "kind = \"quark\"\n",
-                &format!("kind = \"quark\"\nsclang = \"{sclang}\"\n"),
+                "version = \"0.1.0\"\n",
+                &format!("version = \"0.1.0\"\nsclang = \"{sclang}\"\n"),
             )
         };
 
@@ -1838,7 +1833,8 @@ beta = "^1"
         assert!(packages.join("quarks/beta").exists());
     }
 
-    const ZETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\n";
+    const ZETA: &str =
+        "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\n";
 
     /// installs for the given target, see the `zeta` lepton of the fixture index
     async fn install_for(
@@ -2024,7 +2020,7 @@ beta = "^1"
         fs::create_dir(dir.path().join("local")).unwrap();
         fs::write(
             dir.path().join("local/magnet.toml"),
-            "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"classes/*.sc\"]\n[artifact.platform-paths]\nmacos_arm64 = [\"build/*.scx\"]\n",
+            "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\n[artifact.quark]\npaths = [\"classes/*.sc\"]\n[artifact.lepton.platform-paths]\nmacos_arm64 = [\"build/*.scx\"]\n",
         )
         .unwrap();
         write_files(
@@ -2096,7 +2092,7 @@ beta = "^1"
         write_files(&dir, &["local/Zeta.sc"]);
         fs::write(
             dir.path().join("local/magnet.toml"),
-            "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\nkind = \"quark\"\n[artifact]\nglobal-paths = [\"*.sc\"]\n",
+            "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\n[artifact.quark]\npaths = [\"*.sc\"]\n",
         )
         .unwrap();
         let err = install_for(&dir, target("macos_arm64", "api3_0"), false)
@@ -2205,7 +2201,7 @@ beta = "^1"
     /// a manifest without dependencies, with the given entrypoints
     fn manifest_with_entrypoints(entrypoints: &str) -> String {
         format!(
-            "magnet-version = 1\n\n[package]\nname = \"runner\"\nversion = \"0.1.0\"\nkind = \"quark\"\n\n{entrypoints}"
+            "magnet-version = 1\n\n[package]\nname = \"runner\"\nversion = \"0.1.0\"\n\n{entrypoints}"
         )
     }
 
@@ -2428,7 +2424,6 @@ beta = "^1"
             "my-project".to_string(),
             SemanticVersion::new(0, 1, 0),
             None,
-            MagnetManifestV1PackageKind::Quark,
             Default::default(),
         )
         .unwrap();
@@ -2484,7 +2479,6 @@ beta = "^1"
             "foo".to_string(),
             SemanticVersion::new(1, 0, 0),
             None,
-            MagnetManifestV1PackageKind::Quark,
             Default::default(),
         )
         .unwrap();
@@ -2507,7 +2501,7 @@ beta = "^1"
         );
     }
     /// `magnet init` writes an `[artifact]` template which `magnet package` accepts once the
-    /// project has its files
+    /// project has its files, also after uncommenting its `[artifact.lepton]`
     #[test]
     fn test_init_template_packages() {
         let platform = crate::target::current_platform().unwrap();
@@ -2516,16 +2510,12 @@ beta = "^1"
             "windows" => "dll",
             _ => "so",
         };
-        for kind in [
-            MagnetManifestV1PackageKind::Quark,
-            MagnetManifestV1PackageKind::Lepton,
-        ] {
+        for lepton in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let manifest = MagnetManifestV1::new(
                 "foo".to_string(),
                 SemanticVersion::new(0, 1, 0),
                 None,
-                kind.clone(),
                 Default::default(),
             )
             .unwrap();
@@ -2543,36 +2533,37 @@ beta = "^1"
                     &library,
                 ],
             );
-            project.set_target(target(&platform.to_string(), "api3_0"));
-            let archives = project.create_packages().unwrap();
-            let files: Vec<_> = archives
-                .iter()
-                .map(|archive| archive.files.clone())
-                .collect();
-            let mut expected = vec![vec![
+            let classes = [
                 "HelpSource/Classes/Foo.schelp".to_string(),
                 "classes/Foo.sc".to_string(),
                 "magnet.toml".to_string(),
-            ]];
-            if kind == MagnetManifestV1PackageKind::Lepton {
-                expected = vec![
-                    vec![
-                        "CMakeLists.txt".to_string(),
-                        "HelpSource/Classes/Foo.schelp".to_string(),
-                        "classes/Foo.sc".to_string(),
-                        "magnet.toml".to_string(),
-                        "src/Foo.cpp".to_string(),
-                    ],
-                    vec![
-                        "HelpSource/Classes/Foo.schelp".to_string(),
-                        "classes/Foo.sc".to_string(),
-                        "magnet.toml".to_string(),
-                        "plugins/Foo.scx".to_string(),
-                        format!("plugins/libdep.{libraries}"),
-                    ],
-                ];
+            ];
+            if !lepton {
+                let archives = project.create_packages().unwrap();
+                assert_eq!(archives.len(), 1);
+                assert_eq!(archives[0].files, classes);
+                continue;
             }
-            assert_eq!(files, expected, "{kind}");
+            let manifest_path = dir.path().join(MAGNET_PROJECT_FILE);
+            let content = fs::read_to_string(&manifest_path).unwrap();
+            let uncommented = content.replace(
+                "# [artifact.lepton.platform-paths]\n# ",
+                "[artifact.lepton.platform-paths]\n",
+            );
+            assert_ne!(content, uncommented, "{content}");
+            fs::write(&manifest_path, uncommented).unwrap();
+            project = Project::open(dir.path()).unwrap();
+            project.set_target(target(&platform.to_string(), "api3_0"));
+            assert_eq!(project.kind(), PackageKind::Lepton);
+            // the source package from git follows with the artifact kinds (C8.2)
+            let tags = ArtifactTags::new("api3_0", &platform.to_string()).unwrap();
+            let archive = project.create_package(&tags).unwrap();
+            let mut expected = classes.to_vec();
+            expected.extend([
+                "plugins/Foo.scx".to_string(),
+                format!("plugins/libdep.{libraries}"),
+            ]);
+            assert_eq!(archive.files, expected);
         }
     }
 
@@ -2599,7 +2590,7 @@ beta = "^1"
     #[test]
     fn test_create_quark_package() {
         let (dir, mut project) = project(
-            "magnet-version = 1\n[package]\nname = \"My_Quark\"\nversion = \"0.2.0\"\nkind = \"quark\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\", \"HelpSource/**/*\"]\n",
+            "magnet-version = 1\n[package]\nname = \"My_Quark\"\nversion = \"0.2.0\"\n[artifact.quark]\npaths = [\"Classes/**.sc\", \"HelpSource/**/*\"]\n",
         );
         write_files(
             &dir,
@@ -2644,7 +2635,7 @@ beta = "^1"
         assert_eq!(archives[0].files, archive_paths(&package));
     }
 
-    const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\nkind = \"lepton\"\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\nplatform-paths = { macos_arm64 = [\"build/**/*.scx\"] }\nsource-paths = [\"Classes/**\", \"src/**\"]\n";
+    const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n[artifact.source]\nfrom = \"paths\"\npaths = [\"Classes/**\", \"src/**\"]\n[artifact.quark]\npaths = [\"Classes/**.sc\"]\n[artifact.lepton]\nplatform-paths = { macos_arm64 = [\"build/**/*.scx\"] }\n";
 
     #[test]
     fn test_create_lepton_packages() {
@@ -2694,7 +2685,7 @@ beta = "^1"
             .unwrap_err();
         assert!(err.to_string().contains("plugins/Foo.scx"), "{err}");
     }
-    const ALPHA_BETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\nalpha = \"^1\"\nbeta = \"^1\"\n";
+    const ALPHA_BETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\nalpha = \"^1\"\nbeta = \"^1\"\n";
 
     /// The changes of `update` as `(name, old version, new version)`
     fn changed_versions(
@@ -2717,7 +2708,7 @@ beta = "^1"
 
     #[tokio::test]
     async fn test_install_keeps_yanked_locked_version() {
-        let (dir, _) = project("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\nalpha = \"*\"\n");
+        let (dir, _) = project("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\nalpha = \"*\"\n");
         // alpha 2.0.0 is yanked
         write_lock_file(
             &dir,
@@ -2846,7 +2837,7 @@ beta = "^1"
         fs::create_dir_all(&path).unwrap();
         fs::write(
             path.join(MAGNET_PROJECT_FILE),
-            format!("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\n{dependencies}"),
+            format!("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\n{dependencies}"),
         )
         .unwrap();
         open_sources_project(root)
@@ -2866,7 +2857,7 @@ beta = "^1"
     }
 
     fn quark_manifest(name: &str, version: &str, dependencies: &str) -> String {
-        format!("magnet-version = 1\n[package]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"quark\"\n[dependencies]\n{dependencies}\n[artifact]\nglobal-paths = [\"Classes/**.sc\"]\n")
+        format!("magnet-version = 1\n[package]\nname = \"{name}\"\nversion = \"{version}\"\n[dependencies]\n{dependencies}\n[artifact.quark]\npaths = [\"Classes/**.sc\"]")
     }
 
     fn file_url(path: &Path) -> Url {

@@ -6,27 +6,28 @@ scsynth and supernova load their plugins from their own `plugins` folder, the sy
 If a list of plugin paths is given (`-U`, which sclang passes from `ServerOptions.ugenPluginsPath`), only these paths are loaded and all of the default paths are skipped, including the plugins of SuperCollider itself.
 `SC_PLUGIN_PATH` can only add paths, so it can not isolate a project from globally installed plugins.
 
-Like for sclang (see [`sclang_conf.yaml`](projects.md#sclang_confyaml)), magnet therefore lists all paths explicitly: the `plugins` folder of SuperCollider itself, `magnet_packages/leptons`, and the plugins of a lepton which is developed within the project (see below).
+Like for sclang (see [`sclang_conf.yaml`](projects.md#sclang_confyaml)), magnet therefore lists all paths explicitly: the `plugins` folder of SuperCollider itself, the plugins of each dependency, and the plugins of a lepton which is developed within the project (see below).
+Since scsynth also loads the plugins of all sub folders, only the folder `plugins/<platform>/<abi>` of each dependency which matches the server gets listed, i.e. of its platform and with the same major and the highest minor version of the plugin API which is not newer than the one of the server.
 These paths are set as `ServerOptions.ugenPluginsPath` of every server by a subclass of `ServerOptions` which magnet generates into `magnet_packages`: it becomes the default options class of `Server` and sets the paths on the servers which already exist.
 It gets compiled via the include paths of `sclang_conf.yaml`, so it also applies when the server gets booted from the IDE.
 Options which user code creates via `ServerOptions.new` keep the default plugin paths of SuperCollider.
 The class determines the paths when sclang compiles it, i.e. the `plugins` folder of the running SuperCollider (via `Platform.resourceDir`) and `magnet_packages` relative to its own file, so it does not depend on a found sclang and always matches the SuperCollider it runs in.
 It does not replace plugin paths which the user has set explicitly.
 
-When the project itself is a lepton, magnet copies the binaries of its `platform-paths` for the current platform into `magnet_packages/.dev/<name>/plugins` during `magnet install` and `magnet run`, so a local build gets loaded by the server.
-Its classes do not need to be copied since the `global-paths` of the project are already part of the include paths.
+When the project itself contains a lepton, magnet copies the binaries of its `[artifact.lepton]` for the current platform into `magnet_packages/.dev/<name>/plugins` during `magnet install` and `magnet run`, so a local build gets loaded by the server.
+Its classes do not need to be copied since the paths of `[artifact.quark]` of the project are already part of the include paths.
 
 ## Lepton artifacts
 
-A version of a lepton has one artifact per plugin API version and platform, each containing the files of its `global-paths` (e.g. the `.sc` classes and help files) as well as its binaries for scsynth and, if available, supernova within `plugins/`.
-Once installed into `magnet_packages/leptons/<name>`, sclang picks up its classes like the ones of a quark, and scsynth/supernova load the binaries of its `plugins/` folder.
+A version which contains a lepton has one lepton artifact per plugin API version and platform, each containing its binaries for scsynth and, if available, supernova within `plugins/<platform>/<abi>/`, while its classes are part of the quark artifact.
+Once installed into `magnet_packages/<name>`, scsynth/supernova load the binaries of the folder which matches them (see [Server plugins](#server-plugins)).
 
 A version may lack binaries for some platforms, e.g. because nobody built them yet.
 These can be added to the published version later on (see [Publishing a package](publishing.md#publishing-a-package)), and a missing binary is handled during the installation (see [Missing binary](#missing-binary)).
 
 ## ABI tag
 
-For binary packages, the abi tag only describes the binary compatibility, i.e. the plugin API version of scsynth/supernova for leptons and the plugin ABI of sclang for gluons.
+For binary artifacts, the abi tag only describes the binary compatibility, i.e. the plugin API version of scsynth/supernova for leptons and the plugin ABI of sclang for gluons.
 The abi tag of a lepton follows what scsynth checks when it loads a plugin, which is the version of the plugin API, so the tag is `api<major>_<minor>`, e.g. `api4_1`.
 Starting with SuperCollider 3.15 the plugin API uses semantic versioning: the major version increases with every breaking change of the plugin interface, the minor version with additions which do not break existing plugins, e.g. new functions at the end of the interface table.
 Earlier versions only have a single number, which counts as the major version, e.g. `api3_0`.
@@ -76,7 +77,7 @@ An override installs a package from a local folder instead of the index, e.g. a 
 foo = { path = "../foo" }
 ```
 
-If the folder contains a `magnet.toml`, e.g. the project of the lepton itself, magnet installs what `magnet package` would select for the platform, i.e. the files of its `global-paths` and its `platform-paths` binaries within `plugins/`.
+If the folder contains a `magnet.toml`, e.g. the project of the lepton itself, magnet installs what `magnet package` would select for the platform, i.e. the files of its `[artifact.quark]` and its binaries of `[artifact.lepton]`.
 Otherwise, the folder is copied as it is, e.g. an unzipped release of a plugin.
 An override only changes what gets installed: the dependency is still resolved via the index, and the lock file keeps its entry and checksums, so it can still be shared.
 The files of an override are not checked against a checksum since they change with every build, and running `magnet install` again copies the current files.

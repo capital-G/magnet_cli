@@ -20,10 +20,8 @@ use crate::legacy::{
 };
 use crate::models::{
     lock_file::LockSource,
-    project_manifest::{
-        MagnetManifestV1, MagnetManifestV1DependenciesValue, MagnetManifestV1PackageKind,
-        NamedDependency,
-    },
+    package::PackageKind,
+    project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue, NamedDependency},
 };
 
 /// Who requires a dependency, for error messages
@@ -35,7 +33,7 @@ const PROJECT: &str = "the project";
 #[derive(Debug, Clone)]
 pub struct SourcePackage {
     pub version: SemanticVersion,
-    pub kind: MagnetManifestV1PackageKind,
+    pub kind: PackageKind,
     pub source: LockSource,
     /// the dependencies of its `magnet.toml`, as requirements for the resolver
     pub dependencies: Vec<GitDependency>,
@@ -325,14 +323,14 @@ pub fn collect_sources(
                         manifest.package.name
                     );
                 }
-                let kind = manifest.package.kind.clone();
+                let kind = manifest.package_kind();
                 match (&kind, &source) {
-                    (MagnetManifestV1PackageKind::Quark, _) => {}
-                    (MagnetManifestV1PackageKind::Lepton, LockSource::Path(_)) => {}
-                    (MagnetManifestV1PackageKind::Lepton, _) => bail!(
+                    (PackageKind::Quark, _) => {}
+                    (PackageKind::Lepton, LockSource::Path(_)) => {}
+                    (PackageKind::Lepton, _) => bail!(
                         "{spelled} ({source}) is a lepton, whose binaries need a build. Build it locally and use a path dependency instead, e.g. {spelled} = {{ path = \"../{name}\" }}"
                     ),
-                    (MagnetManifestV1PackageKind::Gluon, _) => {
+                    (PackageKind::Gluon, _) => {
                         bail!("{spelled} ({source}) is a gluon, which can not be installed yet")
                     }
                 }
@@ -404,7 +402,7 @@ pub fn collect_sources(
                 }
                 SourcePackage {
                     version: SemanticVersion::zero(),
-                    kind: MagnetManifestV1PackageKind::Quark,
+                    kind: PackageKind::Quark,
                     source,
                     dependencies,
                     sclang: None,
@@ -512,9 +510,14 @@ mod tests {
     use super::*;
     use crate::git_client::source::tests::{commit_files, tag};
 
+    /// a manifest whose `[artifact]` tables make it a package of `kind`
     fn manifest(name: &str, version: &str, kind: &str, dependencies: &str) -> String {
+        let artifact = match kind {
+            "lepton" => "[artifact.lepton]\nplatform-paths = {}\n\n",
+            _ => "",
+        };
         format!(
-            "magnet-version = 1\n\n[package]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"{kind}\"\n\n[dependencies]\n{dependencies}"
+            "magnet-version = 1\n\n[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n{artifact}[dependencies]\n{dependencies}"
         )
     }
 
@@ -626,7 +629,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(sources["bar"].version, SemanticVersion::zero());
-        assert_eq!(sources["bar"].kind, MagnetManifestV1PackageKind::Quark);
+        assert_eq!(sources["bar"].kind, PackageKind::Quark);
         assert!(sources["bar"].dependencies.is_empty());
     }
 

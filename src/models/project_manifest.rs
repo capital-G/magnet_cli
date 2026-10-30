@@ -13,6 +13,7 @@ use std::{
 use toml_edit::DocumentMut;
 use tracing::{error, instrument, trace, warn};
 
+use crate::models::package::PackageKind;
 use crate::target::current_platform;
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
@@ -113,51 +114,45 @@ pub enum ProjectLayout {
     LegacyQuark,
 }
 
-/// The `[artifact]` table of a new project, as a commented starting point for the author,
-/// see DESIGN.md "Packaging". It matches the folders of a new project (`classes/`,
+/// The `[artifact]` tables of a new project, as a commented starting point for the author,
+/// see DESIGN.md "Packaging". The quark matches the folders of a new project (`classes/`,
 /// `HelpSource/`), or selects everything for a legacy quark, like the legacy Quark system
-/// installs it. A lepton or gluon also gets its source package and the binaries of
-/// `platform` (if known), where `build/` is a guess for the build folder.
-fn artifact_template(
-    kind: &MagnetManifestV1PackageKind,
-    platform: Option<Platform>,
-    layout: ProjectLayout,
-) -> String {
-    let mut template = String::from("\n[artifact]\n");
+/// installs it. A new project also gets a commented `[artifact.lepton]` with the binaries of
+/// `platform` (if known), where `build/` is a guess for the build folder, so it only needs to
+/// be uncommented once the project builds server plugins.
+fn artifact_template(platform: Option<Platform>, layout: ProjectLayout) -> String {
+    let mut template = String::from("\n[artifact.quark]\n");
     template.push_str(match layout {
         ProjectLayout::Magnet => {
-            "# Only the files selected here get packaged, so add every other file the package\n\
-             # needs, e.g. \"sounds/*.wav\" or \"examples/*.scd\"\n\
-             global-paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n]\n"
+            "# Only the files selected here get packaged into the quark (the sclang classes),\n\
+             # so add every other file it needs, e.g. \"sounds/*.wav\" or \"examples/*.scd\"\n\
+             paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n]\n"
         }
         ProjectLayout::LegacyQuark => {
             "# Every file gets packaged, like the legacy Quark system installs it (hidden files,\n\
              # dist/ and magnet_packages/ never are). Narrow it down, e.g. to \"Classes/**\",\n\
-             # \"HelpSource/**\" and \"*.quark\", or skip files via `exclude`\n\
-             global-paths = [\"**\"]\n"
+             # \"HelpSource/**\" and \"*.quark\", or skip files via `exclude` in [artifact]\n\
+             paths = [\"**\"]\n"
         }
     });
-    if *kind == MagnetManifestV1PackageKind::Quark || layout == ProjectLayout::LegacyQuark {
+    if layout == ProjectLayout::LegacyQuark {
         return template;
     }
-    template.push_str(
-        "# The files of the source package, from which the binaries can be built\n\
-         source-paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n    \"src/**\",\n    \"CMakeLists.txt\",\n]\n",
-    );
-    if let Some(platform) = platform {
-        // the plugins and the shared libraries they need, which get loaded next to them
-        let libraries = match platform {
-            Platform::MacosX8664 | Platform::MacosArm64 => "dylib",
-            Platform::WindowsX8664 | Platform::WindowsArm64 => "dll",
-            _ => "so",
-        };
-        template.push_str(&format!(
-            "\n# The binaries per platform tag, which get packaged into plugins/: the plugins and\n\
-             # the shared libraries they need, e.g. linux_x86_64 = [\"build/*.{{scx,so}}\"]\n\
-             [artifact.platform-paths]\n\
-             {platform} = [\"build/*.{{scx,{libraries}}}\"]\n"
-        ));
-    }
+    // the plugins and the shared libraries they need, which get loaded next to them
+    let (platform, libraries) = match platform {
+        Some(platform @ (Platform::MacosX8664 | Platform::MacosArm64)) => (platform, "dylib"),
+        Some(platform @ (Platform::WindowsX8664 | Platform::WindowsArm64)) => (platform, "dll"),
+        Some(platform) => (platform, "so"),
+        None => (Platform::LinuxX8664, "so"),
+    };
+    template.push_str(&format!(
+        "\n# Uncomment this once the project builds server plugins (a lepton): the binaries per\n\
+         # platform tag, i.e. the plugins and the shared libraries they need, which get packaged\n\
+         # into plugins/<platform>/<abi>/. Their sources (e.g. src/ and CMakeLists.txt) go into\n\
+         # the source artifact, which takes the files tracked by git.\n\
+         # [artifact.lepton.platform-paths]\n\
+         # {platform} = [\"build/*.{{scx,{libraries}}}\"]\n"
+    ));
     template
 }
 
@@ -190,11 +185,13 @@ impl ProjectManifest {
             let platform = match current_platform() {
                 Ok(platform) => Some(platform),
                 Err(err) => {
-                    warn!("{err:#}, so the manifest gets no `platform-paths`");
+                    warn!(
+                        "{err:#}, so the commented [artifact.lepton] names linux_x86_64 as example"
+                    );
                     None
                 }
             };
-            content.push_str(&artifact_template(&manifest.package.kind, platform, layout));
+            content.push_str(&artifact_template(platform, layout));
         }
         let file = File::create(&path).context("Could not create project file")?;
         let mut writer = BufWriter::new(file);
@@ -215,7 +212,6 @@ impl ProjectManifest {
         let mut package = toml_edit::Table::new();
         package["name"] = toml_edit::value(manifest.package.name.as_str());
         package["version"] = toml_edit::value(manifest.package.version.to_string());
-        package["kind"] = toml_edit::value(manifest.package.kind.to_string());
         if let Some(sclang) = &manifest.package.sclang {
             package["sclang"] = toml_edit::value(sclang.as_str());
         }
@@ -241,7 +237,14 @@ impl ProjectManifest {
 
         if let Some(artifact) = &manifest.artifact {
             let mut table = serialize_toml_via_serde(artifact)?;
+            // only a header for `exclude`, the kinds have their own tables
+            table.set_implicit(true);
             table.decor_mut().set_prefix("\n");
+            for (_, item) in table.iter_mut() {
+                if let Some(kind) = item.as_table_mut() {
+                    kind.decor_mut().set_prefix("\n");
+                }
+            }
             doc["artifact"] = toml_edit::Item::Table(table);
         }
 
@@ -314,7 +317,6 @@ impl MagnetManifestV1 {
         name: String,
         version: SemanticVersion,
         sclang: Option<String>,
-        project_kind: MagnetManifestV1PackageKind,
         metadata: MagnetManifestV1Metadata,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -332,12 +334,54 @@ impl MagnetManifestV1 {
             metadata: Some(metadata),
             overrides: HashMap::new(),
             package: MagnetManifestV1Package {
-                kind: project_kind,
                 name,
                 sclang,
                 version,
             },
         })
+    }
+
+    /// The kind of the package in the index and the lock file, which still have one kind per
+    /// package: a lepton if the manifest has `[artifact.lepton]`, otherwise a quark.
+    /// They will list the artifact kinds of each version instead (new_implementation_plan.md C8.3).
+    pub fn package_kind(&self) -> PackageKind {
+        match self.lepton_platform_paths() {
+            Some(_) => PackageKind::Lepton,
+            None => PackageKind::Quark,
+        }
+    }
+
+    /// The globs of `[artifact.quark]`, empty if the manifest has none
+    pub fn quark_paths(&self) -> &[String] {
+        self.artifact
+            .as_ref()
+            .and_then(|artifact| artifact.quark.as_ref())
+            .map(|quark| quark.paths.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The `platform-paths` of `[artifact.lepton]`, if the manifest has it
+    pub fn lepton_platform_paths(&self) -> Option<&HashMap<Platform, Vec<String>>> {
+        self.artifact
+            .as_ref()
+            .and_then(|artifact| artifact.lepton.as_ref())
+            .map(|lepton| &lepton.platform_paths)
+    }
+
+    /// `[artifact.source]`, whose defaults take the files tracked by git
+    pub fn source(&self) -> MagnetManifestV1ArtifactSource {
+        self.artifact
+            .as_ref()
+            .and_then(|artifact| artifact.source.clone())
+            .unwrap_or_default()
+    }
+
+    /// The globs of `exclude` in `[artifact]`
+    pub fn exclude(&self) -> &[String] {
+        self.artifact
+            .as_ref()
+            .map(|artifact| artifact.exclude.as_slice())
+            .unwrap_or_default()
     }
 
     /// Letters, digits, `_` and `-`, starting with a letter or digit (e.g. the legacy quark
@@ -360,9 +404,65 @@ impl MagnetManifestV1 {
             Ok(project) => Ok(project),
             Err(err) => {
                 error!(?err, "Could not parse project file");
-                Err(err.into())
+                match manifest_hint(content) {
+                    Some(hint) => Err(anyhow::Error::from(err).context(hint)),
+                    None => Err(err.into()),
+                }
             }
         }
+    }
+}
+
+/// The artifact kinds this version of magnet knows, see DESIGN.md "Package kinds"
+const ARTIFACT_KINDS: [&str; 3] = ["source", "quark", "lepton"];
+
+/// Explains why a manifest which doesn't parse was probably written for another version of
+/// magnet: a newer one knows more artifact kinds, an older one declared a single kind.
+fn manifest_hint(content: &str) -> Option<String> {
+    let table: toml::Table = content.parse().ok()?;
+    let mut hints = vec![];
+    if table
+        .get("package")
+        .and_then(|package| package.get("kind"))
+        .is_some()
+    {
+        hints.push(
+            "[package] has no `kind` anymore, the [artifact.quark] and [artifact.lepton] tables \
+             declare what a version contains"
+                .to_string(),
+        );
+    }
+    if let Some(artifact) = table
+        .get("artifact")
+        .and_then(|artifact| artifact.as_table())
+    {
+        let old: Vec<&str> = ["global-paths", "platform-paths", "source-paths"]
+            .into_iter()
+            .filter(|key| artifact.contains_key(*key))
+            .collect();
+        if !old.is_empty() {
+            hints.push(format!(
+                "{} in [artifact] moved: `global-paths` to `paths` of [artifact.quark], \
+                 `platform-paths` to [artifact.lepton] and `source-paths` to `paths` of \
+                 [artifact.source] (with `from = \"paths\"`)",
+                old.join(", ")
+            ));
+        }
+        let unknown: Vec<String> = artifact
+            .iter()
+            .filter(|(key, value)| value.is_table() && !ARTIFACT_KINDS.contains(&key.as_str()))
+            .map(|(key, _)| format!("[artifact.{key}]"))
+            .collect();
+        if !unknown.is_empty() {
+            hints.push(format!(
+                "This version of magnet doesn't know {}, maybe the project needs a newer magnet",
+                unknown.join(", ")
+            ));
+        }
+    }
+    match hints.is_empty() {
+        true => None,
+        false => Some(hints.join("\n")),
     }
 }
 
@@ -376,7 +476,6 @@ mod tests {
 [package]
 name = \"test-project\"
 version = \"0.1.0\"
-kind = \"quark\"
 
 [metadata]
 
@@ -550,7 +649,6 @@ baz = {}
             package: MagnetManifestV1Package {
                 name: "bar".to_string(),
                 version: MagnetManifestV1PackageVersion::from_str("0.1.0").unwrap(),
-                kind: MagnetManifestV1PackageKind::Quark,
                 sclang: None,
             },
             metadata: Some(MagnetManifestV1Metadata {
@@ -564,10 +662,10 @@ baz = {}
             }),
             dependencies: HashMap::new(),
             artifact: Some(MagnetManifestV1Artifact {
-                global_paths: vec!["classes/**/*.sc".to_string()],
-                platform_paths: HashMap::new(),
-                source_paths: vec![],
-                exclude: vec![],
+                quark: Some(MagnetManifestV1ArtifactQuark {
+                    paths: vec!["classes/**/*.sc".to_string()],
+                }),
+                ..Default::default()
             }),
             entrypoint: vec![],
         };
@@ -581,14 +679,13 @@ baz = {}
              [package]\n\
              name = \"bar\"\n\
              version = \"0.1.0\"\n\
-             kind = \"quark\"\n\
              \n\
              [metadata]\n\
              \n\
              [dependencies]\n\
              \n\
-             [artifact]\n\
-             global-paths = [\"classes/**/*.sc\"]\n"
+             [artifact.quark]\n\
+             paths = [\"classes/**/*.sc\"]\n"
         );
     }
 
@@ -616,7 +713,6 @@ baz = {}
             "foo".to_string(),
             SemanticVersion::new(0, 1, 0),
             None,
-            MagnetManifestV1PackageKind::Quark,
             metadata,
         )
         .unwrap();
@@ -643,53 +739,47 @@ baz = {}
         assert_eq!(parsed.tags, ["synth", "fx"]);
     }
 
-    fn manifest_with_layout(
-        kind: MagnetManifestV1PackageKind,
-        platform: Option<Platform>,
-        layout: ProjectLayout,
-    ) -> MagnetManifestV1 {
+    fn template_content(platform: Option<Platform>, layout: ProjectLayout) -> String {
         let manifest = MagnetManifestV1::new(
             "foo".to_string(),
             SemanticVersion::new(0, 1, 0),
             None,
-            kind.clone(),
             Default::default(),
         )
         .unwrap();
-        let content = ProjectManifest::serialize_manifest(&manifest).unwrap()
-            + &artifact_template(&kind, platform, layout);
-        MagnetManifestV1::from_string(&content).unwrap()
+        ProjectManifest::serialize_manifest(&manifest).unwrap()
+            + &artifact_template(platform, layout)
     }
 
-    fn manifest_with_template(
-        kind: MagnetManifestV1PackageKind,
-        platform: Option<Platform>,
-    ) -> MagnetManifestV1 {
-        manifest_with_layout(kind, platform, ProjectLayout::Magnet)
+    /// The template with its `[artifact.lepton]` uncommented, as the author would do it
+    fn uncommented_lepton(content: &str) -> String {
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
+        let start = lines
+            .iter()
+            .position(|line| line == "# [artifact.lepton.platform-paths]")
+            .expect("no commented [artifact.lepton] in the template");
+        for line in &mut lines[start..start + 2] {
+            *line = line.strip_prefix("# ").unwrap().to_string();
+        }
+        lines.join("\n") + "\n"
     }
 
     #[test]
     fn test_quark_template() {
-        let artifact = manifest_with_template(MagnetManifestV1PackageKind::Quark, None)
-            .artifact
-            .unwrap();
-        assert_eq!(artifact.global_paths, ["classes/**/*.sc", "HelpSource/**"]);
-        assert!(artifact.source_paths.is_empty());
-        assert!(artifact.platform_paths.is_empty());
+        let manifest =
+            MagnetManifestV1::from_string(&template_content(None, ProjectLayout::Magnet)).unwrap();
+        assert_eq!(manifest.quark_paths(), ["classes/**/*.sc", "HelpSource/**"]);
+        assert!(manifest.lepton_platform_paths().is_none());
+        assert!(manifest.artifact.unwrap().source.is_none());
     }
 
     #[test]
     fn test_legacy_quark_template() {
-        let artifact = manifest_with_layout(
-            MagnetManifestV1PackageKind::Quark,
-            None,
-            ProjectLayout::LegacyQuark,
-        )
-        .artifact
-        .unwrap();
-        assert_eq!(artifact.global_paths, ["**"]);
-        assert!(artifact.source_paths.is_empty());
-        assert!(artifact.platform_paths.is_empty());
+        let content = template_content(Some(Platform::MacosArm64), ProjectLayout::LegacyQuark);
+        assert!(!content.contains("lepton"), "{content}");
+        let manifest = MagnetManifestV1::from_string(&content).unwrap();
+        assert_eq!(manifest.quark_paths(), ["**"]);
+        assert_eq!(manifest.package_kind(), PackageKind::Quark);
     }
 
     #[test]
@@ -698,7 +788,6 @@ baz = {}
             "foo".to_string(),
             SemanticVersion::new(0, 1, 0),
             None,
-            MagnetManifestV1PackageKind::Quark,
             Default::default(),
         )
         .unwrap();
@@ -720,36 +809,78 @@ baz = {}
     #[test]
     fn test_lepton_template() {
         for (platform, binaries) in [
-            (Platform::MacosArm64, "build/*.{scx,dylib}"),
-            (Platform::LinuxArmv7, "build/*.{scx,so}"),
-            (Platform::WindowsX8664, "build/*.{scx,dll}"),
+            (Some(Platform::MacosArm64), "build/*.{scx,dylib}"),
+            (Some(Platform::LinuxArmv7), "build/*.{scx,so}"),
+            (Some(Platform::WindowsX8664), "build/*.{scx,dll}"),
+            // an unknown platform gets an example, which the author adapts
+            (None, "build/*.{scx,so}"),
         ] {
-            let artifact =
-                manifest_with_template(MagnetManifestV1PackageKind::Lepton, Some(platform))
-                    .artifact
-                    .unwrap();
-            assert_eq!(artifact.global_paths, ["classes/**/*.sc", "HelpSource/**"]);
+            let content = template_content(platform, ProjectLayout::Magnet);
+            let manifest = MagnetManifestV1::from_string(&uncommented_lepton(&content)).unwrap();
+            assert_eq!(manifest.package_kind(), PackageKind::Lepton);
+            assert_eq!(manifest.quark_paths(), ["classes/**/*.sc", "HelpSource/**"]);
             assert_eq!(
-                artifact.source_paths,
-                [
-                    "classes/**/*.sc",
-                    "HelpSource/**",
-                    "src/**",
-                    "CMakeLists.txt"
-                ]
-            );
-            assert_eq!(
-                artifact.platform_paths,
-                HashMap::from([(platform, vec![binaries.to_string()])])
+                manifest.lepton_platform_paths().unwrap(),
+                &HashMap::from([(
+                    platform.unwrap_or(Platform::LinuxX8664),
+                    vec![binaries.to_string()]
+                )])
             );
         }
+    }
 
-        // an unknown platform gets no binaries, which the author adds
-        let artifact = manifest_with_template(MagnetManifestV1PackageKind::Lepton, None)
-            .artifact
-            .unwrap();
-        assert!(artifact.platform_paths.is_empty());
-        assert!(!artifact.source_paths.is_empty());
+    #[test]
+    fn test_package_kind() {
+        let manifest = |artifact: &str| {
+            MagnetManifestV1::from_string(&format!(
+                "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n{artifact}"
+            ))
+            .unwrap()
+        };
+        assert_eq!(manifest("").package_kind(), PackageKind::Quark);
+        assert_eq!(
+            manifest("[artifact.quark]\npaths = [\"*.sc\"]\n").package_kind(),
+            PackageKind::Quark
+        );
+        // a lepton without classes, e.g. one which only ships binaries
+        let lepton = manifest("[artifact.lepton.platform-paths]\nmacos_arm64 = [\"*.scx\"]\n");
+        assert_eq!(lepton.package_kind(), PackageKind::Lepton);
+        assert!(lepton.quark_paths().is_empty());
+        assert_eq!(
+            lepton.source().from,
+            MagnetManifestV1ArtifactSourceFrom::Git
+        );
+    }
+
+    /// Manifests of other magnet versions explain what changed
+    #[test]
+    fn test_manifest_hints() {
+        let error = |rest: &str| {
+            let content = format!(
+                "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n{rest}"
+            );
+            format!("{:#}", MagnetManifestV1::from_string(&content).unwrap_err())
+        };
+        assert!(error("kind = \"quark\"\n").contains("[package] has no `kind` anymore"));
+        // an old manifest gets all hints at once
+        let old = error("kind = \"quark\"\n[artifact]\nglobal-paths = [\"*.sc\"]\n");
+        assert!(
+            old.contains("no `kind` anymore") && old.contains("global-paths in [artifact] moved"),
+            "{old}"
+        );
+        let moved = error("[artifact]\nglobal-paths = [\"*.sc\"]\nsource-paths = [\"src/**\"]\n");
+        assert!(
+            moved.contains("global-paths, source-paths in [artifact] moved"),
+            "{moved}"
+        );
+        let unknown = error("[artifact.gluon]\npaths = [\"*.scx\"]\n");
+        assert!(
+            unknown
+                .contains("doesn't know [artifact.gluon], maybe the project needs a newer magnet"),
+            "{unknown}"
+        );
+        // other errors stay as they are
+        assert!(!error("[artifact.quark]\n").contains("magnet"));
     }
 
     /// The manifest example in DESIGN.md must always be valid against the schema.

@@ -6,10 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use crate::models::{
-    package::ArtifactTags,
-    project_manifest::{
-        MagnetManifestV1DependenciesValue, MagnetManifestV1PackageKind, NamedDependency,
-    },
+    package::{ArtifactTags, PackageKind},
+    project_manifest::{MagnetManifestV1DependenciesValue, NamedDependency},
 };
 // This contains the structure of the json files stored in git
 
@@ -133,7 +131,7 @@ pub struct GitRelease {
         serialize_with = "serialize_semantic_version"
     )]
     pub version: SemanticVersion,
-    pub kind: MagnetManifestV1PackageKind,
+    pub kind: PackageKind,
     /// supported SuperCollider versions, see DESIGN.md "SuperCollider version"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sclang: Option<VersionReq>,

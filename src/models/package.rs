@@ -1,6 +1,28 @@
 use std::{fmt, path::PathBuf, str::FromStr};
 
 use anyhow::{ensure, Context};
+use serde::{Deserialize, Serialize};
+
+/// The kind of a package in the index and the lock file, see DESIGN.md "Package kinds".
+/// A project doesn't declare it anymore, it follows from its `[artifact]` tables
+/// (`MagnetManifestV1::package_kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageKind {
+    Quark,
+    Lepton,
+    Gluon,
+}
+
+impl fmt::Display for PackageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PackageKind::Quark => "quark",
+            PackageKind::Lepton => "lepton",
+            PackageKind::Gluon => "gluon",
+        })
+    }
+}
 
 /// The tags of an artifact, which are part of its filename and its `dl` URL,
 /// see DESIGN.md "Packaging".

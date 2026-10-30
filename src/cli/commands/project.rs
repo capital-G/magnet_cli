@@ -24,7 +24,7 @@ use magnet::{
         project::{CreateOptions, Project},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1Metadata, MagnetManifestV1MetadataAuthorsItem,
-            MagnetManifestV1PackageKind, ProjectLayout,
+            ProjectLayout,
         },
     },
     resolver::package_downloader::PackageDownloader,
@@ -138,8 +138,6 @@ impl MagnetSubCommand for ProjectInitArgs {
 /// Suggested answers of the init dialog, e.g. from a legacy `.quark` file
 #[derive(Debug, Default)]
 pub(super) struct InitDefaults {
-    /// a fixed kind, which isn't asked (a legacy quark is always a quark)
-    pub kind: Option<MagnetManifestV1PackageKind>,
     pub version: Option<SemanticVersion>,
     pub summary: Option<String>,
     /// comma separated, like the answer
@@ -168,25 +166,12 @@ pub(super) fn ask_project_name(default: Option<&str>) -> anyhow::Result<String> 
         .prompt()?)
 }
 
-/// Asks for the kind, version, sclang range and metadata of a new project, every
-/// question can be skipped with Enter
+/// Asks for the version, sclang range and metadata of a new project, every question can be
+/// skipped with Enter. What the project contains is declared by its `[artifact]` tables.
 pub(super) fn ask_manifest(
     project_name: String,
     defaults: &InitDefaults,
 ) -> anyhow::Result<MagnetManifestV1> {
-    let project_kind = match &defaults.kind {
-        Some(kind) => kind.clone(),
-        None => Select::new(
-            "Project kind:",
-            vec![
-                MagnetManifestV1PackageKind::Quark,
-                // MagnetManifestV1PackageKind::Gluon,
-                MagnetManifestV1PackageKind::Lepton,
-            ],
-        )
-        .prompt()?,
-    };
-
     let default_version = defaults
         .version
         .unwrap_or(SemanticVersion::new(0, 1, 0))
@@ -267,13 +252,7 @@ pub(super) fn ask_manifest(
         summary: optional(&summary),
         tags: split_list(&tags),
     };
-    MagnetManifestV1::new(
-        project_name,
-        version,
-        optional(&sclang),
-        project_kind,
-        metadata,
-    )
+    MagnetManifestV1::new(project_name, version, optional(&sclang), metadata)
 }
 
 /// Asks which files besides the manifest get created. The folders are suggested for a new
@@ -806,9 +785,6 @@ impl MagnetSubCommand for ProjectPackageArgs {
             for file in &archive.files {
                 println!("  {file}");
             }
-        }
-        if *project.kind() == MagnetManifestV1PackageKind::Gluon {
-            warn!("The binaries of a gluon can't be packaged yet, only its source package");
         }
         println!(
             "Check these files before publishing, a published artifact can never be replaced."

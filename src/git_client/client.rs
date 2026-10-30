@@ -207,7 +207,7 @@ impl GitClient {
 mod tests {
     use super::*;
     use crate::git_client::models::GitIndexDependency;
-    use crate::models::project_manifest::MagnetManifestV1PackageKind;
+    use crate::models::package::PackageKind;
 
     fn fixture_index() -> GitClient {
         GitClient::open_local(
@@ -339,7 +339,7 @@ mod tests {
 
         let release = &releases[1];
         assert_eq!(release.version, SemanticVersion::new(1, 1, 0));
-        assert_eq!(release.kind, MagnetManifestV1PackageKind::Quark);
+        assert_eq!(release.kind, PackageKind::Quark);
         assert!(!release.yanked);
         assert_eq!(
             release.dependencies.get("beta"),
@@ -370,7 +370,7 @@ mod tests {
             .get_release("gamma", &SemanticVersion::new(0, 3, 0))
             .unwrap()
             .unwrap();
-        assert_eq!(release.kind, MagnetManifestV1PackageKind::Lepton);
+        assert_eq!(release.kind, PackageKind::Lepton);
         let keys: Vec<String> = release.artifacts.iter().map(|a| a.key()).collect();
         assert_eq!(
             keys,

@@ -21,17 +21,12 @@
           "description": "Version of this package",
           "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
         },
-        "kind": {
-          "type": "string",
-          "enum": ["quark", "lepton", "gluon"],
-          "description": "Kind of the package: quark (sclang classes), lepton (server plugin) or gluon (sclang plugin, reserved)"
-        },
         "sclang": {
           "type": "string",
           "description": "Supported SuperCollider versions as a version range, e.g. \">=3.13\""
         }
       },
-      "required": ["name", "version", "kind"],
+      "required": ["name", "version"],
       "additionalProperties": false
     },
     "metadata": {
@@ -151,42 +146,76 @@
     },
     "artifact": {
       "type": "object",
-      "description": "Files which make up the package, used for bundling",
+      "description": "Files which make up the package, used for bundling. Every kind of artifact a version provides has its own table",
       "properties": {
-        "global-paths": {
-          "type": "array",
-          "description": "Paths included for every platform - supports glob wildcards",
-          "items": {
-            "type": "string"
-          }
-        },
-        "platform-paths": {
-          "type": "object",
-          "description": "Platform-dependent paths of a lepton or gluon, e.g. binary build outputs, keyed by platform tag - supports glob wildcards",
-          "propertyNames": {
-            "$ref": "#/definitions/platform"
-          },
-          "additionalProperties": {
-            "type": "array",
-            "description": "Binaries for this platform, which get packaged into plugins/",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "source-paths": {
-          "type": "array",
-          "description": "Paths of the source package of a lepton or gluon, e.g. C++ sources and CMakeLists.txt - supports glob wildcards",
-          "items": {
-            "type": "string"
-          }
-        },
         "exclude": {
           "type": "array",
           "description": "Paths which are never packaged, even if selected by another glob - supports glob wildcards",
           "items": {
             "type": "string"
           }
+        },
+        "source": {
+          "type": "object",
+          "description": "The source artifact, which every version has - by default the files tracked by git",
+          "properties": {
+            "from": {
+              "type": "string",
+              "enum": ["git", "paths"],
+              "default": "git",
+              "description": "git: the files tracked by git at HEAD, paths: the files selected by `paths`"
+            },
+            "paths": {
+              "type": "array",
+              "description": "Paths of the source artifact if `from` is paths, e.g. C++ sources and CMakeLists.txt - supports glob wildcards",
+              "items": {
+                "type": "string"
+              }
+            },
+            "submodules": {
+              "type": "boolean",
+              "default": false,
+              "description": "Also package the files of git submodules"
+            }
+          },
+          "additionalProperties": false
+        },
+        "quark": {
+          "type": "object",
+          "description": "The sclang classes and help files, one artifact for every platform",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "description": "Paths of the quark artifact - supports glob wildcards",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": ["paths"],
+          "additionalProperties": false
+        },
+        "lepton": {
+          "type": "object",
+          "description": "The server plugins, one artifact per plugin API and platform",
+          "properties": {
+            "platform-paths": {
+              "type": "object",
+              "description": "The binaries of the plugins and the shared libraries they need, keyed by platform tag - supports glob wildcards",
+              "propertyNames": {
+                "$ref": "#/definitions/platform"
+              },
+              "additionalProperties": {
+                "type": "array",
+                "description": "Binaries for this platform, which get packaged into plugins/<platform>/<abi>/",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": ["platform-paths"],
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

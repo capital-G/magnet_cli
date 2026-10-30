@@ -16,13 +16,12 @@ This uses the normalized name of the package as a basis, i.e. the normalized rep
 Each file while then have a one-lined JSON for each release, which covers
 
 ```json
-{"name": "foo", "version": "0.1.3", "kind": "quark", "sclang": ">=3.13", "dependencies": {"bar":  "<0.2.0"}, "yanked": false, "artifacts": [{"abi":  "any", "platform": "any", "sha256":  "abc"}]}
+{"name": "foo", "version": "0.1.3", "kinds": ["quark"], "sclang": ">=3.13", "dependencies": {"bar":  "<0.2.0"}, "yanked": false, "artifacts": [{"kind": "source", "abi": "any", "platform": "any", "sha256": "def"}, {"kind": "quark", "abi":  "any", "platform": "any", "sha256":  "abc"}]}
 ```
 
 `sclang` is the range of the package's manifest and is omitted if the manifest has none.
 
-The kind of a package is fixed by its first published version and can not be changed afterwards, so all lines of a package share the same kind.
-If e.g. a quark later also wants to ship a server plugin, the plugin needs to be published as a dedicated lepton package on which the quark depends.
+`kinds` lists the kinds of artifacts of the version, which may change between versions, and each artifact names its kind.
 
 Legacy quarks can also be used as dependencies by providing
 
@@ -30,10 +29,10 @@ Legacy quarks can also be used as dependencies by providing
 {"baz": {"legacy-quark": true, "git": {"ref": "<git sha>", "url":  "<link-to-repo>"}}}
 ```
 
-Sources (of binary packages) are represented via
+The source of a version is represented via
 
 ```json
-{"abi": "source", "platform": "any"}
+{"kind": "source", "abi": "any", "platform": "any"}
 ```
 
 Such an entry will be inserted by the index service as a single writer on this index and can be regenerated from the DB of the index.
@@ -50,7 +49,7 @@ Additionally, each index needs to implement a `config.json` at the root which im
 It can be overridden via `MAGNET_API_URL` / `--api-url`, e.g. for a local test server.
 
 such that updates to the index can be made and also the download url can be changed in one position in case the packages need to migrate to a different URL.
-The URL template needs to be configured in such a way that each artifacts results in a unique and stable URL: a package has only one kind, a version has at most one artifact per abi and platform, and artifacts are never replaced.
+The URL template needs to be configured in such a way that each artifacts results in a unique and stable URL: a version has at most one artifact per kind, abi and platform, and artifacts are never replaced.
 If the template changes, the old URLs are redirected to the new ones.
 The following pattern should be used such that people can download artifacts manually:
 
@@ -58,7 +57,7 @@ The following pattern should be used such that people can download artifacts man
 https://static.magnet.example/dl/{name}/{version}/{name}-{version}-{kind}-{abi}-{platform}.tar.gz
 ```
 
-where `name` is the normalized name, `version` and `kind` are used from the chosen line and `abi` and `platform` from the selected artifact.
+where `name` is the normalized name, `version` is used from the chosen line and `kind`, `abi` and `platform` from the selected artifact.
 
 ## HTTP mirror
 

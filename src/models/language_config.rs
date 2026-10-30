@@ -156,15 +156,11 @@ fn yaml_list(paths: &[PathBuf]) -> String {
         .collect()
 }
 
-/// base directories of the global paths of a project, `classes` if it declares none
+/// base directories of the `[artifact.quark]` paths of a project, `classes` if it has none
 fn source_dirs(root: &Path, manifest: &MagnetManifestV1) -> Vec<PathBuf> {
-    match &manifest.artifact {
-        Some(artifact) if !artifact.global_paths.is_empty() => artifact
-            .global_paths
-            .iter()
-            .map(|glob| glob_base_dir(root, glob))
-            .collect(),
-        _ => vec![root.join(String::from(ProjectDirectory::Classes))],
+    match manifest.quark_paths() {
+        [] => vec![root.join(String::from(ProjectDirectory::Classes))],
+        paths => paths.iter().map(|glob| glob_base_dir(root, glob)).collect(),
     }
 }
 
@@ -180,7 +176,6 @@ mod tests {
              [package]\n\
              name = \"foo\"\n\
              version = \"0.1.0\"\n\
-             kind = \"quark\"\n\
              {extra}"
         ))
         .unwrap()
@@ -223,10 +218,10 @@ mod tests {
     }
 
     #[test]
-    fn test_include_paths_of_global_paths() {
+    fn test_include_paths_of_quark_paths() {
         let root = tempfile::tempdir().unwrap();
         let manifest = manifest(
-            "\n[artifact]\nglobal-paths = [\"*.sc\", \"Classes/**.sc\", \"Classes/*.schelp\"]\n",
+            "\n[artifact.quark]\npaths = [\"*.sc\", \"Classes/**.sc\", \"Classes/*.schelp\"]\n",
         );
         let config = LanguageConfig::for_project(root.path(), &manifest, None).unwrap();
         // a converted legacy quark with root-level classes, without duplicates
@@ -250,7 +245,7 @@ mod tests {
         fs::create_dir_all(&bar).unwrap();
         fs::write(
             bar.join(MAGNET_PROJECT_FILE),
-            "magnet-version = 1\n\n[package]\nname = \"bar\"\nversion = \"0.1.0\"\nkind = \"quark\"\n\n[artifact]\nglobal-paths = [\"lib/**.sc\"]\n",
+            "magnet-version = 1\n\n[package]\nname = \"bar\"\nversion = \"0.1.0\"\n\n[artifact.quark]\npaths = [\"lib/**.sc\"]\n",
         )
         .unwrap();
         // a legacy quark without manifest is used as a whole

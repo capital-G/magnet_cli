@@ -17,7 +17,8 @@ use crate::git_client::models::{
     deserialize_semantic_version, serialize_semantic_version, GitRelease,
 };
 use crate::git_client::source::GitReference;
-use crate::models::project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind};
+use crate::models::package::PackageKind;
+use crate::models::project_manifest::MagnetManifestV1;
 use crate::resolver::online_provider::{ROOT_PACKAGE, SCLANG_PACKAGE};
 
 pub const LOCK_VERSION: u32 = 1;
@@ -45,7 +46,7 @@ pub struct LockDependency {
     )]
     pub version: SemanticVersion,
     /// determines the folder within `magnet_packages`, so no index lookup is necessary on install
-    pub kind: MagnetManifestV1PackageKind,
+    pub kind: PackageKind,
     pub source: LockSource,
     /// sha256 of every artifact of this version, keyed by `{abi}-{platform}`,
     /// so the same lock file can be installed on every platform.
@@ -277,7 +278,7 @@ mod tests {
         };
         Ok(LockDependency {
             version: *version,
-            kind: MagnetManifestV1PackageKind::Quark,
+            kind: PackageKind::Quark,
             source,
             checksums,
         })
@@ -341,7 +342,7 @@ mod tests {
         .unwrap();
         let dependency = LockDependency::from(&release);
         assert_eq!(dependency.version, SemanticVersion::new(0, 3, 0));
-        assert_eq!(dependency.kind, MagnetManifestV1PackageKind::Lepton);
+        assert_eq!(dependency.kind, PackageKind::Lepton);
         assert_eq!(dependency.source, LockSource::Index);
         assert_eq!(
             dependency.checksums,

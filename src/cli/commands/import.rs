@@ -17,7 +17,7 @@ use magnet::{
         project::Project,
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1DependenciesValue,
-            MagnetManifestV1DependenciesValueObjectGit, MagnetManifestV1PackageKind, ProjectLayout,
+            MagnetManifestV1DependenciesValueObjectGit, ProjectLayout,
         },
     },
 };
@@ -89,7 +89,6 @@ impl MagnetSubCommand for ImportLegacyQuarkArgs {
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string());
         let defaults = InitDefaults {
-            kind: Some(MagnetManifestV1PackageKind::Quark),
             version: field("version").and_then(|version| legacy_version(&version)),
             summary: field("summary"),
             authors: field("author").map(|authors| legacy_authors(&authors)),
@@ -466,7 +465,7 @@ mod tests {
         );
         // publishable as it is
         let manifest: MagnetManifestV1 = toml::from_str(&format!(
-            "magnet-version = 1\n[package]\nname = \"x\"\nversion = \"0.1.0\"\nkind = \"quark\"\n[dependencies]\n{table}"
+            "magnet-version = 1\n[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\n{table}"
         ))
         .unwrap();
         magnet::packaging::publish::check_publishable(&manifest).unwrap();

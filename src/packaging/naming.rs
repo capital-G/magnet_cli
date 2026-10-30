@@ -1,8 +1,8 @@
 use pubgrub::SemanticVersion;
 
 use crate::models::{
-    package::ArtifactTags,
-    project_manifest::{MagnetManifestV1, MagnetManifestV1PackageKind},
+    package::{ArtifactTags, PackageKind},
+    project_manifest::MagnetManifestV1,
 };
 
 /// `{name}-{version}-{kind}-{abi}-{platform}.tar.gz` with the normalised name, see DESIGN.md
@@ -10,7 +10,7 @@ use crate::models::{
 pub fn artifact_file_name(
     name: &str,
     version: &SemanticVersion,
-    kind: &MagnetManifestV1PackageKind,
+    kind: &PackageKind,
     tags: &ArtifactTags,
 ) -> String {
     format!(
@@ -29,7 +29,7 @@ mod tests {
             artifact_file_name(
                 "Foo_Bar",
                 &SemanticVersion::new(1, 2, 0),
-                &MagnetManifestV1PackageKind::Quark,
+                &PackageKind::Quark,
                 &ArtifactTags::any()
             ),
             "foo-bar-1.2.0-quark-any-any.tar.gz",
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn test_lepton_names() {
         let version = SemanticVersion::one();
-        let kind = MagnetManifestV1PackageKind::Lepton;
+        let kind = PackageKind::Lepton;
         assert_eq!(
             artifact_file_name(
                 "foobar",

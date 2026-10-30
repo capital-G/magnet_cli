@@ -30,7 +30,7 @@ Pre-releases are not supported yet.
 ### SuperCollider version
 
 The `sclang` entry of `[package]` states which versions of SuperCollider a package works with, using the version ranges from above, e.g. `sclang = ">=3.13"`.
-This applies to every kind of package, since leptons and gluons also ship `.sc` classes.
+This applies to every package, whatever kinds of artifacts it contains.
 
 While resolving, a version of a dependency is only chosen if its `sclang` range allows the lower bound of the project's `sclang` range, so the lock file holds for the whole range of the project, like it holds across platforms.
 Older versions of a dependency are tried if a newer one requires a more recent SuperCollider.
