@@ -745,6 +745,10 @@ pub struct ProjectPackageArgs {
     )]
     path: Option<PathBuf>,
 
+    /// Package the source from git although its files have uncommitted changes
+    #[arg(long)]
+    allow_dirty: bool,
+
     #[command(flatten)]
     target: TargetArgs,
 }
@@ -775,7 +779,7 @@ impl MagnetSubCommand for ProjectPackageArgs {
         };
         let mut project = Project::open(&project_path)?;
         project.set_target(self.target.lazy());
-        let archives = project.create_packages()?;
+        let archives = project.create_packages(self.allow_dirty)?;
         for archive in &archives {
             let path = archive
                 .path

@@ -21,7 +21,7 @@ use crate::{
     },
     models::{
         directories::ProjectDirectory,
-        package::{ArtifactTags, PackageKind},
+        package::{ArtifactKind, ArtifactTags, PackageKind},
         project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue},
     },
     packaging::naming::artifact_file_name,
@@ -31,7 +31,19 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishArchive {
     pub path: PathBuf,
+    pub kind: ArtifactKind,
     pub tags: ArtifactTags,
+}
+
+impl PublishArchive {
+    /// The tags the server's publish API knows. Until it takes the kind of an artifact
+    /// (new_implementation_plan.md C8.6), the source is uploaded as `source-any`.
+    fn upload_tags(&self) -> ArtifactTags {
+        match self.kind {
+            ArtifactKind::Source => ArtifactTags::source(),
+            _ => self.tags.clone(),
+        }
+    }
 }
 
 /// Refuses manifests which others couldn't reproduce: `path` dependencies, `[overrides]`,
@@ -100,9 +112,9 @@ pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
 }
 
 /// The archives to publish: the given `files`, or without any, all archives of the manifest's
-/// version in `dist/`. Their tags follow from the known `{name}-{version}-{kind}-` prefix of the
-/// file name, since tags never contain a `-`. Source packages come first, as the server needs
-/// them before a lepton or gluon version can be finalised.
+/// version in `dist/`. Their kind and tags follow the known `{name}-{version}-` prefix of the
+/// file name, since kinds and tags never contain a `-`. The source comes first, as the server
+/// needs it before a version can be finalised.
 pub fn publish_archives(
     root: &Path,
     manifest: &MagnetManifestV1,
@@ -118,8 +130,8 @@ pub fn publish_archives(
                     fs::read_dir(&dist).with_context(|| format!("Could not read {dist:?}"))?
                 {
                     let path = entry?.path();
-                    if let Some(tags) = file_name_tags(&path, &prefix) {
-                        archives.push(PublishArchive { path, tags });
+                    if let Some((kind, tags)) = file_name_artifact(&path, &prefix) {
+                        archives.push(PublishArchive { path, kind, tags });
                     }
                 }
             }
@@ -135,7 +147,7 @@ pub fn publish_archives(
             .iter()
             .map(|path| {
                 ensure!(path.is_file(), "{path:?} does not exist");
-                let tags = file_name_tags(path, &prefix).with_context(|| {
+                let (kind, tags) = file_name_artifact(path, &prefix).with_context(|| {
                     format!(
                         "{path:?} is no package of {} {}, its name has to start with {prefix}",
                         manifest.package.name,
@@ -144,40 +156,38 @@ pub fn publish_archives(
                 })?;
                 Ok(PublishArchive {
                     path: path.clone(),
+                    kind,
                     tags,
                 })
             })
             .collect::<anyhow::Result<_>>()?,
     };
-    archives.sort_by_key(|archive| (!archive.tags.is_source(), archive.path.clone()));
+    archives.sort_by_key(|archive| (archive.kind, archive.path.clone()));
     archives.dedup();
     Ok(archives)
 }
 
-/// `{name}-{version}-{kind}-`
+/// `{name}-{version}-`
 fn file_name_prefix(manifest: &MagnetManifestV1) -> anyhow::Result<String> {
     let version = SemanticVersion::try_from(manifest.package.version.clone())?;
+    let kind = ArtifactKind::Source;
     let tags = ArtifactTags::any();
-    let any = artifact_file_name(
-        &manifest.package.name,
-        &version,
-        &manifest.package_kind(),
-        &tags,
-    );
-    Ok(any
-        .strip_suffix(&format!("{tags}.tar.gz"))
+    let source = artifact_file_name(&manifest.package.name, &version, &kind, &tags);
+    Ok(source
+        .strip_suffix(&format!("{kind}-{tags}.tar.gz"))
         .context("Unexpected package file name")?
         .to_string())
 }
 
-fn file_name_tags(path: &Path, prefix: &str) -> Option<ArtifactTags> {
-    let tags = path
+fn file_name_artifact(path: &Path, prefix: &str) -> Option<(ArtifactKind, ArtifactTags)> {
+    let rest = path
         .file_name()?
         .to_str()?
         .strip_prefix(prefix)?
         .strip_suffix(".tar.gz")?;
+    let (kind, tags) = rest.split_once('-')?;
     let (abi, platform) = tags.split_once('-')?;
-    ArtifactTags::new(abi, platform).ok()
+    Some((kind.parse().ok()?, ArtifactTags::new(abi, platform).ok()?))
 }
 
 /// The artifact a version needs before it can be finalised
@@ -209,19 +219,20 @@ pub async fn publish(
             .unwrap_or_default()
             .to_string_lossy();
         match client
-            .upload_artifact(&name, &version, &archive.tags, content, &sha256)
+            .upload_artifact(&name, &version, &archive.upload_tags(), content, &sha256)
             .await
             .with_context(|| format!("Could not upload {file}"))?
         {
             Upload::Created => info!("Uploaded {file}"),
             Upload::AlreadyPresent => info!("{file} was already uploaded"),
         }
+        let tags = archive.upload_tags();
         published
             .artifacts
-            .retain(|artifact| artifact.key() != archive.tags.to_string());
+            .retain(|artifact| artifact.key() != tags.to_string());
         published.artifacts.push(GitArtifact {
-            abi: archive.tags.abi.clone(),
-            platform: archive.tags.platform.clone(),
+            abi: tags.abi,
+            platform: tags.platform,
             sha256,
         });
     }
@@ -314,7 +325,7 @@ mod tests {
                         .unwrap()
                         .to_string_lossy()
                         .to_string(),
-                    archive.tags.to_string(),
+                    format!("{}-{}", archive.kind, archive.tags),
                 )
             })
             .collect()
@@ -324,25 +335,30 @@ mod tests {
     fn test_archives_of_the_current_version() {
         let dir = dist(&[
             "foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz",
-            "foo-bar-1.2.0-lepton-source-any.tar.gz",
-            // other versions, kinds or files are ignored
-            "foo-bar-1.1.0-lepton-source-any.tar.gz",
             "foo-bar-1.2.0-quark-any-any.tar.gz",
+            "foo-bar-1.2.0-source-any-any.tar.gz",
+            // other versions, unknown kinds or other files are ignored
+            "foo-bar-1.1.0-source-any-any.tar.gz",
+            "foo-bar-1.2.0-gluon-any-any.tar.gz",
             "foo-bar-1.2.0-lepton-api-3-macos.tar.gz",
             ".tmpXyZ",
         ]);
         let archives = publish_archives(dir.path(), &manifest("lepton", ""), &[]).unwrap();
-        // the source package comes first
+        // the source comes first
         assert_eq!(
             names(&archives),
             [
                 (
-                    "foo-bar-1.2.0-lepton-source-any.tar.gz".to_string(),
-                    "source-any".to_string()
+                    "foo-bar-1.2.0-source-any-any.tar.gz".to_string(),
+                    "source-any-any".to_string()
+                ),
+                (
+                    "foo-bar-1.2.0-quark-any-any.tar.gz".to_string(),
+                    "quark-any-any".to_string()
                 ),
                 (
                     "foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz".to_string(),
-                    "api3_0-macos_arm64".to_string()
+                    "lepton-api3_0-macos_arm64".to_string()
                 ),
             ]
         );
@@ -352,8 +368,8 @@ mod tests {
     fn test_explicit_archives() {
         let dir = dist(&[
             "foo-bar-1.2.0-lepton-api3_0-macos_arm64.tar.gz",
-            "foo-bar-1.2.0-lepton-source-any.tar.gz",
-            "foo-bar-1.1.0-lepton-source-any.tar.gz",
+            "foo-bar-1.2.0-source-any-any.tar.gz",
+            "foo-bar-1.1.0-source-any-any.tar.gz",
         ]);
         let file = dir
             .path()
@@ -364,15 +380,14 @@ mod tests {
             archives,
             [PublishArchive {
                 path: file,
+                kind: ArtifactKind::Lepton,
                 tags: ArtifactTags::new("api3_0", "macos_arm64").unwrap()
             }]
         );
 
-        let other = dir
-            .path()
-            .join("dist/foo-bar-1.1.0-lepton-source-any.tar.gz");
+        let other = dir.path().join("dist/foo-bar-1.1.0-source-any-any.tar.gz");
         let err = publish_archives(dir.path(), &manifest("lepton", ""), &[other]).unwrap_err();
-        assert!(err.to_string().contains("foo-bar-1.2.0-lepton-"), "{err}");
+        assert!(err.to_string().contains("foo-bar-1.2.0-"), "{err}");
 
         let missing = dir.path().join("dist/missing.tar.gz");
         assert!(publish_archives(dir.path(), &manifest("lepton", ""), &[missing]).is_err());

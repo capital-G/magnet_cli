@@ -23,7 +23,7 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{ArtifactTags, PackageArchive, PackageKind},
+        package::{ArtifactKind, ArtifactTags, PackageArchive, PackageKind},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             ProjectLayout,
@@ -363,6 +363,7 @@ impl Project {
                 files: vec![],
                 binaries,
             },
+            PLUGINS_DIR,
         )?;
         for (path, source) in &entries {
             let destination = dev_dir.join(path);
@@ -1162,13 +1163,23 @@ impl Project {
                         manifest.package.name
                     );
                 }
-                // only the platform matters for selecting the files, so a local build also
-                // works with a SuperCollider whose abi isn't known
-                let tags = match kind {
-                    PackageKind::Quark => ArtifactTags::any(),
-                    _ => ArtifactTags::new("any", &self.target.platform()?.to_string())?,
-                };
-                package_entries(folder, &collect_files(folder, &manifest, &tags)?)?
+                // what `magnet package` selects for its kinds, with uncommitted changes, since
+                // it's a local build. Only the platform matters for selecting the binaries, so
+                // it also works with a SuperCollider whose abi isn't known. The binaries stay
+                // in `plugins/` until the installed layout follows (new_implementation_plan.md
+                // C8.4).
+                let mut entries = BTreeMap::new();
+                for artifact_kind in manifest.artifact_kinds() {
+                    let tags = match artifact_kind {
+                        ArtifactKind::Lepton => {
+                            ArtifactTags::new("any", &self.target.platform()?.to_string())?
+                        }
+                        _ => ArtifactTags::any(),
+                    };
+                    let files = collect_files(folder, &manifest, artifact_kind, &tags, true)?;
+                    entries.extend(package_entries(folder, &files, PLUGINS_DIR)?);
+                }
+                entries
             }
             false => folder_entries(folder)?,
         };
@@ -1262,42 +1273,56 @@ impl Project {
         Ok(())
     }
 
-    /// Packages every archive of the project's version which can be built on this machine
-    /// into `dist/`: the `any-any` artifact of a quark, the source package and the binary
-    /// artifact of a lepton (for the target of this machine), only the source package of a
-    /// gluon (reserved).
-    pub fn create_packages(&self) -> anyhow::Result<Vec<PackageArchive>> {
-        let tags = match self.kind() {
-            PackageKind::Quark => vec![ArtifactTags::any()],
-            PackageKind::Lepton => {
-                vec![ArtifactTags::source(), self.target.get()?.tags()]
-            }
-            PackageKind::Gluon => vec![ArtifactTags::source()],
-        };
-        tags.iter().map(|tags| self.create_package(tags)).collect()
+    /// Packages every artifact of the project's version which can be built on this machine
+    /// into `dist/`: the source, the quark and the lepton for the target of this machine, as
+    /// far as the manifest has their `[artifact]` tables (see DESIGN.md "Artifact kinds").
+    /// `allow_dirty` packages the source from git despite uncommitted changes.
+    pub fn create_packages(&self, allow_dirty: bool) -> anyhow::Result<Vec<PackageArchive>> {
+        let kinds = self.project_manifest.get_manifest().artifact_kinds();
+        ensure!(
+            !kinds.is_empty(),
+            "{MAGNET_PROJECT_FILE} has neither [artifact.quark] nor [artifact.lepton], so the package would only consist of its source"
+        );
+        let mut artifacts = vec![(ArtifactKind::Source, ArtifactTags::any())];
+        for kind in kinds {
+            let tags = match kind {
+                ArtifactKind::Lepton => self.target.get()?.tags(),
+                _ => ArtifactTags::any(),
+            };
+            artifacts.push((kind, tags));
+        }
+        artifacts
+            .iter()
+            .map(|(kind, tags)| self.create_package(*kind, tags, allow_dirty))
+            .collect()
     }
 
-    /// Packages the project as the artifact with the given tags into `dist/`, see DESIGN.md
+    /// Packages the artifact of `kind` with the given tags into `dist/`, see DESIGN.md
     /// "Packaging". The selected files keep their path relative to the project root, only the
-    /// `platform-paths` binaries go into `plugins/`.
-    /// [ArtifactTags::source] creates the source package of a lepton or gluon.
+    /// binaries of a lepton go into `plugins/<platform>/<abi>/`.
     #[instrument(skip(self))]
-    pub fn create_package(&self, tags: &ArtifactTags) -> anyhow::Result<PackageArchive> {
+    pub fn create_package(
+        &self,
+        kind: ArtifactKind,
+        tags: &ArtifactTags,
+        allow_dirty: bool,
+    ) -> anyhow::Result<PackageArchive> {
         let manifest = self.project_manifest.get_manifest();
         ensure!(
-            manifest.package_kind() != PackageKind::Quark || *tags == ArtifactTags::any(),
-            "A quark only has an {} artifact, not {tags}",
+            kind == ArtifactKind::Lepton || *tags == ArtifactTags::any(),
+            "A {kind} artifact has the tags {}, not {tags}",
             ArtifactTags::any()
         );
-        let files = collect_files(&self.path, manifest, tags)?;
-        let entries = package_entries(&self.path, &files)?;
+        let files = collect_files(&self.path, manifest, kind, tags, allow_dirty)?;
+        let plugins = format!("{PLUGINS_DIR}/{}/{}", tags.platform, tags.abi);
+        let entries = package_entries(&self.path, &files, &plugins)?;
 
         let dist = self.project_dir(ProjectDirectory::Dist);
         fs::create_dir_all(&dist).with_context(|| format!("Could not create {dist:?}"))?;
         let package_path = dist.join(artifact_file_name(
             &manifest.package.name,
             &SemanticVersion::try_from(manifest.package.version.clone())?,
-            &manifest.package_kind(),
+            &kind,
             tags,
         ));
         // written next to the target and renamed, so a failure leaves no half-written package
@@ -1309,18 +1334,23 @@ impl Project {
 
         Ok(PackageArchive {
             path: package_path,
+            kind,
             tags: tags.clone(),
             files: entries.into_keys().collect(),
         })
     }
 }
 
-/// binaries of `platform-paths` within a package
+/// binaries of `[artifact.lepton]` within a package
 const PLUGINS_DIR: &str = "plugins";
 
 /// The files of a package by their `/`-separated path within it: the selected files keep
-/// their path relative to `root`, the binaries go into `plugins/`
-fn package_entries(root: &Path, files: &PackageFiles) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+/// their path relative to `root`, the binaries go into `plugins` (a `/`-separated folder)
+fn package_entries(
+    root: &Path,
+    files: &PackageFiles,
+    plugins: &str,
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
     let mut entries = BTreeMap::new();
     for file in &files.files {
         entries.insert(archive_path(file)?, root.join(file));
@@ -1330,7 +1360,7 @@ fn package_entries(root: &Path, files: &PackageFiles) -> anyhow::Result<BTreeMap
             .file_name()
             .with_context(|| format!("{binary:?} has no file name"))?
             .to_string_lossy();
-        let path = format!("{PLUGINS_DIR}/{name}");
+        let path = format!("{plugins}/{name}");
         ensure!(
             entries.insert(path.clone(), root.join(binary)).is_none(),
             "{binary:?} would be packaged as {path}, which is already part of the package"
@@ -2488,7 +2518,9 @@ beta = "^1"
             layout: ProjectLayout::LegacyQuark,
         };
         let project = Project::create(dir.path(), manifest, options).unwrap();
-        let archive = project.create_package(&ArtifactTags::any()).unwrap();
+        let archive = project
+            .create_package(ArtifactKind::Quark, &ArtifactTags::any(), false)
+            .unwrap();
         assert_eq!(
             archive.files,
             [
@@ -2538,32 +2570,47 @@ beta = "^1"
                 "classes/Foo.sc".to_string(),
                 "magnet.toml".to_string(),
             ];
+            if lepton {
+                let manifest_path = dir.path().join(MAGNET_PROJECT_FILE);
+                let content = fs::read_to_string(&manifest_path).unwrap();
+                let uncommented = content.replace(
+                    "# [artifact.lepton.platform-paths]\n# ",
+                    "[artifact.lepton.platform-paths]\n",
+                );
+                assert_ne!(content, uncommented, "{content}");
+                fs::write(&manifest_path, uncommented).unwrap();
+                project = Project::open(dir.path()).unwrap();
+                project.set_target(target(&platform.to_string(), "api3_0"));
+            }
+            // the source takes the files committed to git
+            crate::git_client::source::tests::commit_files(dir.path(), &[]);
+            let archives = project.create_packages(false).unwrap();
+            let kinds: Vec<_> = archives.iter().map(|archive| archive.kind).collect();
+            let source = &archives[0].files;
+            assert!(source.contains(&"src/Foo.cpp".to_string()), "{source:?}");
+            assert!(source.contains(&"CMakeLists.txt".to_string()), "{source:?}");
+            assert_eq!(archives[1].files, classes);
             if !lepton {
-                let archives = project.create_packages().unwrap();
-                assert_eq!(archives.len(), 1);
-                assert_eq!(archives[0].files, classes);
+                assert_eq!(kinds, [ArtifactKind::Source, ArtifactKind::Quark]);
                 continue;
             }
-            let manifest_path = dir.path().join(MAGNET_PROJECT_FILE);
-            let content = fs::read_to_string(&manifest_path).unwrap();
-            let uncommented = content.replace(
-                "# [artifact.lepton.platform-paths]\n# ",
-                "[artifact.lepton.platform-paths]\n",
+            assert_eq!(
+                kinds,
+                [
+                    ArtifactKind::Source,
+                    ArtifactKind::Quark,
+                    ArtifactKind::Lepton
+                ]
             );
-            assert_ne!(content, uncommented, "{content}");
-            fs::write(&manifest_path, uncommented).unwrap();
-            project = Project::open(dir.path()).unwrap();
-            project.set_target(target(&platform.to_string(), "api3_0"));
-            assert_eq!(project.kind(), PackageKind::Lepton);
-            // the source package from git follows with the artifact kinds (C8.2)
-            let tags = ArtifactTags::new("api3_0", &platform.to_string()).unwrap();
-            let archive = project.create_package(&tags).unwrap();
-            let mut expected = classes.to_vec();
-            expected.extend([
-                "plugins/Foo.scx".to_string(),
-                format!("plugins/libdep.{libraries}"),
-            ]);
-            assert_eq!(archive.files, expected);
+            let plugins = format!("plugins/{platform}/api3_0");
+            assert_eq!(
+                archives[2].files,
+                [
+                    "magnet.toml".to_string(),
+                    format!("{plugins}/Foo.scx"),
+                    format!("{plugins}/libdep.{libraries}"),
+                ]
+            );
         }
     }
 
@@ -2603,7 +2650,11 @@ beta = "^1"
             ],
         );
 
-        let package = project.create_package(&ArtifactTags::any()).unwrap().path;
+        crate::git_client::source::tests::commit_files(dir.path(), &[]);
+        let package = project
+            .create_package(ArtifactKind::Quark, &ArtifactTags::any(), false)
+            .unwrap()
+            .path;
         assert_eq!(
             package,
             dir.path().join("dist/my-quark-0.2.0-quark-any-any.tar.gz")
@@ -2621,18 +2672,34 @@ beta = "^1"
 
         // packaging again (now with dist/ present) gives the same bytes
         let first = fs::read(&package).unwrap();
-        project.create_package(&ArtifactTags::any()).unwrap();
+        project
+            .create_package(ArtifactKind::Quark, &ArtifactTags::any(), false)
+            .unwrap();
         assert_eq!(fs::read(&package).unwrap(), first);
 
-        assert!(project.create_package(&ArtifactTags::source()).is_err());
+        // only a lepton has other tags
+        let tags = ArtifactTags::new("api3_0", "macos_arm64").unwrap();
+        assert!(project
+            .create_package(ArtifactKind::Quark, &tags, false)
+            .is_err());
+        assert!(project
+            .create_package(ArtifactKind::Lepton, &tags, false)
+            .is_err());
 
         // the reported files are the contents of the archive
         // a quark doesn't need the target, which is unknown without sclang
         project.set_target(LazyTarget::with_sclang(None, None, no_sclang));
-        let archives = project.create_packages().unwrap();
-        assert_eq!(archives.len(), 1);
-        assert_eq!(archives[0].tags, ArtifactTags::any());
-        assert_eq!(archives[0].files, archive_paths(&package));
+        let archives = project.create_packages(false).unwrap();
+        assert_eq!(archives.len(), 2);
+        assert_eq!(archives[0].kind, ArtifactKind::Source);
+        assert!(archives[0]
+            .path
+            .ends_with("my-quark-0.2.0-source-any-any.tar.gz"));
+        // every committed file, unlike the quark
+        assert!(archives[0].files.contains(&"test.scd".to_string()));
+        assert_eq!(archives[1].kind, ArtifactKind::Quark);
+        assert_eq!(archives[1].tags, ArtifactTags::any());
+        assert_eq!(archives[1].files, archive_paths(&package));
     }
 
     const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n[artifact.source]\nfrom = \"paths\"\npaths = [\"Classes/**\", \"src/**\"]\n[artifact.quark]\npaths = [\"Classes/**.sc\"]\n[artifact.lepton]\nplatform-paths = { macos_arm64 = [\"build/**/*.scx\"] }\n";
@@ -2651,26 +2718,37 @@ beta = "^1"
         );
 
         let tags = ArtifactTags::new("api3_0", "macos_arm64").unwrap();
-        let package = project.create_package(&tags).unwrap().path;
+        let package = project
+            .create_package(ArtifactKind::Lepton, &tags, false)
+            .unwrap()
+            .path;
         assert!(package.ends_with("foo-1.0.0-lepton-api3_0-macos_arm64.tar.gz"));
         assert_eq!(
             archive_paths(&package),
-            ["Classes/Foo.sc", "magnet.toml", "plugins/Foo.scx"]
+            ["magnet.toml", "plugins/macos_arm64/api3_0/Foo.scx"]
         );
 
         let source = project
-            .create_package(&ArtifactTags::source())
+            .create_package(ArtifactKind::Source, &ArtifactTags::any(), false)
             .unwrap()
             .path;
-        assert!(source.ends_with("foo-1.0.0-lepton-source-any.tar.gz"));
+        assert!(source.ends_with("foo-1.0.0-source-any-any.tar.gz"));
         project.set_target(target("macos_arm64", "api3_0"));
-        let archives = project.create_packages().unwrap();
+        let archives = project.create_packages(false).unwrap();
         let paths: Vec<_> = archives.iter().map(|archive| &archive.path).collect();
-        assert_eq!(paths, [&source, &package]);
+        let quark = dir.path().join("dist/foo-1.0.0-quark-any-any.tar.gz");
+        assert_eq!(paths, [&source, &quark, &package]);
         assert_eq!(
             archive_paths(&source),
             ["Classes/Foo.sc", "magnet.toml", "src/Foo.cpp"]
         );
+        assert_eq!(archive_paths(&quark), ["Classes/Foo.sc", "magnet.toml"]);
+
+        // packaging again gives the same bytes for every artifact
+        let first: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+        project.create_packages(false).unwrap();
+        let again: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+        assert_eq!(first, again);
     }
 
     #[test]
@@ -2680,10 +2758,15 @@ beta = "^1"
             &dir,
             &["Classes/Foo.sc", "build/a/Foo.scx", "build/b/Foo.scx"],
         );
+        let tags = ArtifactTags::new("api3_0", "macos_arm64").unwrap();
         let err = project
-            .create_package(&ArtifactTags::new("api3_0", "macos_arm64").unwrap())
+            .create_package(ArtifactKind::Lepton, &tags, false)
             .unwrap_err();
-        assert!(err.to_string().contains("plugins/Foo.scx"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("plugins/macos_arm64/api3_0/Foo.scx"),
+            "{err}"
+        );
     }
     const ALPHA_BETA: &str = "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\nalpha = \"^1\"\nbeta = \"^1\"\n";
 

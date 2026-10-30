@@ -13,7 +13,7 @@ use std::{
 use toml_edit::DocumentMut;
 use tracing::{error, instrument, trace, warn};
 
-use crate::models::package::PackageKind;
+use crate::models::package::{ArtifactKind, PackageKind};
 use crate::target::current_platform;
 
 include!(concat!(env!("OUT_DIR"), "/manifest_models.rs"));
@@ -349,6 +349,20 @@ impl MagnetManifestV1 {
             Some(_) => PackageKind::Lepton,
             None => PackageKind::Quark,
         }
+    }
+
+    /// The kinds of artifacts the version contains, i.e. whose `[artifact]` tables it has.
+    /// The source isn't one of them, every version has one.
+    pub fn artifact_kinds(&self) -> Vec<ArtifactKind> {
+        let artifact = self.artifact.clone().unwrap_or_default();
+        let mut kinds = vec![];
+        if artifact.quark.is_some() {
+            kinds.push(ArtifactKind::Quark);
+        }
+        if artifact.lepton.is_some() {
+            kinds.push(ArtifactKind::Lepton);
+        }
+        kinds
     }
 
     /// The globs of `[artifact.quark]`, empty if the manifest has none

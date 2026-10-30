@@ -87,10 +87,43 @@ impl FromStr for ArtifactTags {
     }
 }
 
+/// The kind of an artifact, which is part of its filename and its `dl` URL, see DESIGN.md
+/// "Artifact kinds". The source is no kind a version contains, but every version has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ArtifactKind {
+    Source,
+    Quark,
+    Lepton,
+}
+
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ArtifactKind::Source => "source",
+            ArtifactKind::Quark => "quark",
+            ArtifactKind::Lepton => "lepton",
+        })
+    }
+}
+
+impl FromStr for ArtifactKind {
+    type Err = anyhow::Error;
+
+    fn from_str(kind: &str) -> anyhow::Result<Self> {
+        match kind {
+            "source" => Ok(ArtifactKind::Source),
+            "quark" => Ok(ArtifactKind::Quark),
+            "lepton" => Ok(ArtifactKind::Lepton),
+            _ => anyhow::bail!("{kind:?} is no kind of artifact this version of magnet knows"),
+        }
+    }
+}
+
 /// An archive written by `magnet package`
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageArchive {
     pub path: PathBuf,
+    pub kind: ArtifactKind,
     pub tags: ArtifactTags,
     /// the paths within the archive, sorted
     pub files: Vec<String>,

@@ -1,7 +1,7 @@
 use pubgrub::SemanticVersion;
 
 use crate::models::{
-    package::{ArtifactTags, PackageKind},
+    package::{ArtifactKind, ArtifactTags},
     project_manifest::MagnetManifestV1,
 };
 
@@ -10,7 +10,7 @@ use crate::models::{
 pub fn artifact_file_name(
     name: &str,
     version: &SemanticVersion,
-    kind: &PackageKind,
+    kind: &ArtifactKind,
     tags: &ArtifactTags,
 ) -> String {
     format!(
@@ -29,7 +29,7 @@ mod tests {
             artifact_file_name(
                 "Foo_Bar",
                 &SemanticVersion::new(1, 2, 0),
-                &PackageKind::Quark,
+                &ArtifactKind::Quark,
                 &ArtifactTags::any()
             ),
             "foo-bar-1.2.0-quark-any-any.tar.gz",
@@ -37,21 +37,25 @@ mod tests {
     }
 
     #[test]
-    fn test_lepton_names() {
+    fn test_lepton_and_source_names() {
         let version = SemanticVersion::one();
-        let kind = PackageKind::Lepton;
         assert_eq!(
             artifact_file_name(
                 "foobar",
                 &version,
-                &kind,
+                &ArtifactKind::Lepton,
                 &ArtifactTags::new("api3_0", "macos_arm64").unwrap()
             ),
             "foobar-1.0.0-lepton-api3_0-macos_arm64.tar.gz",
         );
         assert_eq!(
-            artifact_file_name("foobar", &version, &kind, &ArtifactTags::source()),
-            "foobar-1.0.0-lepton-source-any.tar.gz",
+            artifact_file_name(
+                "foobar",
+                &version,
+                &ArtifactKind::Source,
+                &ArtifactTags::any()
+            ),
+            "foobar-1.0.0-source-any-any.tar.gz",
         );
     }
 }
