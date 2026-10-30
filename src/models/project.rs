@@ -23,7 +23,7 @@ use crate::{
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
         lock_file::{LockDependency, LockFile, LockSource},
-        package::{ArtifactKey, ArtifactKind, ArtifactTags, PackageArchive, PackageKind},
+        package::{ArtifactKey, ArtifactKind, ArtifactTags, PackageArchive},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1EntrypointItem, MagnetManifestV1EntrypointItemKind,
             ProjectLayout,
@@ -320,7 +320,7 @@ impl Project {
             .write(&self.path)?;
         write_server_options(
             &self.project_dir(ProjectDirectory::Packages),
-            self.kind() == PackageKind::Lepton,
+            self.has_lepton(),
         )
     }
 
@@ -328,7 +328,7 @@ impl Project {
     /// into `magnet_packages/.dev/<name>/plugins`, so the server loads the local build
     /// (DESIGN.md "Server plugins"). A missing build only warns, since it may not exist yet.
     fn copy_dev_plugins(&self) -> anyhow::Result<()> {
-        if self.kind() != PackageKind::Lepton {
+        if !self.has_lepton() {
             return Ok(());
         }
         let manifest = self.project_manifest.get_manifest();
@@ -388,9 +388,12 @@ impl Project {
         &self.path
     }
 
-    /// The kind of the project in the index, see [MagnetManifestV1::package_kind]
-    pub fn kind(&self) -> PackageKind {
-        self.project_manifest.get_manifest().package_kind()
+    /// `true` if the project builds a lepton, i.e. has `[artifact.lepton]`
+    pub fn has_lepton(&self) -> bool {
+        self.project_manifest
+            .get_manifest()
+            .artifact_kinds()
+            .contains(&ArtifactKind::Lepton)
     }
 
     /// The entrypoints of the project, which can be started via `magnet run`
@@ -474,7 +477,7 @@ impl Project {
                 lock_file
                     .dependencies
                     .iter()
-                    .all(|(name, dependency)| self.package_dir(&dependency.folder(), name).is_dir())
+                    .all(|(name, _)| self.package_dir(name).is_dir())
             });
         ensure!(
             installed,
@@ -919,8 +922,8 @@ impl Project {
             if overrides.contains_key(name) || dependency.source != LockSource::Index {
                 continue;
             }
-            match self.select_artifact(provider, name, dependency)? {
-                Ok(artifact) => artifacts.push(artifact),
+            match self.select_artifacts(provider, name, dependency)? {
+                Ok(selected) => artifacts.extend(selected),
                 Err(message) => missing.push(message),
             }
         }
@@ -938,11 +941,15 @@ impl Project {
         let archives = downloader
             .download_all(&artifacts, PARALLEL_DOWNLOADS)
             .await?;
+        // every kind of a package goes into its folder
+        let mut packages: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
         for (artifact, archive) in artifacts.iter().zip(archives) {
-            let folder = lock_file.dependencies[&artifact.name].folder();
-            self.install_package(&folder, artifact, &archive)?;
+            packages.entry(&artifact.name).or_default().push(archive);
         }
-        let mut installed = artifacts.len();
+        for (name, archives) in &packages {
+            self.install_package(name, archives)?;
+        }
+        let mut installed = packages.len();
         for (name, dependency) in &lock_file.dependencies {
             if overrides.contains_key(name) {
                 continue;
@@ -959,7 +966,7 @@ impl Project {
                     self.git_cache.export(url, sha, checkout.path())?;
                     self.install_folder(
                         name,
-                        &dependency.folder(),
+                        &dependency.kinds,
                         checkout.path(),
                         &format!("{url} at {}", &sha[..sha.len().min(7)]),
                     )?;
@@ -967,7 +974,7 @@ impl Project {
                 LockSource::Path(path) => {
                     self.install_folder(
                         name,
-                        &dependency.folder(),
+                        &dependency.kinds,
                         &self.path.join(path),
                         &format!("{path:?}"),
                     )?;
@@ -977,7 +984,7 @@ impl Project {
         }
         for (name, folder) in &overrides {
             if let Some(dependency) = lock_file.dependencies.get(name) {
-                self.install_folder(name, &dependency.folder(), folder, "[overrides]")?;
+                self.install_folder(name, &dependency.kinds, folder, "[overrides]")?;
                 installed += 1;
             }
         }
@@ -989,70 +996,80 @@ impl Project {
         Ok(())
     }
 
-    /// The artifact of a locked package which gets installed: the binary of a lepton which
-    /// this machine loads, otherwise the quark (DESIGN.md "Packaging"). Until every kind gets
-    /// installed (new_implementation_plan.md C8.4), a version with a lepton only gets its
-    /// lepton artifact. If the lock file has no binary for this machine, it may have been
+    /// The artifacts of a locked package which get installed: one for each of its kinds
+    /// (DESIGN.md "Artifact kinds"), i.e. the quark and the binary of a lepton which this
+    /// machine loads. If the lock file has no binary for this machine, it may have been
     /// published later, so its checksum gets taken from the index and added to `dependency`.
     /// Without any, the error message which suggests a version with a binary (DESIGN.md
     /// "Missing binary").
-    fn select_artifact(
+    fn select_artifacts(
         &self,
         provider: &GitClient,
         name: &str,
         dependency: &mut LockDependency,
-    ) -> anyhow::Result<Result<Artifact, String>> {
+    ) -> anyhow::Result<Result<Vec<Artifact>, String>> {
         ensure!(
             dependency.source == LockSource::Index,
             "{name} has the source {}, which can not be installed yet",
             dependency.source
         );
         let version = dependency.version;
-        let key = match dependency.folder() {
-            PackageKind::Lepton => {
-                let target = self.target.get().with_context(|| {
-                    format!("{name} contains a lepton, whose binary depends on the platform and abi of this machine")
-                })?;
-                let locked: Vec<ArtifactTags> = dependency
+        ensure!(
+            !dependency.kinds.is_empty(),
+            "{name} {version} contains neither a quark nor a lepton"
+        );
+        let mut keys = vec![];
+        for kind in dependency.kinds.clone() {
+            match kind {
+                ArtifactKind::Quark => keys.push(ArtifactKey::any(kind)),
+                ArtifactKind::Lepton => {
+                    let target = self.target.get().with_context(|| {
+                        format!("{name} contains a lepton, whose binary depends on the platform and abi of this machine")
+                    })?;
+                    let locked: Vec<ArtifactTags> = dependency
+                        .checksums
+                        .keys()
+                        .filter_map(|key| key.parse::<ArtifactKey>().ok())
+                        .filter(|key| key.kind == ArtifactKind::Lepton)
+                        .map(|key| key.tags)
+                        .collect();
+                    let tags = match target.best_artifact(&locked) {
+                        Some(tags) => tags.clone(),
+                        None => match self.late_checksum(provider, name, dependency, target)? {
+                            Some(tags) => tags,
+                            None => {
+                                return Ok(Err(
+                                    self.missing_binary(provider, name, version, target)?
+                                ))
+                            }
+                        },
+                    };
+                    keys.push(ArtifactKey::new(kind, tags));
+                }
+                // never installed, only a lock file written by hand could list it
+                ArtifactKind::Source => {}
+            }
+        }
+        let artifacts = keys
+            .into_iter()
+            .map(|key| {
+                let sha256 = dependency
                     .checksums
-                    .keys()
-                    .filter_map(|key| key.parse::<ArtifactKey>().ok())
-                    .filter(|key| key.kind == ArtifactKind::Lepton)
-                    .map(|key| key.tags)
-                    .collect();
-                let tags = match target.best_artifact(&locked) {
-                    Some(tags) => tags.clone(),
-                    None => match self.late_checksum(provider, name, dependency, target)? {
-                        Some(tags) => tags,
-                        None => {
-                            return Ok(Err(self.missing_binary(provider, name, version, target)?))
-                        }
-                    },
-                };
-                ArtifactKey::new(ArtifactKind::Lepton, tags)
-            }
-            _ => {
-                ensure!(
-                    dependency.kinds.contains(&ArtifactKind::Quark),
-                    "{name} {version} contains neither a quark nor a lepton"
-                );
-                ArtifactKey::any(ArtifactKind::Quark)
-            }
-        };
-        let sha256 = dependency
-            .checksums
-            .get(&key.to_string())
-            .with_context(|| {
-                format!("{name} {version} has no {key} artifact in {MAGNET_LOCK_FILE}")
-            })?;
-        Ok(Ok(Artifact {
-            name: name.to_string(),
-            version,
-            kind: key.kind,
-            abi: key.tags.abi,
-            platform: key.tags.platform,
-            sha256: sha256.clone(),
-        }))
+                    .get(&key.to_string())
+                    .with_context(|| {
+                        format!("{name} {version} has no {key} artifact in {MAGNET_LOCK_FILE}")
+                    })?;
+                Ok(Artifact {
+                    name: name.to_string(),
+                    version,
+                    kind: key.kind,
+                    abi: key.tags.abi,
+                    platform: key.tags.platform,
+                    sha256: sha256.clone(),
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Ok(artifacts))
     }
 
     /// Adds the checksum of a binary for `target` from the index to `dependency`, if the
@@ -1144,15 +1161,17 @@ impl Project {
             .collect()
     }
 
-    /// Installs a package from a folder (an override (DESIGN.md "Missing binary"), a path
-    /// dependency or the checkout of a git dependency): what `magnet package` would select for
-    /// this platform if the folder has a `magnet.toml`, otherwise the folder as it is (e.g. a
-    /// legacy quark). Always copied and never checked against a checksum, so every install
-    /// copies the current files. `origin` says where the folder comes from.
+    /// Installs `name` from a local `folder` (a git checkout, a path dependency or an
+    /// override): what `magnet package` would select for its kinds if it has a `magnet.toml`
+    /// (with uncommitted changes, since it's a local build), otherwise the whole folder.
+    /// The binaries of a lepton need the platform and abi of this machine; without them, they
+    /// aren't installed.
+    /// The kinds of the folder's `magnet.toml` may differ from `locked`, e.g. an override with
+    /// a local build which adds a lepton, which only gets a warning.
     fn install_folder(
         &self,
         name: &str,
-        kind: &PackageKind,
+        locked: &[ArtifactKind],
         folder: &Path,
         origin: &str,
     ) -> anyhow::Result<()> {
@@ -1164,39 +1183,42 @@ impl Project {
         let entries = match manifest_path.is_file() {
             true => {
                 let manifest = ProjectManifest::open(manifest_path)?.get_manifest().clone();
-                ensure!(
-                    manifest.package_kind() == *kind,
-                    "{name} from {folder:?} ({origin}) is a {}, but {name} is a {kind}",
-                    manifest.package_kind()
-                );
                 if MagnetManifestV1::normalize_name(&manifest.package.name) != name {
                     warn!(
                         "{name} from {folder:?} ({origin}) is the project {}",
                         manifest.package.name
                     );
                 }
-                // what `magnet package` selects for its kinds, with uncommitted changes, since
-                // it's a local build. Only the platform matters for selecting the binaries, so
-                // it also works with a SuperCollider whose abi isn't known. The binaries stay
-                // in `plugins/` until the installed layout follows (new_implementation_plan.md
-                // C8.4).
+                let kinds = manifest.artifact_kinds();
+                if kinds != locked {
+                    warn!(
+                        "{name} from {folder:?} ({origin}) contains {}, but the locked version contains {}",
+                        kind_list(&kinds),
+                        kind_list(locked)
+                    );
+                }
                 let mut entries = BTreeMap::new();
-                for artifact_kind in manifest.artifact_kinds() {
-                    let tags = match artifact_kind {
-                        ArtifactKind::Lepton => {
-                            ArtifactTags::new("any", &self.target.platform()?.to_string())?
-                        }
+                for kind in kinds {
+                    let tags = match kind {
+                        ArtifactKind::Lepton => match self.target.get() {
+                            Ok(target) => target.tags(),
+                            Err(err) => {
+                                warn!("{err:#}, so the binaries of {name} from {origin} aren't installed");
+                                continue;
+                            }
+                        },
                         _ => ArtifactTags::any(),
                     };
-                    let files = collect_files(folder, &manifest, artifact_kind, &tags, true)?;
-                    entries.extend(package_entries(folder, &files, PLUGINS_DIR)?);
+                    let files = collect_files(folder, &manifest, kind, &tags, true)?;
+                    let plugins = format!("{PLUGINS_DIR}/{}/{}", tags.platform, tags.abi);
+                    entries.extend(package_entries(folder, &files, &plugins)?);
                 }
                 entries
             }
             false => folder_entries(folder)?,
         };
         info!("Install {name} from {origin}");
-        self.swap_in(kind, name, |staging| {
+        self.swap_in(name, |staging| {
             for (path, source) in &entries {
                 let destination = staging.join(path);
                 if let Some(parent) = destination.parent() {
@@ -1210,43 +1232,37 @@ impl Project {
         })
     }
 
-    /// `magnet_packages/<kind>s/<name>`
-    fn package_dir(&self, kind: &PackageKind, name: &str) -> PathBuf {
+    /// `magnet_packages/<name>`, which holds every kind of artifact of the package
+    fn package_dir(&self, name: &str) -> PathBuf {
         self.project_dir(ProjectDirectory::Packages)
-            .join(format!("{kind}s"))
             .join(MagnetManifestV1::normalize_name(name))
     }
 
-    /// Extracts the archive of a package next to its directory and swaps it in afterwards,
-    /// so a broken archive never replaces a working package
-    fn install_package(
-        &self,
-        folder: &PackageKind,
-        artifact: &Artifact,
-        archive: &Path,
-    ) -> anyhow::Result<()> {
-        self.swap_in(folder, &artifact.name, |staging| {
-            compression::extract(archive, staging)
+    /// Extracts the archives of a package (one per kind) next to its directory and swaps it
+    /// in afterwards, so a broken archive never replaces a working package
+    fn install_package(&self, name: &str, archives: &[PathBuf]) -> anyhow::Result<()> {
+        self.swap_in(name, |staging| {
+            for archive in archives {
+                compression::extract(archive, staging)?;
+            }
+            Ok(())
         })
     }
 
     /// Fills a new directory via `fill` and replaces the package directory by it afterwards
     fn swap_in(
         &self,
-        kind: &PackageKind,
         name: &str,
         fill: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let target = self.package_dir(kind, name);
-        let kind_dir = target
-            .parent()
-            .context("A package directory has a parent")?;
-        fs::create_dir_all(kind_dir)
-            .with_context(|| format!("Could not create directory {kind_dir:?}"))?;
+        let target = self.package_dir(name);
+        let packages = self.project_dir(ProjectDirectory::Packages);
+        fs::create_dir_all(&packages)
+            .with_context(|| format!("Could not create directory {packages:?}"))?;
 
         let staging = tempfile::Builder::new()
             .prefix(STAGING_PREFIX)
-            .tempdir_in(kind_dir)?;
+            .tempdir_in(&packages)?;
         fill(staging.path())?;
         if target.exists() {
             fs::remove_dir_all(&target)
@@ -1258,34 +1274,30 @@ impl Project {
         Ok(())
     }
 
-    /// Removes the package directories within `magnet_packages/<kind>s` which are not locked,
-    /// as well as left over staging directories. Other hidden directories, such as
-    /// `magnet_packages/.dev`, are left alone.
+    /// Removes the package directories within `magnet_packages` which are not locked, e.g.
+    /// the `quarks`/`leptons` folders of an older magnet, as well as left over staging
+    /// directories. Other hidden directories, such as `magnet_packages/.dev`, and files, such
+    /// as the generated classes, are left alone.
     fn prune_packages(&self, lock_file: &LockFile) -> anyhow::Result<()> {
         let locked: HashSet<PathBuf> = lock_file
             .dependencies
-            .iter()
-            .map(|(name, dependency)| self.package_dir(&dependency.folder(), name))
+            .keys()
+            .map(|name| self.package_dir(name))
             .collect();
-
-        for kind in [PackageKind::Quark, PackageKind::Lepton, PackageKind::Gluon] {
-            let kind_dir = self
-                .project_dir(ProjectDirectory::Packages)
-                .join(format!("{kind}s"));
-            if !kind_dir.is_dir() {
+        let packages = self.project_dir(ProjectDirectory::Packages);
+        if !packages.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&packages)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_hidden = name.starts_with('.') && !name.starts_with(STAGING_PREFIX);
+            if !entry.file_type()?.is_dir() || is_hidden || locked.contains(&path) {
                 continue;
             }
-            for entry in fs::read_dir(&kind_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                let is_hidden = name.starts_with('.') && !name.starts_with(STAGING_PREFIX);
-                if !entry.file_type()?.is_dir() || is_hidden || locked.contains(&path) {
-                    continue;
-                }
-                info!("Remove {path:?}, which is not locked");
-                fs::remove_dir_all(&path).with_context(|| format!("Could not remove {path:?}"))?;
-            }
+            info!("Remove {path:?}, which is not locked");
+            fs::remove_dir_all(&path).with_context(|| format!("Could not remove {path:?}"))?;
         }
         Ok(())
     }
@@ -1360,6 +1372,18 @@ impl Project {
 
 /// binaries of `[artifact.lepton]` within a package
 const PLUGINS_DIR: &str = "plugins";
+
+/// e.g. `quark and lepton`, or `no kind`
+fn kind_list(kinds: &[ArtifactKind]) -> String {
+    match kinds.is_empty() {
+        true => "no kind".to_string(),
+        false => kinds
+            .iter()
+            .map(ArtifactKind::to_string)
+            .collect::<Vec<_>>()
+            .join(" and "),
+    }
+}
 
 /// The files of a package by their `/`-separated path within it: the selected files keep
 /// their path relative to `root`, the binaries go into `plugins` (a `/`-separated folder)
@@ -1783,14 +1807,14 @@ beta = "^1"
             installed.keys().cloned().collect::<Vec<_>>(),
             [
                 "MagnetServerOptions.sc",
-                "quarks/alpha/Classes/Alpha.sc",
-                "quarks/alpha/HelpSource/Classes/Alpha.schelp",
-                "quarks/beta/Classes/Beta.sc",
-                "quarks/ddw-common/DDWCommon.sc",
+                "alpha/Classes/Alpha.sc",
+                "alpha/HelpSource/Classes/Alpha.schelp",
+                "beta/Classes/Beta.sc",
+                "ddw-common/DDWCommon.sc",
             ]
             .map(PathBuf::from)
         );
-        let alpha = &installed[&PathBuf::from("quarks/alpha/Classes/Alpha.sc")];
+        let alpha = &installed[&PathBuf::from("alpha/Classes/Alpha.sc")];
         assert!(String::from_utf8_lossy(alpha).contains("1.1.0"));
 
         let config = fs::read_to_string(dir.path().join(SCLANG_CONF_FILE)).unwrap();
@@ -1817,7 +1841,7 @@ beta = "^1"
 
         install(&dir).await.unwrap();
         // beta 1.2.0 would be newer, but the lock covers the manifest
-        let beta = &installed_files(&dir)[&PathBuf::from("quarks/beta/Classes/Beta.sc")];
+        let beta = &installed_files(&dir)[&PathBuf::from("beta/Classes/Beta.sc")];
         assert!(String::from_utf8_lossy(beta).contains("1.0.0"));
         assert_eq!(read_lock(&dir), lock);
     }
@@ -1861,10 +1885,12 @@ beta = "^1"
         let (dir, _) = project(MANIFEST);
         let packages = dir.path().join("magnet_packages");
         for path in [
-            "quarks/stale/Classes/Stale.sc",
+            "stale/Classes/Stale.sc",
+            // the folders of an older magnet
+            "quarks/beta/Classes/Beta.sc",
             "leptons/stale/plugins/Stale.scx",
-            "quarks/.magnet-leftover/Classes/Half.sc",
-            "quarks/.hidden/keep",
+            ".magnet-leftover/Classes/Half.sc",
+            ".hidden/keep",
             ".dev/my-lepton/plugins/Dev.scx",
         ] {
             fs::create_dir_all(packages.join(path).parent().unwrap()).unwrap();
@@ -1872,12 +1898,13 @@ beta = "^1"
         }
 
         install(&dir).await.unwrap();
-        assert!(!packages.join("quarks/stale").exists());
-        assert!(!packages.join("leptons/stale").exists());
-        assert!(!packages.join("quarks/.magnet-leftover").exists());
-        assert!(packages.join("quarks/.hidden/keep").exists());
+        for removed in ["stale", "quarks", "leptons", ".magnet-leftover"] {
+            assert!(!packages.join(removed).exists(), "{removed}");
+        }
+        assert!(packages.join(".hidden/keep").exists());
         assert!(packages.join(".dev/my-lepton/plugins/Dev.scx").exists());
-        assert!(packages.join("quarks/beta").exists());
+        assert!(packages.join("beta/Classes/Beta.sc").exists());
+        assert!(packages.join("MagnetServerOptions.sc").exists());
     }
 
     const ZETA: &str =
@@ -1899,11 +1926,7 @@ beta = "^1"
     }
 
     fn installed_plugin(dir: &tempfile::TempDir) -> String {
-        fs::read_to_string(
-            dir.path()
-                .join("magnet_packages/leptons/zeta/plugins/Zeta.scx"),
-        )
-        .unwrap()
+        fs::read_to_string(dir.path().join("magnet_packages/zeta/plugins/Zeta.scx")).unwrap()
     }
 
     #[tokio::test]
@@ -1921,7 +1944,7 @@ beta = "^1"
             assert_eq!(installed_plugin(&dir), installed, "{platform} {abi}");
             assert!(dir
                 .path()
-                .join("magnet_packages/leptons/zeta/classes/Zeta.sc")
+                .join("magnet_packages/zeta/classes/Zeta.sc")
                 .is_file());
         }
     }
@@ -1992,7 +2015,7 @@ beta = "^1"
             err.to_string(),
             "zeta 1.1.0 has no binary for linux_x86_64 (api5_0), and no other version has one either. A local build can be installed via [overrides] in magnet.toml, e.g. zeta = { path = \"../zeta\" }"
         );
-        assert!(!dir.path().join("magnet_packages/leptons/zeta").exists());
+        assert!(!dir.path().join("magnet_packages/zeta").exists());
     }
 
     /// a lock file of zeta 1.0.0 which was written before its macOS binary got published
@@ -2080,21 +2103,29 @@ beta = "^1"
         );
         let lock = read_lock(&dir);
 
-        // no version of zeta has a binary for macOS, and sclang's abi isn't needed
-        let macos = || LazyTarget::with_sclang(Some("macos_arm64".into()), None, no_sclang);
+        // no version of zeta has a binary for macOS
+        let macos = || target("macos_arm64", "api3_0");
         install_for(&dir, macos(), false).await.unwrap();
-        assert_eq!(installed_plugin(&dir), "local/build/Zeta.scx");
-        let zeta = dir.path().join("magnet_packages/leptons/zeta");
-        let mut files: Vec<_> = walkdir::WalkDir::new(&zeta)
-            .into_iter()
-            .map(|entry| entry.unwrap())
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| archive_path(entry.path().strip_prefix(&zeta).unwrap()).unwrap())
-            .collect();
-        files.sort();
+        let zeta = dir.path().join("magnet_packages/zeta");
+        let plugin = zeta.join("plugins/macos_arm64/api3_0/Zeta.scx");
+        assert_eq!(fs::read_to_string(&plugin).unwrap(), "local/build/Zeta.scx");
+        let files = || {
+            let mut files: Vec<_> = walkdir::WalkDir::new(&zeta)
+                .into_iter()
+                .map(|entry| entry.unwrap())
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| archive_path(entry.path().strip_prefix(&zeta).unwrap()).unwrap())
+                .collect();
+            files.sort();
+            files
+        };
         assert_eq!(
-            files,
-            ["classes/Zeta.sc", "magnet.toml", "plugins/Zeta.scx"]
+            files(),
+            [
+                "classes/Zeta.sc",
+                "magnet.toml",
+                "plugins/macos_arm64/api3_0/Zeta.scx"
+            ]
         );
         // the lock file keeps the index entry
         assert_eq!(read_lock(&dir), lock);
@@ -2102,7 +2133,12 @@ beta = "^1"
         // every install copies the current files
         fs::write(dir.path().join("local/build/Zeta.scx"), "rebuilt").unwrap();
         install_for(&dir, macos(), true).await.unwrap();
-        assert_eq!(installed_plugin(&dir), "rebuilt");
+        assert_eq!(fs::read_to_string(&plugin).unwrap(), "rebuilt");
+
+        // without the abi of this machine, only the classes get installed
+        let no_abi = LazyTarget::with_sclang(Some("macos_arm64".into()), None, no_sclang);
+        install_for(&dir, no_abi, false).await.unwrap();
+        assert_eq!(files(), ["classes/Zeta.sc", "magnet.toml"]);
     }
 
     #[tokio::test]
@@ -2119,7 +2155,7 @@ beta = "^1"
         install_for(&dir, target("macos_arm64", "api3_0"), false)
             .await
             .unwrap();
-        let zeta = dir.path().join("magnet_packages/leptons/zeta");
+        let zeta = dir.path().join("magnet_packages/zeta");
         for file in ["Zeta.sc", "plugins/Zeta.scx", "HelpSource/Zeta.schelp"] {
             assert!(zeta.join(file).is_file(), "{file}");
         }
@@ -2135,18 +2171,17 @@ beta = "^1"
             .unwrap();
         assert!(err.to_string().contains("not a folder"), "{err}");
 
-        // a quark can't override a lepton
+        // other kinds than the locked version only warn, the override decides what's installed
         write_files(&dir, &["local/Zeta.sc"]);
         fs::write(
             dir.path().join("local/magnet.toml"),
             "magnet-version = 1\n[package]\nname = \"zeta\"\nversion = \"1.1.0\"\n[artifact.quark]\npaths = [\"*.sc\"]\n",
         )
         .unwrap();
-        let err = install_for(&dir, target("macos_arm64", "api3_0"), false)
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
             .await
-            .err()
             .unwrap();
-        assert!(err.to_string().contains("is a quark"), "{err}");
+        assert!(dir.path().join("magnet_packages/zeta/Zeta.sc").is_file());
     }
 
     #[tokio::test]
@@ -2158,7 +2193,7 @@ beta = "^1"
             .await
             .unwrap();
         assert_eq!(installed_plugin(&dir), "zeta 1.0.0 api3_0 macos_arm64\n");
-        assert!(!dir.path().join("magnet_packages/leptons/unknown").exists());
+        assert!(!dir.path().join("magnet_packages/unknown").exists());
     }
 
     #[tokio::test]
@@ -2384,9 +2419,12 @@ beta = "^1"
     }
 
     fn installed_packages(dir: &tempfile::TempDir) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(dir.path().join("magnet_packages/quarks"))
+        let mut names: Vec<String> = fs::read_dir(dir.path().join("magnet_packages"))
             .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().unwrap().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| !name.starts_with('.'))
             .collect();
         names.sort();
         names
@@ -2820,11 +2858,8 @@ beta = "^1"
         );
         install(&dir).await.unwrap();
         assert_eq!(installed_packages(&dir), ["alpha", "beta", "ddw-common"]);
-        let alpha = fs::read_to_string(
-            dir.path()
-                .join("magnet_packages/quarks/alpha/Classes/Alpha.sc"),
-        )
-        .unwrap();
+        let alpha =
+            fs::read_to_string(dir.path().join("magnet_packages/alpha/Classes/Alpha.sc")).unwrap();
         assert!(alpha.contains("2.0.0"), "{alpha}");
     }
 
@@ -3064,12 +3099,12 @@ beta = "^1"
         install_sources(&mut project, false).await.unwrap();
 
         let dir = root.path().join("project");
-        let quarks = dir.join("magnet_packages/quarks");
-        assert!(quarks.join("foo/Classes/Foo.sc").is_file());
-        assert!(!quarks.join("foo/notes.txt").exists());
-        assert!(quarks.join("bar/Bar.sc").is_file());
-        assert!(quarks.join("bar/Bar.quark").is_file());
-        assert!(quarks.join("alpha").is_dir());
+        let packages = dir.join("magnet_packages");
+        assert!(packages.join("foo/Classes/Foo.sc").is_file());
+        assert!(!packages.join("foo/notes.txt").exists());
+        assert!(packages.join("bar/Bar.sc").is_file());
+        assert!(packages.join("bar/Bar.quark").is_file());
+        assert!(packages.join("alpha").is_dir());
         let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
         assert!(
             lock.contains(&format!(
@@ -3105,7 +3140,7 @@ beta = "^1"
         );
         install_sources(&mut project, false).await.unwrap();
         assert_eq!(
-            fs::read_to_string(quarks.join("bar/Bar.sc")).unwrap(),
+            fs::read_to_string(packages.join("bar/Bar.sc")).unwrap(),
             "Bar { baz {} }"
         );
 
@@ -3149,10 +3184,10 @@ beta = "^1"
         install_sources(&mut project, false).await.unwrap();
 
         let dir = root.path().join("project");
-        let quarks = dir.join("magnet_packages/quarks");
-        assert!(quarks.join("local/Classes/Local.sc").is_file());
-        assert!(!quarks.join("local/notes.txt").exists());
-        assert!(quarks.join("alpha").is_dir());
+        let packages = dir.join("magnet_packages");
+        assert!(packages.join("local/Classes/Local.sc").is_file());
+        assert!(!packages.join("local/notes.txt").exists());
+        assert!(packages.join("alpha").is_dir());
         let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
         assert!(
             lock.contains("[dependencies.local]\nversion = \"0.3.0\"\nkinds = [\"quark\"]\nsource = \"../local\"\n"),
@@ -3172,7 +3207,7 @@ beta = "^1"
             .unwrap()
             .contains("version = \"0.4.0\""));
         assert_eq!(
-            fs::read_to_string(quarks.join("local/Classes/Local.sc")).unwrap(),
+            fs::read_to_string(packages.join("local/Classes/Local.sc")).unwrap(),
             "Local { new {} }"
         );
     }
@@ -3250,9 +3285,12 @@ beta = "^1"
     }
 
     fn installed_packages_in(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(dir.join("magnet_packages/quarks"))
+        let mut names: Vec<String> = fs::read_dir(dir.join("magnet_packages"))
             .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().unwrap().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| !name.starts_with('.'))
             .collect();
         names.sort();
         names
@@ -3300,6 +3338,106 @@ beta = "^1"
         (GitClient::open_local(index).unwrap(), downloader)
     }
 
+    /// An index with `theta` 1.0.0, a quark and a lepton (only for macos_arm64), packaged by
+    /// `magnet package`, and a downloader for it
+    fn index_with_theta(root: &Path) -> (GitClient, PackageDownloader) {
+        let source = root.join("theta");
+        fs::create_dir_all(source.join("classes")).unwrap();
+        fs::create_dir_all(source.join("build")).unwrap();
+        fs::write(source.join("classes/Theta.sc"), "Theta {}").unwrap();
+        fs::write(source.join("build/Theta.scx"), "theta binary").unwrap();
+        fs::write(
+            source.join(MAGNET_PROJECT_FILE),
+            "magnet-version = 1\n[package]\nname = \"theta\"\nversion = \"1.0.0\"\n[artifact.quark]\npaths = [\"classes/*.sc\"]\n[artifact.lepton.platform-paths]\nmacos_arm64 = [\"build/*.scx\"]\n",
+        )
+        .unwrap();
+        let theta = Project::open(&source).unwrap();
+        let tags = ArtifactTags::new("api3_0", "macos_arm64").unwrap();
+        let mut artifacts = vec![];
+        for (kind, tags) in [
+            (ArtifactKind::Quark, ArtifactTags::any()),
+            (ArtifactKind::Lepton, tags),
+        ] {
+            let archive = theta.create_package(kind, &tags, false).unwrap();
+            let sha256 = format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(fs::read(&archive.path).unwrap())
+            );
+            artifacts.push(format!(
+                "{{\"kind\": \"{kind}\", \"abi\": \"{}\", \"platform\": \"{}\", \"sha256\": \"{sha256}\"}}",
+                tags.abi, tags.platform
+            ));
+        }
+        let index = root.join("index");
+        fs::create_dir_all(index.join("t")).unwrap();
+        fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index/config.json"),
+            index.join("config.json"),
+        )
+        .unwrap();
+        fs::write(
+            index.join("t/theta.jsonl"),
+            format!(
+                "{{\"name\": \"theta\", \"version\": \"1.0.0\", \"kinds\": [\"quark\", \"lepton\"], \"dependencies\": {{}}, \"artifacts\": [{}]}}\n",
+                artifacts.join(", ")
+            ),
+        )
+        .unwrap();
+        let downloader = PackageDownloader::new(
+            root.join("download-cache"),
+            format!(
+                "{}{{name}}-{{version}}-{{kind}}-{{abi}}-{{platform}}.tar.gz",
+                Url::from_directory_path(source.join("dist")).unwrap()
+            ),
+        );
+        (GitClient::open_local(index).unwrap(), downloader)
+    }
+
+    /// every kind of a version goes into the package's folder
+    #[tokio::test]
+    async fn test_install_quark_and_lepton() {
+        let root = tempfile::tempdir().unwrap();
+        let (index, downloader) = index_with_theta(root.path());
+        let mut project = sources_project(root.path(), "theta = \"^1\"\n");
+        project.set_target(target("macos_arm64", "api3_0"));
+        project.install(&index, &downloader, false).await.unwrap();
+
+        let dir = root.path().join("project");
+        let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();
+        assert!(lock.contains("kinds = [\"quark\", \"lepton\"]"), "{lock}");
+        let theta = dir.join("magnet_packages/theta");
+        let mut files: Vec<_> = walkdir::WalkDir::new(&theta)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| archive_path(entry.path().strip_prefix(&theta).unwrap()).unwrap())
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                "classes/Theta.sc",
+                "magnet.toml",
+                "plugins/macos_arm64/api3_0/Theta.scx"
+            ]
+        );
+
+        // without a binary for this machine nothing gets installed, also not the quark
+        let other = root.path().join("other");
+        let mut project = sources_project(&other, "theta = \"^1\"\n");
+        project.set_target(target("linux_x86_64", "api3_0"));
+        let err = project
+            .install(&index, &downloader, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("no binary for linux_x86_64"),
+            "{err}"
+        );
+        assert!(!other.join("project/magnet_packages/theta").exists());
+    }
+
     #[tokio::test]
     async fn test_install_index_package_with_legacy_dependency() {
         use crate::git_client::source::tests::commit_files;
@@ -3331,7 +3469,7 @@ beta = "^1"
             ["bar", "beta", "ddw-common", "eta"]
         );
         assert_eq!(
-            fs::read_to_string(dir.join("magnet_packages/quarks/bar/Bar.sc")).unwrap(),
+            fs::read_to_string(dir.join("magnet_packages/bar/Bar.sc")).unwrap(),
             "Bar {}"
         );
         let lock = fs::read_to_string(dir.join(MAGNET_LOCK_FILE)).unwrap();

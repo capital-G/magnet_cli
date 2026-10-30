@@ -17,7 +17,7 @@ use crate::git_client::models::{
     deserialize_semantic_version, serialize_semantic_version, GitRelease,
 };
 use crate::git_client::source::GitReference;
-use crate::models::package::{ArtifactKind, PackageKind};
+use crate::models::package::ArtifactKind;
 use crate::models::project_manifest::MagnetManifestV1;
 use crate::resolver::online_provider::{ROOT_PACKAGE, SCLANG_PACKAGE};
 
@@ -134,13 +134,6 @@ impl TryFrom<String> for LockSource {
 impl From<LockSource> for String {
     fn from(value: LockSource) -> Self {
         value.to_string()
-    }
-}
-
-impl LockDependency {
-    /// The folder the package gets installed into, see [PackageKind::of_kinds]
-    pub fn folder(&self) -> PackageKind {
-        PackageKind::of_kinds(&self.kinds)
     }
 }
 

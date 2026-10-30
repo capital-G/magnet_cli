@@ -3,25 +3,15 @@ use std::{fmt, path::PathBuf, str::FromStr};
 use anyhow::{ensure, Context};
 use serde::{Deserialize, Serialize};
 
-/// The folder of an installed package, `magnet_packages/<kind>s/<name>`, which follows from
-/// the kinds of its version until all kinds share one folder (new_implementation_plan.md C8.4):
-/// a lepton if the version contains one, otherwise a quark.
+/// The kind of a package in the publish flow, until it follows the kinds of a version
+/// (new_implementation_plan.md C8.6): a lepton if the version contains one, otherwise a quark
+/// (`MagnetManifestV1::package_kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageKind {
     Quark,
     Lepton,
     Gluon,
-}
-
-impl PackageKind {
-    /// The folder of a version with these kinds
-    pub fn of_kinds(kinds: &[ArtifactKind]) -> Self {
-        match kinds.contains(&ArtifactKind::Lepton) {
-            true => PackageKind::Lepton,
-            false => PackageKind::Quark,
-        }
-    }
 }
 
 impl fmt::Display for PackageKind {
@@ -220,13 +210,5 @@ mod tests {
         for key in ["gluon-any-any", "any-any", "api3_0-macos_arm64"] {
             assert!(key.parse::<ArtifactKey>().is_err(), "{key}");
         }
-    }
-
-    #[test]
-    fn test_folder_of_kinds() {
-        use ArtifactKind::*;
-        assert_eq!(PackageKind::of_kinds(&[Quark]), PackageKind::Quark);
-        assert_eq!(PackageKind::of_kinds(&[Quark, Lepton]), PackageKind::Lepton);
-        assert_eq!(PackageKind::of_kinds(&[]), PackageKind::Quark);
     }
 }
