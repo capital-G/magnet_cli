@@ -192,7 +192,7 @@ pub(super) fn ask_manifest(
     let default_sclang = default_sclang_requirement().unwrap_or_default();
     let sclang = Text::new("Supported SuperCollider versions:")
         .with_initial_value(&default_sclang)
-        .with_help_message("A version range, e.g. >=3.13, empty for any version")
+        .with_help_message("A version range, e.g. >=3.10, empty for any version. Try find a lower boundary here such that it can be installed by a variety of people when publishing.")
         .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
             Ok(
                 match optional(input).map(|range| VersionReq::parse(&range)) {
@@ -237,7 +237,7 @@ pub(super) fn ask_manifest(
         .prompt()?;
     let repository = Text::new("Repository URL:")
         .with_initial_value(defaults.repository.as_deref().unwrap_or_default())
-        .with_help_message("Needed for publishing")
+        .with_help_message("For releasing a package, optional")
         .prompt()?;
     let tags = Text::new("Tags:")
         .with_help_message("Comma separated, e.g. synthesis, granular")
@@ -305,16 +305,12 @@ pub(super) fn create_project(
 }
 
 /// Suggestions for the license of a new project, SuperCollider's own first
-const LICENSES: [&str; 9] = [
+const LICENSES: [&str; 5] = [
     "GPL-3.0-or-later",
-    "GPL-2.0-or-later",
+    "AGPL-3.0-or-later",
     "LGPL-3.0-or-later",
     "MIT",
     "Apache-2.0",
-    "BSD-3-Clause",
-    "MPL-2.0",
-    "CC0-1.0",
-    "Unlicense",
 ];
 
 /// `None` for an empty (skipped) answer
