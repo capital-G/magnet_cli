@@ -36,6 +36,8 @@ walkdir = "2.5.0"
 toml = "1.1.2"
 toml_edit = "0.25.12"
 globset = "0.4.20"
+anstream = "0.6.21"
+anstyle = "1.0.13"
 
 [build-dependencies]
 typify = "0.5.0"

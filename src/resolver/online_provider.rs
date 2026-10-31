@@ -1,7 +1,7 @@
 use anyhow::bail;
 use pubgrub::{
-    DefaultStringReporter, Dependencies, DependencyConstraints, DependencyProvider, PubGrubError,
-    Ranges, Reporter, SelectedDependencies, SemanticVersion,
+    Dependencies, DependencyConstraints, DependencyProvider, PubGrubError, Ranges,
+    SelectedDependencies, SemanticVersion,
 };
 use semver::VersionReq;
 use std::{
@@ -17,6 +17,7 @@ use crate::git_client::{
 };
 use crate::models::package::ArtifactKind;
 use crate::models::project_manifest::MagnetManifestV1;
+use crate::resolver::report;
 use crate::resolver::sources::SourcePackage;
 use crate::target::LazyTarget;
 
@@ -92,7 +93,7 @@ pub fn sclang_lower_bound(requirement: &VersionReq) -> Ranges<SemanticVersion> {
 
 /// The lowest version of SuperCollider a project's `sclang` range allows, for which the
 /// dependencies get resolved, so the lock file holds for the whole range
-fn lowest_sclang_version(requirement: &VersionReq) -> SemanticVersion {
+pub(crate) fn lowest_sclang_version(requirement: &VersionReq) -> SemanticVersion {
     match requirement.to_ranges().bounding_range() {
         Some((Bound::Included(lower), _)) => *lower,
         Some((Bound::Excluded(lower), _)) => lower.bump_patch(),
@@ -154,7 +155,7 @@ impl DependencyProvider for GitClient {
                 &release.version_dependencies(),
             ))),
             None => Ok(Dependencies::Unavailable(format!(
-                "({package} {version} is missing in the index)"
+                "{package} {version} is missing in the index"
             ))),
         }
     }
@@ -315,7 +316,7 @@ impl DependencyProvider for RootProvider<'_> {
                             None => "the index".to_string(),
                         };
                         return Ok(Dependencies::Unavailable(format!(
-                            "({package} {version} requires {name} from {from}, but {} requires it from {}. Remove one of them, or use [overrides])",
+                            "{package} {version} requires {name} from {from}, but {} requires it from {}. Remove one of them, or use [overrides]",
                             source.required_by, source.source
                         )));
                     }
@@ -389,10 +390,7 @@ pub fn resolve_dependencies<'a>(
         // no collapse_no_versions(): a cached index may lack versions, so
         // "there is no available version" is valuable information
         Err(PubGrubError::NoSolution(derivation_tree)) => {
-            bail!(
-                "Could not resolve the dependencies:\n{}",
-                DefaultStringReporter::report(&derivation_tree)
-            )
+            Err(report::explain(&derivation_tree, provider).into())
         }
         Err(PubGrubError::ErrorRetrievingDependencies {
             package,
@@ -411,6 +409,7 @@ pub fn resolve_dependencies<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::HintedError;
     use std::path::PathBuf;
 
     fn resolve_fixture(dependencies: &[(&str, &str)]) -> anyhow::Result<Vec<(String, String)>> {
@@ -443,8 +442,18 @@ mod tests {
         let index = GitClient::open_local(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index"),
         )?;
+        resolve_in(&index, dependencies, preferred, sclang, target)
+    }
+
+    fn resolve_in(
+        index: &GitClient,
+        dependencies: &[(&str, &str)],
+        preferred: &[(&str, &str)],
+        sclang: Option<&str>,
+        target: &LazyTarget,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let provider = RootProvider {
-            git_provider: &index,
+            git_provider: index,
             dependencies: dependencies
                 .iter()
                 .map(|(name, constraint)| GitDependency {
@@ -556,23 +565,49 @@ mod tests {
         assert!(selected.contains(&("alpha".to_string(), "1.1.0".to_string())));
     }
 
+    fn hints(err: &anyhow::Error) -> Vec<String> {
+        err.downcast_ref::<HintedError>()
+            .map(|hinted| hinted.hints.clone())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_resolve_unknown_package() {
-        let err = resolve_fixture(&[("unknown", "*")])
-            .unwrap_err()
-            .to_string();
-        println!("{err}");
-        assert!(err.contains("unknown"));
+        let err = resolve_fixture(&[("unknown", "*")]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Could not resolve the dependencies:\n  \
+             The project depends on unknown.\n  \
+             unknown is not in the index."
+        );
+        assert!(hints(&err).is_empty());
     }
 
     #[test]
     fn test_resolve_conflict() {
-        // alpha 1.1 requires beta ^1, delta 0.1 requires beta <1
-        let err = resolve_fixture(&[("alpha", "^1.1.0"), ("delta", "=0.1.0")])
-            .unwrap_err()
-            .to_string();
-        println!("{err}");
-        assert!(err.contains("beta"));
+        // alpha 1.1 requires beta ^1, delta 0.1 requires beta <1. The gaps pubgrub notes
+        // around alpha 1.1.0 and delta 0.1.0 are left out.
+        let err = resolve_fixture(&[("alpha", "^1.1.0"), ("delta", "=0.1.0")]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Could not resolve the dependencies:\n  \
+             The project depends on delta =0.1.0.\n  \
+             The project depends on alpha ^1.1.0.\n  \
+             delta 0.1.0 depends on beta <1.0.0.\n  \
+             alpha 1.1.0 depends on beta >=1.0.0, <2.0.0."
+        );
+    }
+
+    #[test]
+    fn test_resolve_no_matching_version() {
+        let err = resolve_fixture(&[("alpha", "^3")]).unwrap_err();
+        // the yanked alpha 2.0.0 isn't available
+        assert_eq!(
+            err.to_string(),
+            "Could not resolve the dependencies:\n  \
+             The project depends on alpha ^3.\n  \
+             alpha has no version >=3.0.0, <4.0.0 (available: 1.0.0 and 1.1.0)."
+        );
     }
 
     #[test]
@@ -613,11 +648,55 @@ mod tests {
 
     #[test]
     fn test_resolve_sclang_conflict() {
-        let err = resolve_fixture_with(&[("epsilon", "^1.2")], &[], Some(">=3.14"))
-            .unwrap_err()
-            .to_string();
-        println!("{err}");
-        assert!(err.contains(SCLANG_PACKAGE), "{err}");
+        let err = resolve_fixture_with(&[("epsilon", "^1.2")], &[], Some(">=3.14")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Could not resolve the dependencies:\n  \
+             The project depends on epsilon ^1.2.\n  \
+             epsilon 1.2.0 needs SuperCollider >=3.15.0.\n  \
+             The project supports SuperCollider >=3.14 (`sclang` in magnet.toml), so its dependencies must support SuperCollider 3.14.0."
+        );
+        assert_eq!(
+            hints(&err),
+            ["raise `sclang` in magnet.toml to \">=3.15\" if SuperCollider support below version 3.15 is not required"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_transitive_sclang_conflict() {
+        // eta depends on the epsilon which needs SuperCollider 3.15
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index");
+        std::fs::create_dir_all(dir.path().join("e")).unwrap();
+        for file in ["config.json", "e/epsilon.jsonl"] {
+            std::fs::copy(fixtures.join(file), dir.path().join(file)).unwrap();
+        }
+        let eta = |version: &str| {
+            format!(
+                r#"{{"name": "eta", "version": "{version}", "kinds": ["quark"], "dependencies": {{"epsilon": "^1.2"}}, "yanked": false, "artifacts": [{{"kind": "quark", "abi": "any", "platform": "any", "sha256": "sha-eta-{version}"}}]}}"#
+            )
+        };
+        std::fs::write(
+            dir.path().join("e/eta.jsonl"),
+            [eta("0.1.0"), eta("0.2.0")].join("\n"),
+        )
+        .unwrap();
+        let index = GitClient::open_local(dir.path().to_path_buf()).unwrap();
+        let target = LazyTarget::with_sclang(Some("linux_x86_64".into()), None, || Ok(None));
+
+        let err = resolve_in(&index, &[("eta", "*")], &[], Some(">=3.10"), &target).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Could not resolve the dependencies:\n  \
+             The project depends on eta.\n  \
+             eta 0.1.0 and 0.2.0 depend on epsilon >=1.2.0, <2.0.0.\n  \
+             epsilon 1.2.0 needs SuperCollider >=3.15.0.\n  \
+             The project supports SuperCollider >=3.10 (`sclang` in magnet.toml), so its dependencies must support SuperCollider 3.10.0."
+        );
+        assert_eq!(
+            hints(&err),
+            ["raise `sclang` in magnet.toml to \">=3.15\" if SuperCollider support below version 3.15 is not required"]
+        );
     }
 
     #[test]

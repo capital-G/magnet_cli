@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod error;
 pub mod git_client;
 pub mod http_client;
 pub mod legacy;
