@@ -851,9 +851,9 @@ mod tests {
         let project = dir.path().join("project");
         let manifest = git_project(&project, "", &[("Classes/Foo.sc", "Foo {}")]);
         let repo = Repository::open(&project).unwrap();
-        let url = format!("file://{}", library.display());
+        let url = url::Url::from_directory_path(&library).unwrap();
         let mut submodule = repo
-            .submodule(&url, Path::new("external/library"), true)
+            .submodule(url.as_str(), Path::new("external/library"), true)
             .unwrap();
         submodule.clone(None).unwrap();
         submodule.add_finalize().unwrap();
