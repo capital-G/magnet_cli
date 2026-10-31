@@ -637,6 +637,29 @@ impl MagnetSubCommand for ProjectUpdateArgs {
     }
 }
 
+/// Shows the locked dependencies of the current magnet project as a tree
+#[derive(Debug, Parser)]
+pub struct ProjectTreeArgs {
+    /// Path of the project.
+    /// If not provided, the current working directory is used.
+    #[arg(
+        long,
+        default_value = None,
+    )]
+    path: Option<PathBuf>,
+}
+
+impl MagnetSubCommand for ProjectTreeArgs {
+    async fn run(self, _cli_context: &CliContext) -> anyhow::Result<()> {
+        let project_path = match self.path {
+            Some(path) => path,
+            None => env::current_dir()?,
+        };
+        println!("{}", Project::open(&project_path)?.dependency_tree()?);
+        Ok(())
+    }
+}
+
 /// Installs the locked dependencies of the current magnet project
 #[derive(Debug, Parser)]
 pub struct ProjectInstallArgs {

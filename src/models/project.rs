@@ -19,6 +19,7 @@ use crate::{
     git_client::{client::GitClient, models::GitDependency, source::GitCache},
     legacy::directory::{quarks_directory_url, QuarksDirectory},
     models::{
+        dependency_tree,
         directories::ProjectDirectory,
         gitignore::write_gitignore,
         language_config::{LanguageConfig, SCLANG_CONF_FILE},
@@ -380,6 +381,31 @@ impl Project {
             "Copied the binaries of the project"
         );
         Ok(())
+    }
+
+    /// The normalized names of the manifest's dependencies, sorted
+    fn manifest_dependency_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .manifest()
+            .dependencies
+            .keys()
+            .map(|name| MagnetManifestV1::normalize_name(name))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The locked dependencies as a tree below the project, for `magnet tree`
+    pub fn dependency_tree(&self) -> anyhow::Result<String> {
+        let lock_file = self.lock_file.as_ref().with_context(|| {
+            format!("There is no {MAGNET_LOCK_FILE} yet, run `magnet install` first")
+        })?;
+        let package = &self.manifest().package;
+        Ok(dependency_tree::render(
+            &format!("{} {}", package.name, package.version.as_str()),
+            &self.manifest_dependency_names(),
+            lock_file,
+        ))
     }
 
     pub fn manifest(&self) -> &MagnetManifestV1 {
@@ -802,6 +828,11 @@ impl Project {
                     version: source.version,
                     kinds: source.kinds.clone(),
                     source: source.source.clone(),
+                    dependencies: source
+                        .dependencies
+                        .iter()
+                        .map(|dependency| dependency.name.clone())
+                        .collect(),
                     checksums: BTreeMap::new(),
                 }),
                 None => provider
@@ -822,13 +853,20 @@ impl Project {
     }
 
     /// `true` if every dependency of the manifest, and of its git and path dependencies, is
-    /// locked with a version which satisfies it, and the git and path dependencies are locked
-    /// with their current source (for git: the same URL and reference)
+    /// locked with a version which satisfies it, the git and path dependencies are locked
+    /// with their current source (for git: the same URL and reference), and every locked
+    /// package is reachable from the manifest via the locked `dependencies` (which a lock
+    /// written before they existed, or a dependency removed by hand, fails)
     fn lock_covers_manifest(&self) -> anyhow::Result<bool> {
         let Some(lock_file) = &self.lock_file else {
             return Ok(false);
         };
         let dependencies = self.manifest_dependency_values();
+        if lock_file.reachable(&self.manifest_dependency_names()).len()
+            != lock_file.dependencies.len()
+        {
+            return Ok(false);
+        }
         // without the index: a dependency of a .quark file which isn't locked from git counts
         // as one of the index, so an unknown one fails the check below instead of a lookup
         let sources = self.collect_sources(
@@ -1791,6 +1829,72 @@ beta = "^1"
 
     fn read_lock(dir: &tempfile::TempDir) -> String {
         fs::read_to_string(dir.path().join(MAGNET_LOCK_FILE)).unwrap()
+    }
+
+    #[test]
+    fn test_lock_has_dependency_edges() {
+        let (dir, mut project) =
+            project("magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n");
+        project
+            .add_dependency(&fixture_index(), "gamma".into(), None)
+            .unwrap();
+        assert!(
+            read_lock(&dir).contains(
+                "[dependencies.alpha]\nversion = \"1.1.0\"\nkinds = [\"quark\"]\nsource = \"index\"\ndependencies = [\"beta\"]\n"
+            ),
+            "{}",
+            read_lock(&dir)
+        );
+        // beta 1.2.0 requires `DDW_Common`, locked as ddw-common
+        assert_eq!(
+            project.dependency_tree().unwrap(),
+            concat!(
+                "p 0.1.0\n",
+                "└── gamma 0.3.0\n",
+                "    └── alpha 1.1.0\n",
+                "        └── beta 1.2.0\n",
+                "            └── ddw-common 0.1.0",
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_relocks_lock_without_edges() {
+        let (dir, _) = project(
+            "magnet-version = 1\n[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\nalpha = \"^1\"\n",
+        );
+        // a lock written before the edges existed, with the older beta 1.0.0
+        let index = fixture_index();
+        let tree = HashMap::from([
+            ("alpha".to_string(), SemanticVersion::new(1, 1, 0)),
+            ("beta".to_string(), SemanticVersion::new(1, 0, 0)),
+        ]);
+        LockFile::from_tree(index.url().clone(), None, &tree, |name, version| {
+            let mut dependency = LockDependency::from(&index.get_release(name, version)?.unwrap());
+            dependency.dependencies.clear();
+            Ok(dependency)
+        })
+        .unwrap()
+        .write(&dir.path().join(MAGNET_LOCK_FILE))
+        .unwrap();
+        assert!(!Project::open(dir.path())
+            .unwrap()
+            .lock_covers_manifest()
+            .unwrap());
+
+        let project = install(&dir).await.unwrap();
+        // resolved again, keeping the locked versions
+        assert_eq!(
+            locked_versions(&project),
+            [("alpha", "1.1.0"), ("beta", "1.0.0")]
+                .map(|(name, version)| (name.to_string(), version.to_string()))
+        );
+        assert!(
+            read_lock(&dir).contains("dependencies = [\"beta\"]"),
+            "{}",
+            read_lock(&dir)
+        );
+        assert_eq!(installed_packages(&dir), ["alpha", "beta"]);
     }
 
     #[tokio::test]
@@ -3508,6 +3612,19 @@ beta = "^1"
                 file_url(&bar)
             )),
             "{lock}"
+        );
+        // the edges also cover the git dependency of an index package and the .quark
+        // dependency of a legacy quark
+        assert_eq!(
+            project.dependency_tree().unwrap(),
+            [
+                "p 0.1.0".to_string(),
+                "└── eta 0.1.0".to_string(),
+                format!("    └── bar 0.0.0 (git {})", &sha[..7]),
+                "        └── beta 1.2.0".to_string(),
+                "            └── ddw-common 0.1.0".to_string(),
+            ]
+            .join("\n")
         );
     }
 

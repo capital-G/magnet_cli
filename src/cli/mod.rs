@@ -5,7 +5,7 @@ use crate::cli::commands::auth::{LoginArgs, LogoutArgs};
 use crate::cli::commands::import::ImportLegacyQuarkArgs;
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
-    ProjectRemoveDependencyArgs, ProjectRunArgs, ProjectUpdateArgs,
+    ProjectRemoveDependencyArgs, ProjectRunArgs, ProjectTreeArgs, ProjectUpdateArgs,
 };
 use crate::cli::commands::publish::PublishArgs;
 use crate::cli::commands::server_info::ServerInfoArgs;
@@ -78,6 +78,8 @@ enum Commands {
     Install(ProjectInstallArgs),
     /// Moves locked dependencies to the newest versions their requirements allow
     Update(ProjectUpdateArgs),
+    /// Shows the locked dependencies of the current magnet project as a tree
+    Tree(ProjectTreeArgs),
     /// Runs an entrypoint of the current magnet project
     Run(ProjectRunArgs),
     /// Packages the current magnet project into `dist/` for publishing
@@ -158,6 +160,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         }
         Commands::Install(project_install_args) => project_install_args.run(&cli_context).await,
         Commands::Update(project_update_args) => project_update_args.run(&cli_context).await,
+        Commands::Tree(project_tree_args) => project_tree_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,
         Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
         Commands::Publish(publish_args) => publish_args.run(&cli_context).await,

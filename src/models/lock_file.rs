@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
     hash::BuildHasher,
     path::PathBuf,
@@ -49,6 +49,10 @@ pub struct LockDependency {
     /// knows which artifacts it needs without an index lookup, also when a binary is missing
     pub kinds: Vec<ArtifactKind>,
     pub source: LockSource,
+    /// the normalized names of its own dependencies, so `magnet tree` needs no index.
+    /// Left out if it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
     /// sha256 of every artifact of this version, keyed by `{kind}-{abi}-{platform}`
     /// ([ArtifactKey](crate::models::package::ArtifactKey)), so the same lock file can be
     /// installed on every platform.
@@ -143,6 +147,7 @@ impl From<&GitRelease> for LockDependency {
             version: release.version,
             kinds: release.kinds(),
             source: LockSource::Index,
+            dependencies: release.dependencies.keys().cloned().collect(),
             // artifacts of unknown kinds can't be installed, so they're left out
             checksums: release
                 .artifacts
@@ -209,14 +214,15 @@ impl LockFile {
     }
 
     /// Creates the lock file from a resolved tree.
-    /// `lookup` provides the details of a resolved package version from the index.
+    /// `lookup` provides the details of a resolved package version from the index. The names
+    /// of its dependencies get normalized and sorted, and only those in the tree are kept.
     pub fn from_tree<S: BuildHasher>(
         index: Url,
         index_http: Option<Url>,
         full_tree: &HashMap<String, SemanticVersion, S>,
         lookup: impl Fn(&str, &SemanticVersion) -> anyhow::Result<LockDependency>,
     ) -> anyhow::Result<Self> {
-        let dependencies = full_tree
+        let mut dependencies: BTreeMap<String, LockDependency> = full_tree
             .iter()
             .filter(|(name, _)| ![ROOT_PACKAGE, SCLANG_PACKAGE].contains(&name.as_str()))
             .map(|(name, version)| {
@@ -226,12 +232,39 @@ impl LockFile {
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
+        let locked: HashSet<String> = dependencies.keys().cloned().collect();
+        for dependency in dependencies.values_mut() {
+            let mut names: Vec<String> = dependency
+                .dependencies
+                .iter()
+                .map(|name| MagnetManifestV1::normalize_name(name))
+                .filter(|name| locked.contains(name))
+                .collect();
+            names.sort();
+            names.dedup();
+            dependency.dependencies = names;
+        }
         Ok(Self {
             lock_version: LOCK_VERSION,
             index,
             index_http,
             dependencies,
         })
+    }
+
+    /// The locked packages `roots` (normalized names) depend on, directly or not, via the
+    /// `dependencies` of each locked package
+    pub fn reachable(&self, roots: &[String]) -> BTreeSet<String> {
+        let mut reached = BTreeSet::new();
+        let mut pending: Vec<&String> = roots.iter().collect();
+        while let Some(name) = pending.pop() {
+            if let Some(dependency) = self.dependencies.get(name) {
+                if reached.insert(name.clone()) {
+                    pending.extend(&dependency.dependencies);
+                }
+            }
+        }
+        reached
     }
 
     fn to_string(&self) -> anyhow::Result<String> {
@@ -284,10 +317,20 @@ mod tests {
                 BTreeMap::from([("quark-any-any".to_string(), "abc".to_string())]),
             ),
         };
+        // spelled as in a manifest, `missing` isn't in the tree
+        let dependencies = match name {
+            "foo" => vec![
+                "DDW_Common".to_string(),
+                "bar".to_string(),
+                "missing".to_string(),
+            ],
+            _ => vec![],
+        };
         Ok(LockDependency {
             version: *version,
             kinds: vec![ArtifactKind::Quark],
             source,
+            dependencies,
             checksums,
         })
     }
@@ -333,6 +376,7 @@ mod tests {
              version = \"0.1.0\"\n\
              kinds = [\"quark\"]\n\
              source = \"index\"\n\
+             dependencies = [\"bar\", \"ddw-common\"]\n\
              checksums = { quark-any-any = \"abc\" }\n"
         );
         assert!(!content.contains(ROOT_PACKAGE));
@@ -343,7 +387,9 @@ mod tests {
     #[test]
     fn test_from_git_release() {
         let release: GitRelease = serde_json::from_str(
-            r#"{"name": "gamma", "version": "0.3.0", "kinds": ["quark", "lepton"], "artifacts": [
+            r#"{"name": "gamma", "version": "0.3.0", "kinds": ["quark", "lepton"],
+                "dependencies": {"alpha": "^1.0.0", "ddwCommon": {"legacy-quark": true, "git": {"url": "https://github.com/jamshark70/ddwCommon.git", "ref": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"}}},
+                "artifacts": [
                 {"kind": "source", "abi": "any", "platform": "any", "sha256": "def"},
                 {"kind": "quark", "abi": "any", "platform": "any", "sha256": "ghi"},
                 {"kind": "lepton", "abi": "api3_0", "platform": "linux_x86_64", "sha256": "abc"},
@@ -357,6 +403,8 @@ mod tests {
             [ArtifactKind::Quark, ArtifactKind::Lepton]
         );
         assert_eq!(dependency.source, LockSource::Index);
+        // index and git dependencies, normalized later by `from_tree`
+        assert_eq!(dependency.dependencies, ["alpha", "ddwCommon"]);
         // the artifact of an unknown kind is left out
         assert_eq!(
             dependency.checksums,

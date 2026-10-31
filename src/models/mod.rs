@@ -1,3 +1,4 @@
+pub mod dependency_tree;
 pub mod directories;
 pub mod gitignore;
 pub mod language_config;
