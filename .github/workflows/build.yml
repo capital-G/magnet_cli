@@ -29,3 +29,15 @@ jobs:
 
     - name: Test
       run: cargo test --all --verbose
+
+    - name: Build release binary
+      run: cargo build --release --verbose
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v5
+      with:
+        name: magnet-${{ matrix.artifact-suffix }}
+        path: |
+          target/release/magnet
+          target/release/magnet.exe
+        if-no-files-found: error
