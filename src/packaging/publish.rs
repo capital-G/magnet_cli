@@ -9,7 +9,7 @@ use std::{
 use anyhow::{ensure, Context};
 use pubgrub::SemanticVersion;
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::{
     config::constants::{MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
@@ -24,7 +24,7 @@ use crate::{
         package::{ArtifactKey, ArtifactKind, ArtifactTags},
         project_manifest::{MagnetManifestV1, MagnetManifestV1DependenciesValue},
     },
-    packaging::naming::artifact_file_name,
+    packaging::{class_check::check_warnings, naming::artifact_file_name},
 };
 
 /// An archive in `dist/` which gets published
@@ -214,6 +214,40 @@ fn missing_for_finalise(kinds: &[ArtifactKind], artifacts: &[GitArtifact]) -> Ve
     missing
 }
 
+/// Asks the server for naming conflicts of the quark archive among `archives` (if there is one)
+/// with the current versions of the other packages, as warnings (C7.2). They never stop publishing, and neither does a failed
+/// check (e.g. a server without the classes API), which is only logged at debug level.
+async fn check_names(
+    client: &MagnetClient<AuthToken>,
+    name: &str,
+    archives: &[PublishArchive],
+) -> Vec<String> {
+    let Some(quark) = archives
+        .iter()
+        .find(|archive| archive.kind == ArtifactKind::Quark)
+    else {
+        return vec![];
+    };
+    let content = match fs::read(&quark.path) {
+        Ok(content) => content,
+        Err(err) => {
+            debug!("Could not read {:?} for the class check: {err}", quark.path);
+            return vec![];
+        }
+    };
+    match client.check_classes(name, content).await {
+        Ok(Some(check)) => check_warnings(&check),
+        Ok(None) => {
+            debug!("The server does not support the class check");
+            vec![]
+        }
+        Err(err) => {
+            debug!("The class check failed: {err:#}");
+            vec![]
+        }
+    }
+}
+
 /// Creates (or reuses) the draft, uploads the archives and finalises the version once it has
 /// the artifacts it needs ([missing_for_finalise]). Every step can be repeated, e.g. by the jobs
 /// of a CI matrix.
@@ -225,7 +259,11 @@ pub async fn publish(
     let name = MagnetManifestV1::normalize_name(&manifest.package.name);
     let version = manifest.package.version.to_string();
 
+    // after the draft, so a refused login is reported by it
     let mut published = client.create_draft(&name, &version).await?;
+    for warning in check_names(client, &name, archives).await {
+        warn!("{warning}");
+    }
     for archive in archives {
         let content = fs::read(&archive.path)
             .with_context(|| format!("Could not read {:?}", archive.path))?;
@@ -705,5 +743,112 @@ mod tests {
         .to_string();
         assert!(err.contains("MAGNET_TOKEN"), "{err}");
         assert!(err.contains("Invalid token."), "{err}");
+    }
+
+    const CHECK: &str = "/api/v1/classes/check/";
+
+    async fn expect_check(server: &MockServer, times: u64, response: ResponseTemplate) {
+        Mock::given(method("POST"))
+            .and(path(CHECK))
+            .and(wiremock::matchers::query_param("package", "foo-bar"))
+            .and(header("authorization", "Bearer token"))
+            .and(body_bytes(QUARK.as_bytes().to_vec()))
+            .respond_with(response)
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    /// conflicts and parse errors become warnings, and publishing goes on
+    #[tokio::test]
+    async fn test_naming_conflicts_are_warnings() {
+        let dir = dist(&[QUARK, SOURCE]);
+        let server = server((201, version("draft", serde_json::json!([])))).await;
+        expect_check(
+            &server,
+            2,
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "classes": [],
+                "errors": [{"path": "Broken.sc", "message": "unexpected '}'"}],
+                "conflicts": [{
+                    "package": "beta-lib", "version": "1.0.0", "classes": ["Foo"],
+                    "methods": [{"class": "String", "name": "shout", "class_method": false}],
+                }],
+            })),
+        )
+        .await;
+        expect_upload(&server, "source-any-any", SOURCE.as_bytes(), 201).await;
+        expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 201).await;
+        expect_finalise(&server, 1, serde_json::json!([])).await;
+
+        let client = client(&server);
+        let archives = quark_archive(&dir);
+        assert_eq!(
+            check_names(&client, "foo-bar", &archives).await,
+            [
+                "beta-lib 1.0.0 also defines class Foo, so sclang can't compile both packages together",
+                "beta-lib 1.0.0 also adds String:-shout, so with both packages installed one replaces the other",
+                "The server could not parse Broken.sc (its classes aren't checked): unexpected '}'",
+            ]
+        );
+        let published = publish(&client, &manifest("quark", ""), &archives)
+            .await
+            .unwrap();
+        assert_eq!(published.state, VersionState::Final);
+    }
+
+    /// e.g. an older server without the endpoint, or a broken one
+    #[tokio::test]
+    async fn test_failed_check_does_not_stop_publishing() {
+        for status in [404, 500] {
+            let dir = dist(&[QUARK, SOURCE]);
+            let server = server((201, version("draft", serde_json::json!([])))).await;
+            expect_check(
+                &server,
+                1,
+                ResponseTemplate::new(status)
+                    .set_body_json(serde_json::json!({"detail": "Not found."})),
+            )
+            .await;
+            expect_upload(&server, "source-any-any", SOURCE.as_bytes(), 201).await;
+            expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 201).await;
+            expect_finalise(&server, 1, serde_json::json!([])).await;
+
+            let published = publish(
+                &client(&server),
+                &manifest("quark", ""),
+                &quark_archive(&dir),
+            )
+            .await
+            .unwrap();
+            assert_eq!(published.state, VersionState::Final, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_check_without_quark_archive() {
+        let binary = "foo-bar-1.2.0-lepton-api3_0-linux_x86_64.tar.gz";
+        let dir = dist(&[binary, SOURCE]);
+        let server = server((201, version("draft", serde_json::json!([])))).await;
+        Mock::given(method("POST"))
+            .and(path(CHECK))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        expect_upload(&server, "source-any-any", SOURCE.as_bytes(), 201).await;
+        expect_upload(
+            &server,
+            "lepton-api3_0-linux_x86_64",
+            binary.as_bytes(),
+            201,
+        )
+        .await;
+        expect_finalise(&server, 1, serde_json::json!([])).await;
+
+        let archives = publish_archives(dir.path(), &manifest("lepton", ""), &[]).unwrap();
+        publish(&client(&server), &manifest("lepton", ""), &archives)
+            .await
+            .unwrap();
     }
 }
