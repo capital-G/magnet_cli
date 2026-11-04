@@ -38,11 +38,18 @@ struct Cli {
     command: Commands,
 }
 
+/// The official index, unless `MAGNET_GIT_INDEX_URL` or `--git-index-url` name another
+pub const DEFAULT_GIT_INDEX_URL: &str = "https://git.magnet.supercollider.online/magnet_index.git";
+
 #[derive(Debug, Parser)]
 struct GlobalArgs {
-    // @todo add the official index as default once it exists
-    #[arg(long, env = "MAGNET_GIT_INDEX_URL", help = "Package git index to use")]
-    pub git_index_url: Option<Url>,
+    #[arg(
+        long,
+        env = "MAGNET_GIT_INDEX_URL",
+        default_value = DEFAULT_GIT_INDEX_URL,
+        help = "Package git index to use"
+    )]
+    pub git_index_url: Url,
 
     /// replaces the `http` mirror announced by the index, which gets written into the lock file
     #[arg(
@@ -107,10 +114,7 @@ pub struct CliContext {
 
 impl CliContext {
     pub fn git_client(&self) -> anyhow::Result<GitClient> {
-        let url =
-            self.global_args.git_index_url.clone().context(
-                "No git index configured, set MAGNET_GIT_INDEX_URL or pass --git-index-url",
-            )?;
+        let url = self.global_args.git_index_url.clone();
         let local_destination = magnet_home()?
             .join(INDEX_DIR)
             .join(GitClient::cache_dir_name(&url));
@@ -176,5 +180,16 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Login(login_args) => login_args.run(&cli_context).await,
         Commands::Logout(logout_args) => logout_args.run(&cli_context).await,
         Commands::ServerInfo(server_info_args) => server_info_args.run(&cli_context).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_git_index_url_is_valid() {
+        let url = Url::parse(DEFAULT_GIT_INDEX_URL).unwrap();
+        assert_eq!(url.scheme(), "https");
     }
 }
