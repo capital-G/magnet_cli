@@ -245,10 +245,13 @@ mod tests {
     async fn test_conflicts_are_warnings() {
         let (_dir, project) = project(MANIFEST);
         let (server, quark, packaged) = server(&project, conflicts()).await;
-        assert!(
-            packaged.contains("Packaged dist/foo-bar-1.2.0-quark-any-any.tar.gz (2 files)"),
-            "{packaged}"
+        let expected = format!(
+            "Packaged {} (2 files)",
+            Path::new("dist")
+                .join("foo-bar-1.2.0-quark-any-any.tar.gz")
+                .display()
         );
+        assert!(packaged.contains(&expected), "{packaged}");
 
         let (result, out) = check(&server, &project, &quark, false, false).await;
         result.unwrap();
