@@ -321,7 +321,9 @@ The magnet client mainly is used to
 * add dependencies to a magnet project and resolve its dependencies recursively
 * set up the environment for an existing magnet project
 * bundle packages for release
+* check the classes of a package for naming conflicts with other packages before publishing (`magnet check`)
 * publishing packages on the index
+* search the classes and methods of published packages (`magnet search --class` / `--method`)
 
 `magnet add`, `remove` and `update` change the manifest and the lock file and install the resulting dependencies into `magnet_packages/` right away, which can be skipped via `--no-install` such that only the files get written.
 `magnet install` sets up an existing project, e.g. after cloning it, by installing the dependencies of its lock file.
@@ -487,6 +489,11 @@ The kinds of a version may differ from the ones of earlier versions.
 
 Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, packages from a different index, or git or legacy quark dependencies which are not pinned via a tag or ref, since others could not reproduce them.
 The client checks this before uploading, and the server checks it again.
+
+Since sclang has a single namespace, a class defined by two packages can not be compiled, and of two class extensions which add the same method one silently replaces the other.
+Before uploading, the client therefore asks the server for naming conflicts of the classes within the quark artifact with the newest versions of the other packages and warns about them.
+These conflicts never block publishing.
+`magnet check` runs the same check without publishing, and `--deny-conflicts` turns the conflicts into an error, e.g. for CI.
 
 #### Checks of the server
 
