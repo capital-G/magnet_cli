@@ -16,6 +16,8 @@ use crate::{
 pub const MAGNET_PLATFORM_ENV: &str = "MAGNET_PLATFORM";
 /// Overrides the abi tag derived from the found sclang
 pub const MAGNET_ABI_ENV: &str = "MAGNET_ABI";
+/// Installs no binaries of leptons, only the artifacts which don't depend on the machine
+pub const MAGNET_NO_BINARIES_ENV: &str = "MAGNET_NO_BINARIES";
 
 /// The plugin API version of scsynth/supernova, which is the abi tag of a lepton artifact,
 /// written as `api<major>_<minor>`, e.g. `api3_0`, see DESIGN.md "Packaging".
@@ -133,6 +135,8 @@ pub struct LazyTarget {
     platform: Option<String>,
     abi: Option<String>,
     find_sclang: fn() -> anyhow::Result<Option<Sclang>>,
+    /// `false` with `--no-binaries`: then there is no target, without looking for sclang
+    binaries: bool,
     target: OnceCell<Result<Target, String>>,
 }
 
@@ -151,8 +155,21 @@ impl LazyTarget {
             platform,
             abi,
             find_sclang,
+            binaries: true,
             target: OnceCell::new(),
         }
+    }
+
+    /// No binaries of leptons get installed (`--no-binaries`), only the artifacts which
+    /// don't depend on the machine, so [Self::get] fails without detecting anything
+    pub fn without_binaries(mut self) -> Self {
+        self.binaries = false;
+        self
+    }
+
+    /// Whether the binaries of leptons get installed, see [Self::without_binaries]
+    pub fn binaries(&self) -> bool {
+        self.binaries
     }
 
     /// The abi given via `--abi`/`MAGNET_ABI`, which may differ from the one of the found
@@ -172,6 +189,9 @@ impl LazyTarget {
     pub fn get(&self) -> anyhow::Result<&Target> {
         self.target
             .get_or_init(|| {
+                if !self.binaries {
+                    return Err("No binaries get installed (--no-binaries)".to_string());
+                }
                 detect_target(
                     self.platform.as_deref(),
                     self.abi.as_deref(),
@@ -366,6 +386,20 @@ mod tests {
             let err = target.get().unwrap_err().to_string();
             assert!(err.contains("--abi"), "{err}");
         }
+    }
+
+    #[test]
+    fn test_lazy_target_without_binaries() {
+        // never looks for sclang, even with a given platform and abi
+        let target =
+            LazyTarget::with_sclang(Some("linux_x86_64".into()), Some("api3_0".into()), || {
+                panic!("sclang should not be looked up")
+            })
+            .without_binaries();
+        assert!(!target.binaries());
+        let err = target.get().unwrap_err().to_string();
+        assert!(err.contains("--no-binaries"), "{err}");
+        assert_eq!(target.abi_override().unwrap(), Some(PluginApi::new(3, 0)));
     }
 
     #[test]

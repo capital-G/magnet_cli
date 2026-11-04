@@ -8,7 +8,7 @@ use std::{
 
 use crate::cli::{commands::import::ask_legacy_quark, CliContext, MagnetSubCommand};
 use anyhow::{bail, ensure, Context};
-use clap::{arg, Args, Parser};
+use clap::{arg, builder::BoolishValueParser, Args, Parser};
 use inquire::{
     validator::{self, Validation},
     Confirm, CustomUserError, Select, Text,
@@ -29,7 +29,7 @@ use magnet::{
     },
     resolver::package_downloader::PackageDownloader,
     sclang::Sclang,
-    target::{LazyTarget, MAGNET_ABI_ENV, MAGNET_PLATFORM_ENV},
+    target::{LazyTarget, MAGNET_ABI_ENV, MAGNET_NO_BINARIES_ENV, MAGNET_PLATFORM_ENV},
 };
 use pubgrub::SemanticVersion;
 use semver::VersionReq;
@@ -675,6 +675,12 @@ pub struct ProjectInstallArgs {
     #[arg(long)]
     locked: bool,
 
+    /// Install no binaries of leptons, only the artifacts which don't depend on the
+    /// machine (their classes), so neither sclang nor --platform/--abi are needed,
+    /// e.g. to build the docs
+    #[arg(long, env = MAGNET_NO_BINARIES_ENV, value_parser = BoolishValueParser::new())]
+    no_binaries: bool,
+
     #[command(flatten)]
     target: TargetArgs,
 }
@@ -686,7 +692,10 @@ impl MagnetSubCommand for ProjectInstallArgs {
             None => env::current_dir()?,
         };
         let mut project = Project::open(&project_path)?;
-        project.set_target(self.target.lazy());
+        project.set_target(match self.no_binaries {
+            true => self.target.lazy().without_binaries(),
+            false => self.target.lazy(),
+        });
         let index = cli_context.git_client()?;
         project
             .install(&index, &downloader(&index)?, self.locked)

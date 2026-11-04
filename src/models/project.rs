@@ -344,6 +344,9 @@ impl Project {
             fs::remove_dir_all(&dev_dir)
                 .with_context(|| format!("Could not remove {dev_dir:?}"))?;
         }
+        if !self.target.binaries() {
+            return Ok(());
+        }
         let target = match self.target.get() {
             Ok(target) => target,
             Err(err) => {
@@ -1063,6 +1066,9 @@ impl Project {
         for kind in dependency.kinds.clone() {
             match kind {
                 ArtifactKind::Quark => keys.push(ArtifactKey::any(kind)),
+                ArtifactKind::Lepton if !self.target.binaries() => {
+                    debug!("Skip the binaries of {name} {version} (--no-binaries)");
+                }
                 ArtifactKind::Lepton => {
                     let target = self.target.get().with_context(|| {
                         format!("{name} contains a lepton, whose binary depends on the platform and abi of this machine")
@@ -1241,6 +1247,7 @@ impl Project {
                 let mut entries = BTreeMap::new();
                 for kind in kinds {
                     let tags = match kind {
+                        ArtifactKind::Lepton if !self.target.binaries() => continue,
                         ArtifactKind::Lepton => match self.target.get() {
                             Ok(target) => target.tags(),
                             Err(err) => {
@@ -2398,6 +2405,56 @@ beta = "^1"
             .err()
             .unwrap();
         assert!(format!("{err:#}").contains("--abi"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn test_install_without_binaries() {
+        // zeta 1.1.0 only has a linux_x86_64 binary, no sclang, platform or abi is known
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.1.0\"\n"));
+        let no_target = || LazyTarget::with_sclang(None, None, no_sclang);
+        install_for(&dir, no_target().without_binaries(), false)
+            .await
+            .unwrap();
+        let zeta = dir.path().join("magnet_packages/zeta");
+        assert!(zeta.join("classes/Zeta.sc").is_file());
+        assert!(!zeta.join("plugins").exists());
+        let lock = read_lock(&dir);
+        // the lock is the same as with binaries, only version, kinds and checksums
+        assert!(lock.contains("version = \"1.1.0\""), "{lock}");
+        assert!(lock.contains("kinds = [\"quark\", \"lepton\"]"), "{lock}");
+        assert!(lock.contains("lepton-api3_0-linux_x86_64"), "{lock}");
+
+        // with a lock and --locked, also for a platform without a binary
+        let windows = LazyTarget::with_sclang(Some("windows_x86_64".into()), None, no_sclang);
+        install_for(&dir, windows.without_binaries(), true)
+            .await
+            .unwrap();
+        assert_eq!(read_lock(&dir), lock);
+
+        // without --no-binaries nothing changes
+        let err = install_for(&dir, no_target(), false).await.err().unwrap();
+        assert!(format!("{err:#}").contains("--abi"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn test_install_without_binaries_removes_them() {
+        let (dir, _) = project(&format!("{ZETA}zeta = \"=1.0.0\"\n"));
+        install_for(&dir, target("macos_arm64", "api3_0"), false)
+            .await
+            .unwrap();
+        installed_plugin(&dir);
+        let lock = read_lock(&dir);
+        install_for(
+            &dir,
+            target("macos_arm64", "api3_0").without_binaries(),
+            true,
+        )
+        .await
+        .unwrap();
+        let zeta = dir.path().join("magnet_packages/zeta");
+        assert!(zeta.join("classes/Zeta.sc").is_file());
+        assert!(!zeta.join("plugins").exists());
+        assert_eq!(read_lock(&dir), lock);
     }
 
     #[tokio::test]
