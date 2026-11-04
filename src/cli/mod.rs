@@ -2,6 +2,7 @@ mod commands;
 mod logging;
 
 use crate::cli::commands::auth::{LoginArgs, LogoutArgs};
+use crate::cli::commands::check::CheckArgs;
 use crate::cli::commands::import::ImportLegacyQuarkArgs;
 use crate::cli::commands::project::{
     ProjectAddDependencyArgs, ProjectInitArgs, ProjectInstallArgs, ProjectPackageArgs,
@@ -84,6 +85,9 @@ enum Commands {
     Run(ProjectRunArgs),
     /// Packages the current magnet project into `dist/` for publishing
     Package(ProjectPackageArgs),
+    /// Packages the current magnet project and asks the magnet server for naming conflicts of
+    /// its classes with other packages
+    Check(CheckArgs),
     /// Publishes packages of the current magnet project on the magnet server
     Publish(PublishArgs),
     /// Logs in to the magnet server of the index
@@ -163,6 +167,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Tree(project_tree_args) => project_tree_args.run(&cli_context).await,
         Commands::Run(project_run_args) => project_run_args.run(&cli_context).await,
         Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
+        Commands::Check(check_args) => check_args.run(&cli_context).await,
         Commands::Publish(publish_args) => publish_args.run(&cli_context).await,
         Commands::Login(login_args) => login_args.run(&cli_context).await,
         Commands::Logout(logout_args) => logout_args.run(&cli_context).await,

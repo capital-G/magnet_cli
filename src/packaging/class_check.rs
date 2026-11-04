@@ -3,7 +3,9 @@
 //! by two packages doesn't compile, and of two extensions adding the same method one silently
 //! replaces the other.
 
-use crate::http_client::classes::{ClassCheck, ConflictingMethod, PackageConflict};
+use std::collections::BTreeMap;
+
+use crate::http_client::classes::{CheckedClass, ClassCheck, ConflictingMethod, PackageConflict};
 
 /// A method as SCDoc writes it: `Class:-name` (instance) or `Class:*name` (class method)
 pub fn method_label(class_name: &str, name: &str, class_method: bool) -> String {
@@ -48,6 +50,60 @@ pub fn conflict_warnings(conflicts: &[PackageConflict]) -> Vec<String> {
     warnings
 }
 
+/// `n class`/`n classes`
+fn count(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
+}
+
+/// The classes of a check per file, sorted by path: `Foo.sc: 2 classes, 1 extension`. With
+/// `list`, every class follows on its own line (`Foo : Object (line 3): *new, -play`,
+/// `+ String (line 20): -shout`), an extension's methods written like SCDoc.
+pub fn class_summary(classes: &[CheckedClass], list: bool) -> Vec<String> {
+    let mut files: BTreeMap<&str, Vec<&CheckedClass>> = BTreeMap::new();
+    for class in classes {
+        files.entry(&class.path).or_default().push(class);
+    }
+    let mut lines = vec![];
+    for (path, classes) in files {
+        let extensions = classes.iter().filter(|class| class.extension).count();
+        let mut counts = vec![];
+        if classes.len() > extensions {
+            counts.push(count(classes.len() - extensions, "class", "classes"));
+        }
+        if extensions > 0 {
+            counts.push(count(extensions, "extension", "extensions"));
+        }
+        lines.push(format!("{path}: {}", counts.join(", ")));
+        if !list {
+            continue;
+        }
+        for class in classes {
+            let mut line = match (class.extension, class.superclass.as_str()) {
+                (true, _) => format!("  + {}", class.name),
+                (false, "") => format!("  {}", class.name),
+                (false, superclass) => format!("  {} : {superclass}", class.name),
+            };
+            line.push_str(&format!(" (line {})", class.line));
+            if !class.methods.is_empty() {
+                let methods: Vec<String> = class
+                    .methods
+                    .iter()
+                    .map(|method| {
+                        format!(
+                            "{}{}",
+                            if method.class_method { '*' } else { '-' },
+                            method.name
+                        )
+                    })
+                    .collect();
+                line.push_str(&format!(": {}", methods.join(", ")));
+            }
+            lines.push(line);
+        }
+    }
+    lines
+}
+
 /// The conflicts of a check, then its files the server couldn't parse
 pub fn check_warnings(check: &ClassCheck) -> Vec<String> {
     let mut warnings = conflict_warnings(&check.conflicts);
@@ -83,6 +139,63 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn class(
+        name: &str,
+        superclass: &str,
+        extension: bool,
+        path: &str,
+        methods: &[(&str, bool)],
+    ) -> CheckedClass {
+        CheckedClass {
+            name: name.to_string(),
+            superclass: superclass.to_string(),
+            extension,
+            path: path.to_string(),
+            line: 3,
+            platform: String::new(),
+            methods: methods
+                .iter()
+                .map(
+                    |(name, class_method)| crate::http_client::classes::CheckedMethod {
+                        name: name.to_string(),
+                        class_method: *class_method,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_class_summary() {
+        let classes = [
+            class(
+                "Foo",
+                "Object",
+                false,
+                "Foo.sc",
+                &[("new", true), ("play", false)],
+            ),
+            class("String", "", true, "Foo.sc", &[("shout", false)]),
+            class("Bar", "", false, "Bar.sc", &[]),
+            class("Baz", "Bar", false, "Bar.sc", &[]),
+        ];
+        assert_eq!(
+            class_summary(&classes, false),
+            ["Bar.sc: 2 classes", "Foo.sc: 1 class, 1 extension"]
+        );
+        assert_eq!(
+            class_summary(&classes, true),
+            [
+                "Bar.sc: 2 classes",
+                "  Bar (line 3)",
+                "  Baz : Bar (line 3)",
+                "Foo.sc: 1 class, 1 extension",
+                "  Foo : Object (line 3): *new, -play",
+                "  + String (line 3): -shout",
+            ]
+        );
     }
 
     #[test]

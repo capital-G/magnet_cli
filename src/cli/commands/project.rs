@@ -790,7 +790,7 @@ pub struct TargetArgs {
 }
 
 impl TargetArgs {
-    fn lazy(&self) -> LazyTarget {
+    pub(crate) fn lazy(&self) -> LazyTarget {
         LazyTarget::new(self.platform.clone(), self.abi.clone())
     }
 }
