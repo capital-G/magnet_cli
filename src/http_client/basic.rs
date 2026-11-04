@@ -78,6 +78,16 @@ impl<State> MagnetClient<State> {
             state,
         }
     }
+
+    /// `path` (relative, e.g. `api/v1/classes/`) below the server URL, keeping a path prefix
+    /// like `https://example.org/magnet/` (`Url::join` with a leading `/` would drop it)
+    pub(crate) fn api_url(&self, path: &str) -> anyhow::Result<Url> {
+        let mut base = self.base_url.clone();
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
+        }
+        Ok(base.join(path.trim_start_matches('/'))?)
+    }
 }
 
 impl<State: ApplyAuth> MagnetClient<State> {

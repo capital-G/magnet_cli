@@ -107,19 +107,9 @@ impl MagnetClient<AuthToken> {
         Ok(response.json().await?)
     }
 
-    /// The server's `detail` message, which explains why a request was refused
-    async fn error(&self, response: Response) -> anyhow::Error {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        debug!(%status, text, "Request refused");
-        // e.g. an HTML error page of a proxy says nothing beyond the status
-        let detail = match serde_json::from_str::<ApiError>(&text) {
-            Ok(error) => format!(": {}", error.detail),
-            Err(_) if !text.is_empty() && !text.trim_start().starts_with('<') => {
-                format!(": {}", text.chars().take(200).collect::<String>())
-            }
-            Err(_) => String::new(),
-        };
+    /// The error of a refused request, with the login hint for a `401`
+    pub(super) async fn error(&self, response: Response) -> anyhow::Error {
+        let (status, detail) = refusal(response).await;
         match status {
             StatusCode::UNAUTHORIZED => match &self.state {
                 AuthToken::Env(_) => {
@@ -139,4 +129,21 @@ impl MagnetClient<AuthToken> {
             _ => anyhow::anyhow!("The server refused the request ({status}){detail}"),
         }
     }
+}
+
+/// The status of a refused request and the server's `detail` message (`": …"`, or empty),
+/// which explains why
+pub(super) async fn refusal(response: Response) -> (StatusCode, String) {
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    debug!(%status, text, "Request refused");
+    // e.g. an HTML error page of a proxy says nothing beyond the status
+    let detail = match serde_json::from_str::<ApiError>(&text) {
+        Ok(error) => format!(": {}", error.detail),
+        Err(_) if !text.is_empty() && !text.trim_start().starts_with('<') => {
+            format!(": {}", text.chars().take(200).collect::<String>())
+        }
+        Err(_) => String::new(),
+    };
+    (status, detail)
 }
