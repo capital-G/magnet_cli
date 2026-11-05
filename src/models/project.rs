@@ -367,8 +367,8 @@ impl Project {
         let entries = package_entries(
             &self.path,
             &PackageFiles {
-                files: vec![],
                 binaries,
+                ..Default::default()
             },
             &format!("{PLUGINS_DIR}/{platform}/{}", target.api),
         )?;
@@ -1434,7 +1434,8 @@ fn kind_list(kinds: &[ArtifactKind]) -> String {
 }
 
 /// The files of a package by their `/`-separated path within it: the selected files keep
-/// their path relative to `root`, the binaries go into `plugins` (a `/`-separated folder)
+/// their path relative to `root`, mapped files go to their path, and the binaries go into
+/// `plugins` (a `/`-separated folder)
 fn package_entries(
     root: &Path,
     files: &PackageFiles,
@@ -1443,6 +1444,19 @@ fn package_entries(
     let mut entries = BTreeMap::new();
     for file in &files.files {
         entries.insert(archive_path(file)?, root.join(file));
+    }
+    for (path, file) in &files.mapped {
+        let source = root.join(file);
+        match entries.get(path) {
+            // e.g. the readme, which a build also copies into the folder that gets mapped
+            Some(other) if same_content(other, &source)? => {}
+            Some(_) => bail!(
+                "{file:?} would be packaged as {path}, which is already part of the package with another content"
+            ),
+            None => {
+                entries.insert(path.clone(), source);
+            }
+        }
     }
     for binary in &files.binaries {
         let name = binary
@@ -1469,6 +1483,12 @@ fn folder_entries(folder: &Path) -> anyhow::Result<BTreeMap<String, PathBuf>> {
         }
     }
     Ok(entries)
+}
+
+/// `true` if both files have the same content
+fn same_content(a: &Path, b: &Path) -> anyhow::Result<bool> {
+    let read = |path: &Path| fs::read(path).with_context(|| format!("Could not read {path:?}"));
+    Ok(a == b || read(a)? == read(b)?)
 }
 
 /// The `/`-separated path of a file within a package
@@ -2945,6 +2965,48 @@ beta = "^1"
         assert_eq!(archives[1].kind, ArtifactKind::Quark);
         assert_eq!(archives[1].tags, ArtifactTags::any());
         assert_eq!(archives[1].files, archive_paths(&package));
+    }
+
+    #[test]
+    fn test_create_quark_package_with_mappings() {
+        // an install tree like CMake writes it, with a copy of the readme
+        let (dir, project) = project(
+            "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"0.1.0\"\n[artifact.source]\nfrom = \"paths\"\npaths = [\"src/**\"]\n[artifact.quark]\npaths = [{ from = \"build/install/foo\", as = \".\" }]\n",
+        );
+        write_files(
+            &dir,
+            &[
+                "src/Foo.sc",
+                "build/install/foo/Classes/Foo.sc",
+                "build/install/foo/externals/libs/a.lib",
+            ],
+        );
+        fs::write(dir.path().join("README.md"), "readme").unwrap();
+        fs::write(dir.path().join("build/install/foo/README.md"), "readme").unwrap();
+        let package = project
+            .create_package(ArtifactKind::Quark, &ArtifactTags::any(), false)
+            .unwrap()
+            .path;
+        assert_eq!(
+            archive_paths(&package),
+            [
+                "Classes/Foo.sc",
+                "README.md",
+                "externals/libs/a.lib",
+                "magnet.toml"
+            ]
+        );
+
+        // another content at the path of the readme is refused
+        fs::write(dir.path().join("build/install/foo/README.md"), "changed").unwrap();
+        let err = project
+            .create_package(ArtifactKind::Quark, &ArtifactTags::any(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("would be packaged as README.md, which is already part of the package with another content"),
+            "{err}"
+        );
     }
 
     const LEPTON_MANIFEST: &str = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n[artifact.source]\nfrom = \"paths\"\npaths = [\"Classes/**\", \"src/**\"]\n[artifact.quark]\npaths = [\"Classes/**.sc\"]\n[artifact.lepton]\nplatform-paths = { macos_arm64 = [\"build/**/*.scx\"] }\n";

@@ -16,7 +16,7 @@ use crate::{
 pub const SCLANG_CONF_FILE: &str = "sclang_conf.yaml";
 
 /// characters which start a wildcard within a glob
-const WILDCARDS: [char; 4] = ['*', '?', '[', '{'];
+pub const WILDCARDS: [char; 4] = ['*', '?', '[', '{'];
 
 /// The directory a glob starts in, i.e. the path up to its first wildcard component,
 /// e.g. `Classes/**.sc` → `<root>/Classes` and `*.sc` → `<root>`.
@@ -156,12 +156,21 @@ fn yaml_list(paths: &[PathBuf]) -> String {
         .collect()
 }
 
-/// base directories of the `[artifact.quark]` paths of a project, `classes` if it has none
+/// base directories of the `[artifact.quark]` paths of a project, `classes` if it has none.
+/// A `{ from, as }` entry adds its `from` (its parent for a file): the project keeps its own
+/// layout, only the package places the files elsewhere.
 fn source_dirs(root: &Path, manifest: &MagnetManifestV1) -> Vec<PathBuf> {
-    match manifest.quark_paths() {
-        [] => vec![root.join(String::from(ProjectDirectory::Classes))],
-        paths => paths.iter().map(|glob| glob_base_dir(root, glob)).collect(),
+    let globs = manifest.quark_globs();
+    let mappings = manifest.quark_mappings();
+    if globs.is_empty() && mappings.is_empty() {
+        return vec![root.join(String::from(ProjectDirectory::Classes))];
     }
+    globs
+        .iter()
+        .map(String::as_str)
+        .chain(mappings.iter().map(|mapping| mapping.from.as_str()))
+        .map(|path| glob_base_dir(root, path))
+        .collect()
 }
 
 #[cfg(test)]
@@ -230,6 +239,27 @@ mod tests {
             [
                 root.path().to_path_buf(),
                 root.path().join("Classes"),
+                root.path().join("magnet_packages")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_include_paths_of_mappings() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("build/install/foo")).unwrap();
+        let manifest = manifest(
+            "\n[artifact.quark]\npaths = [\"src/sc/**\", \
+             { from = \"build/install/foo\", as = \".\" }, { from = \"extra/Bar.sc\", as = \"Bar.sc\" }]\n",
+        );
+        let config = LanguageConfig::for_project(root.path(), &manifest, None).unwrap();
+        // the project's own layout: a folder stands for itself, a file for its parent
+        assert_eq!(
+            config.include_paths,
+            [
+                root.path().join("src/sc"),
+                root.path().join("build/install/foo"),
+                root.path().join("extra"),
                 root.path().join("magnet_packages")
             ]
         );

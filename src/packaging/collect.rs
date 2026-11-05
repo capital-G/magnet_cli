@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
     str::FromStr,
 };
@@ -14,9 +14,11 @@ use crate::{
     config::constants::MAGNET_PROJECT_FILE,
     models::{
         directories::ProjectDirectory,
-        language_config::SCLANG_CONF_FILE,
+        language_config::{SCLANG_CONF_FILE, WILDCARDS},
         package::{ArtifactKind, ArtifactTags},
-        project_manifest::{MagnetManifestV1, MagnetManifestV1ArtifactSourceFrom, Platform},
+        project_manifest::{
+            MagnetManifestV1, MagnetManifestV1ArtifactSourceFrom, PathMapping, Platform,
+        },
     },
 };
 
@@ -28,6 +30,9 @@ const DEFAULT_README: &str = "README.md";
 pub struct PackageFiles {
     /// files which keep their path within the archive
     pub files: Vec<PathBuf>,
+    /// files of the `{ from, as }` entries of `[artifact.quark]`: their `/`-separated path
+    /// within the archive and their path relative to the project root
+    pub mapped: Vec<(String, PathBuf)>,
     /// binaries of `[artifact.lepton]`, which go into `plugins/<platform>/<abi>/`
     pub binaries: Vec<PathBuf>,
 }
@@ -47,6 +52,7 @@ pub fn collect_files(
     allow_dirty: bool,
 ) -> anyhow::Result<PackageFiles> {
     let exclude = glob_set(manifest.exclude())?;
+    let mut mapped = BTreeMap::new();
     let (mut files, binaries) = match kind {
         ArtifactKind::Source => {
             let source = manifest.source();
@@ -69,8 +75,9 @@ pub fn collect_files(
                 manifest.artifact_kinds().contains(&ArtifactKind::Quark),
                 "There is no [artifact.quark] in {MAGNET_PROJECT_FILE}, so the package has no quark artifact"
             );
+            mapped = select_mapped(root, &manifest.quark_mappings(), &exclude)?;
             (
-                select_all(root, manifest.quark_paths(), &exclude)?,
+                select_all(root, &manifest.quark_globs(), &exclude)?,
                 BTreeSet::new(),
             )
         }
@@ -90,7 +97,7 @@ pub fn collect_files(
             (BTreeSet::new(), select_all(root, &globs, &exclude)?)
         }
     };
-    for path in files.iter().chain(&binaries) {
+    for path in files.iter().chain(&binaries).chain(mapped.values()) {
         ensure!(
             !root.join(path).is_symlink(),
             "{path} is a symbolic link, which can't be packaged"
@@ -101,10 +108,15 @@ pub fn collect_files(
 
     let package_files = PackageFiles {
         files: files.into_iter().map(PathBuf::from).collect(),
+        mapped: mapped
+            .into_iter()
+            .map(|(path, file)| (path, PathBuf::from(file)))
+            .collect(),
         binaries: binaries.into_iter().map(PathBuf::from).collect(),
     };
     debug!(
         files = package_files.files.len(),
+        mapped = package_files.mapped.len(),
         binaries = package_files.binaries.len(),
         "Collected package files"
     );
@@ -125,6 +137,75 @@ fn select_all(
         unmatched.join(", ")
     );
     Ok(files)
+}
+
+/// The files of the `{ from, as }` entries of `[artifact.quark]` by their `/`-separated path
+/// within the package, with their path relative to `root`: the file or folder `from` is
+/// packaged as `as`. Like a glob, every entry needs to select a file, and the files
+/// which are never packaged as well as `exclude` (matched against the project path) are skipped.
+fn select_mapped(
+    root: &Path,
+    mappings: &[&PathMapping],
+    exclude: &GlobSet,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    if mappings.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let candidates = project_files(root)?;
+    let mut selected = BTreeMap::new();
+    let mut unmatched = vec![];
+    for mapping in mappings {
+        ensure!(
+            !mapping.from.contains(WILDCARDS),
+            "`from = \"{}\"` of [artifact.quark] paths names a file or folder, it can't contain wildcards",
+            mapping.from
+        );
+        let from = relative_path(Path::new(&mapping.from))?;
+        let target = relative_path(Path::new(&mapping.as_))?;
+        let join = |rest: &str| match (target.is_empty(), rest.is_empty()) {
+            (true, _) => rest.to_string(),
+            (false, true) => target.clone(),
+            (false, false) => format!("{target}/{rest}"),
+        };
+        let mut matched = false;
+        for path in &candidates {
+            let rest = match from.is_empty() {
+                true => path.as_str(),
+                false if *path == from => "",
+                false => match path.strip_prefix(&format!("{from}/")) {
+                    Some(rest) => rest,
+                    None => continue,
+                },
+            };
+            matched = true;
+            if exclude.is_match(path) {
+                trace!(path, "Excluded");
+                continue;
+            }
+            let package_path = join(rest);
+            ensure!(
+                !package_path.is_empty(),
+                "The file `from = \"{}\"` of [artifact.quark] paths needs a file name as `as`, not \"{}\"",
+                mapping.from,
+                mapping.as_
+            );
+            if let Some(other) = selected.insert(package_path.clone(), path.clone()) {
+                ensure!(
+                    other == *path,
+                    "{other} and {path} would both be packaged as {package_path}"
+                );
+            }
+        }
+        if !matched {
+            unmatched.push(format!("`from = \"{}\"`", mapping.from));
+        }
+    }
+    ensure!(
+        unmatched.is_empty(),
+        "The entries {} of [artifact.quark] paths don't select any file (hidden files, dist/, magnet_packages/ and {SCLANG_CONF_FILE} are never packaged)",
+        unmatched.join(", ")
+    );
+    Ok(selected)
 }
 
 /// The files below `root` which are committed to git (`HEAD`), relative to `root`, with the
@@ -499,6 +580,7 @@ mod tests {
                     "magnet.toml",
                 ]),
                 binaries: vec![],
+                ..Default::default()
             }
         );
     }
@@ -513,6 +595,94 @@ mod tests {
         assert_eq!(
             files.files,
             paths(&["Classes/Foo.sc", "Root.sc", "magnet.toml"])
+        );
+    }
+
+    fn mapped(entries: &[(&str, &str)]) -> Vec<(String, PathBuf)> {
+        entries
+            .iter()
+            .map(|(path, file)| (path.to_string(), PathBuf::from(file)))
+            .collect()
+    }
+
+    #[test]
+    fn test_quark_mappings() {
+        let (dir, manifest) = project(
+            "[artifact]\nexclude = [\"build/install/foo/docs/**\"]\n\
+             [artifact.quark]\npaths = [\"src/sc/**\", \
+             { from = \"external/libs\", as = \"src/sc/externals/libs\" }, \
+             { from = \"build/install/foo\", as = \".\" }, \
+             { from = \"extra/Bar.sc\", as = \"Classes/Bar.sc\" }]\n",
+            &[
+                "src/sc/Classes/Foo.sc",
+                "external/libs/a.lib",
+                "external/libs/sub/b.lib",
+                "external/libs/.hidden",
+                "external/other.txt",
+                "build/install/foo/Classes/Foo.sc",
+                "build/install/foo/docs/notes.txt",
+                "extra/Bar.sc",
+            ],
+        );
+        let files = quark(&dir, &manifest).unwrap();
+        assert_eq!(
+            files.files,
+            paths(&["magnet.toml", "src/sc/Classes/Foo.sc"])
+        );
+        assert_eq!(
+            files.mapped,
+            mapped(&[
+                ("Classes/Bar.sc", "extra/Bar.sc"),
+                ("Classes/Foo.sc", "build/install/foo/Classes/Foo.sc"),
+                ("src/sc/externals/libs/a.lib", "external/libs/a.lib"),
+                ("src/sc/externals/libs/sub/b.lib", "external/libs/sub/b.lib"),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_refused_quark_mappings() {
+        let files = &["lib/a.lib", "lib/b.lib", "other/a.lib", "Foo.sc"];
+        for (mapping, error) in [
+            (
+                "{ from = \"missing\", as = \"x\" }",
+                "`from = \"missing\"` of [artifact.quark] paths don't select any file",
+            ),
+            (
+                "{ from = \"lib/*\", as = \"x\" }",
+                "can't contain wildcards",
+            ),
+            (
+                "{ from = \"lib\", as = \"../x\" }",
+                "points outside of the project",
+            ),
+            (
+                "{ from = \"/lib\", as = \"x\" }",
+                "points outside of the project",
+            ),
+            (
+                "{ from = \"Foo.sc\", as = \".\" }",
+                "needs a file name as `as`",
+            ),
+            (
+                "{ from = \"lib\", as = \"x\" }, { from = \"other\", as = \"x\" }",
+                "lib/a.lib and other/a.lib would both be packaged as x/a.lib",
+            ),
+        ] {
+            let (dir, manifest) =
+                project(&format!("[artifact.quark]\npaths = [{mapping}]\n"), files);
+            let err = quark(&dir, &manifest).unwrap_err().to_string();
+            assert!(err.contains(error), "{mapping}: {err}");
+        }
+        // the same file via two entries is packaged once
+        let (dir, manifest) = project(
+            "[artifact.quark]\npaths = [{ from = \"lib\", as = \"x\" }, { from = \"lib/a.lib\", as = \"x/a.lib\" }]\n",
+            files,
+        );
+        let files = quark(&dir, &manifest).unwrap();
+        assert_eq!(
+            files.mapped,
+            mapped(&[("x/a.lib", "lib/a.lib"), ("x/b.lib", "lib/b.lib")])
         );
     }
 
@@ -647,6 +817,7 @@ mod tests {
             PackageFiles {
                 files: paths(&["magnet.toml"]),
                 binaries: paths(&["build/Foo.scx"]),
+                ..Default::default()
             }
         );
         let files = quark(&dir, &manifest).unwrap();
@@ -701,6 +872,7 @@ mod tests {
                     "src/Foo.cpp"
                 ]),
                 binaries: vec![],
+                ..Default::default()
             }
         );
     }

@@ -354,6 +354,19 @@ A package keeps the relative layout of the selected files, so it mirrors the pro
 Only the binaries of a lepton are moved, into `plugins/<platform>/<abi>/`.
 A file which is selected by multiple globs of `paths` is only packaged once, but packaging fails if a glob does not select any file, since this is probably a typo and a published artifact can never be replaced.
 
+An entry of `paths` can also be a table `{ from, as }`, which packages a file or folder of the project at another path, so an existing project whose classes expect files at the place of an installed extension needs no changes, e.g. the layout of a CMake install:
+
+```toml
+[artifact.quark]
+paths = [
+    { from = "src/sc", as = "." },
+    { from = "external/faust/libraries", as = "externals/faustlibs" },
+]
+```
+
+The project itself keeps its layout during development, so a path relative to a class file only finds the moved files once the package is installed.
+This is meant for the transition of existing projects, in the long run the project should mirror the package.
+
 Every artifact also contains the `magnet.toml` of the project at its root, such that the server reads the manifest from the uploaded artifact (see Publishing a package), and the readme file of `[metadata]` (`README.md` by default, if it exists) at its path.
 
 The naming convention for the `.tar.gz` file follows

@@ -186,9 +186,9 @@
           "properties": {
             "paths": {
               "type": "array",
-              "description": "Paths of the quark artifact - supports glob wildcards",
+              "description": "Paths of the quark artifact, which keep their place within the package - supports glob wildcards. A table `{ from, as }` places a file or folder of the project at another place within the package instead",
               "items": {
-                "type": "string"
+                "$ref": "#/definitions/quarkPath"
               }
             }
           },
@@ -268,6 +268,34 @@
       "type": "string",
       "description": "Platform tag of a binary artifact",
       "enum": ["linux_x86_64", "linux_arm64", "linux_armv7", "macos_x86_64", "macos_arm64", "windows_x86_64", "windows_arm64", "wasm32_emscripten"]
+    },
+    "quarkPath": {
+      "description": "A glob, or a file or folder of the project placed at another path within the package",
+      "anyOf": [
+        {
+          "type": "string",
+          "description": "Glob of files which keep their path relative to the project root"
+        },
+        {
+          "$ref": "#/definitions/pathMapping"
+        }
+      ]
+    },
+    "pathMapping": {
+      "type": "object",
+      "description": "A file or folder of the project (`from`, without wildcards), which gets packaged as `as` (\".\" is the root of the package)",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "File or folder relative to the project root"
+        },
+        "as": {
+          "type": "string",
+          "description": "Its path within the package"
+        }
+      },
+      "required": ["from", "as"],
+      "additionalProperties": false
     }
   }
 }

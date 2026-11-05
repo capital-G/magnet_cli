@@ -355,13 +355,36 @@ impl MagnetManifestV1 {
         kinds
     }
 
-    /// The globs of `[artifact.quark]`, empty if the manifest has none
-    pub fn quark_paths(&self) -> &[String] {
+    /// The entries of `paths` of `[artifact.quark]`, empty if the manifest has none
+    fn quark_paths(&self) -> &[QuarkPath] {
         self.artifact
             .as_ref()
             .and_then(|artifact| artifact.quark.as_ref())
             .map(|quark| quark.paths.as_slice())
             .unwrap_or_default()
+    }
+
+    /// The globs of `[artifact.quark]`, whose files keep their path within the package
+    pub fn quark_globs(&self) -> Vec<String> {
+        self.quark_paths()
+            .iter()
+            .filter_map(|path| match path {
+                QuarkPath::String(glob) => Some(glob.clone()),
+                QuarkPath::PathMapping(_) => None,
+            })
+            .collect()
+    }
+
+    /// The `{ from, as }` entries of `[artifact.quark]`, which place a file or folder of the
+    /// project at another path within the package
+    pub fn quark_mappings(&self) -> Vec<&PathMapping> {
+        self.quark_paths()
+            .iter()
+            .filter_map(|path| match path {
+                QuarkPath::String(_) => None,
+                QuarkPath::PathMapping(mapping) => Some(mapping),
+            })
+            .collect()
     }
 
     /// The `platform-paths` of `[artifact.lepton]`, if the manifest has it
@@ -667,7 +690,7 @@ baz = {}
             dependencies: HashMap::new(),
             artifact: Some(MagnetManifestV1Artifact {
                 quark: Some(MagnetManifestV1ArtifactQuark {
-                    paths: vec!["classes/**/*.sc".to_string()],
+                    paths: vec![QuarkPath::String("classes/**/*.sc".to_string())],
                 }),
                 ..Default::default()
             }),
@@ -772,7 +795,7 @@ baz = {}
     fn test_quark_template() {
         let manifest =
             MagnetManifestV1::from_string(&template_content(None, ProjectLayout::Magnet)).unwrap();
-        assert_eq!(manifest.quark_paths(), ["classes/**/*.sc", "HelpSource/**"]);
+        assert_eq!(manifest.quark_globs(), ["classes/**/*.sc", "HelpSource/**"]);
         assert!(manifest.lepton_platform_paths().is_none());
         assert!(manifest.artifact.unwrap().source.is_none());
     }
@@ -782,7 +805,7 @@ baz = {}
         let content = template_content(Some(Platform::MacosArm64), ProjectLayout::LegacyQuark);
         assert!(!content.contains("lepton"), "{content}");
         let manifest = MagnetManifestV1::from_string(&content).unwrap();
-        assert_eq!(manifest.quark_paths(), ["**"]);
+        assert_eq!(manifest.quark_globs(), ["**"]);
         assert_eq!(manifest.artifact_kinds(), [ArtifactKind::Quark]);
     }
 
@@ -825,7 +848,7 @@ baz = {}
                 manifest.artifact_kinds(),
                 [ArtifactKind::Quark, ArtifactKind::Lepton]
             );
-            assert_eq!(manifest.quark_paths(), ["classes/**/*.sc", "HelpSource/**"]);
+            assert_eq!(manifest.quark_globs(), ["classes/**/*.sc", "HelpSource/**"]);
             assert_eq!(
                 manifest.lepton_platform_paths().unwrap(),
                 &HashMap::from([(
@@ -833,6 +856,34 @@ baz = {}
                     vec![binaries.to_string()]
                 )])
             );
+        }
+    }
+
+    #[test]
+    fn test_quark_paths_with_mappings() {
+        let manifest = MagnetManifestV1::from_string(
+            "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n\
+             [artifact.quark]\n\
+             paths = [\"src/sc/**\", { from = \"external/libs\", as = \"externals\" }]\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.quark_globs(), ["src/sc/**"]);
+        let mappings = manifest.quark_mappings();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            (mappings[0].from.as_str(), mappings[0].as_.as_str()),
+            ("external/libs", "externals")
+        );
+        // both keys are needed, and no other
+        for table in [
+            "{ from = \"a\" }",
+            "{ from = \"a\", as = \"b\", paths = [\"*\"] }",
+        ] {
+            assert!(MagnetManifestV1::from_string(&format!(
+                "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"1.0.0\"\n\
+                 [artifact.quark]\npaths = [{table}]\n"
+            ))
+            .is_err());
         }
     }
 
@@ -852,7 +903,7 @@ baz = {}
         // a lepton without classes, e.g. one which only ships binaries
         let lepton = manifest("[artifact.lepton.platform-paths]\nmacos_arm64 = [\"*.scx\"]\n");
         assert_eq!(lepton.artifact_kinds(), [ArtifactKind::Lepton]);
-        assert!(lepton.quark_paths().is_empty());
+        assert!(lepton.quark_globs().is_empty() && lepton.quark_mappings().is_empty());
         assert_eq!(
             lepton.source().from,
             MagnetManifestV1ArtifactSourceFrom::Git
