@@ -264,6 +264,11 @@ pub async fn publish(
     for warning in check_names(client, &name, archives).await {
         warn!("{warning}");
     }
+
+    // compared with the artifacts the server already has before anything gets uploaded, so a
+    // changed archive doesn't stop publishing halfway
+    let mut uploads = vec![];
+    let mut changed = vec![];
     for archive in archives {
         let content = fs::read(&archive.path)
             .with_context(|| format!("Could not read {:?}", archive.path))?;
@@ -272,8 +277,28 @@ pub async fn publish(
             .path
             .file_name()
             .unwrap_or_default()
-            .to_string_lossy();
+            .to_string_lossy()
+            .to_string();
         let key = archive.key();
+        match published
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.key() == key.to_string())
+        {
+            Some(artifact) if artifact.sha256.eq_ignore_ascii_case(&sha256) => {
+                info!("{file} is already uploaded")
+            }
+            Some(_) => changed.push(file),
+            None => uploads.push((file, key, content, sha256)),
+        }
+    }
+    ensure!(
+        changed.is_empty(),
+        "{} differ from the artifacts which {name} {version} already has on the server, and a published artifact can never be replaced. Bump the version in {MAGNET_PROJECT_FILE} and package again",
+        changed.join(", ")
+    );
+
+    for (file, key, content, sha256) in uploads {
         match client
             .upload_artifact(&name, &version, &key, content, &sha256)
             .await
@@ -543,17 +568,30 @@ mod tests {
         assert_eq!(published.state, VersionState::Final);
     }
 
+    /// the sha256 of a fake archive in [dist], whose content is its file name
+    fn sha(file: &str) -> String {
+        format!("{:x}", Sha256::digest(file.as_bytes()))
+    }
+
+    /// no archive gets uploaded
+    async fn expect_no_upload(server: &MockServer) {
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn test_publish_again_is_fine() {
         let dir = dist(&[QUARK, SOURCE]);
-        let sha = |file: &str| format!("{:x}", Sha256::digest(file.as_bytes()));
         let artifacts = serde_json::json!([
             {"kind": "source", "abi": "any", "platform": "any", "sha256": sha(SOURCE)},
             {"kind": "quark", "abi": "any", "platform": "any", "sha256": sha(QUARK)},
         ]);
         let server = server((200, version("final", artifacts))).await;
-        expect_upload(&server, "source-any-any", SOURCE.as_bytes(), 200).await;
-        expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 200).await;
+        // the archives the server already has aren't sent again
+        expect_no_upload(&server).await;
         // a final version is not finalised again
         expect_finalise(&server, 0, serde_json::json!([])).await;
 
@@ -565,6 +603,50 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(published.state, VersionState::Final);
+    }
+
+    /// e.g. a job of a CI matrix which failed after the source: only the rest gets uploaded
+    #[tokio::test]
+    async fn test_only_missing_archives_are_uploaded() {
+        let dir = dist(&[QUARK, SOURCE]);
+        let artifacts = serde_json::json!([
+            {"kind": "source", "abi": "any", "platform": "any", "sha256": sha(SOURCE).to_uppercase()},
+        ]);
+        let server = server((200, version("draft", artifacts))).await;
+        expect_upload(&server, "quark-any-any", QUARK.as_bytes(), 201).await;
+        expect_finalise(&server, 1, serde_json::json!([])).await;
+
+        let published = publish(
+            &client(&server),
+            &manifest("quark", ""),
+            &quark_archive(&dir),
+        )
+        .await
+        .unwrap();
+        assert_eq!(published.state, VersionState::Final);
+    }
+
+    #[tokio::test]
+    async fn test_changed_archive_fails_before_uploading() {
+        let dir = dist(&[QUARK, SOURCE]);
+        // the source is new, but the quark differs from the uploaded one
+        let artifacts = serde_json::json!([
+            {"kind": "quark", "abi": "any", "platform": "any", "sha256": "abc"},
+        ]);
+        let server = server((200, version("draft", artifacts))).await;
+        expect_no_upload(&server).await;
+        expect_finalise(&server, 0, serde_json::json!([])).await;
+
+        let err = publish(
+            &client(&server),
+            &manifest("quark", ""),
+            &quark_archive(&dir),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(QUARK) && !err.contains(SOURCE), "{err}");
+        assert!(err.contains("Bump the version in magnet.toml"), "{err}");
     }
 
     #[tokio::test]
