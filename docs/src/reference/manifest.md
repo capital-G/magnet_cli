@@ -9,12 +9,15 @@ This manifest file does not need to be written manually but is intended to be cr
 
 Currently only class extensions have a `.quark` file within the legacy Quark system, though in magnet also Leptons (server plugins) and Gluons (sclang plugins) have such a `magnet.toml` file since they also should be published via the index, making it necessary to provide such a file.
 
-A current sketch of the JSON schema can be accessed via <https://gist.github.com/capital-G/bcd3d411b3e4c15597001fbe5f9b371c#file-magnet-spec-json> and edited via e.g. <https://json.ophir.dev/>.
+The JSON schema of the manifest is available at <https://magnet.supercollider.online/schemas/magnet.v1.schema.json>.
+`magnet init` references it in the first line of `magnet.toml` via `#:schema <url>`, which TOML extensions of editors like Even Better TOML or Tombi use for completion, hints and validation.
+An existing manifest can simply add this line on top.
 The exact layout of this file is still WIP and any hints regarding pitfalls is highly appreciated.
 
 ## Example
 
 ```toml
+#:schema https://magnet.supercollider.online/schemas/magnet.v1.schema.json
 magnet-version = 1
 
 [package]

@@ -1,6 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://magnet.supercollider.online/schemas/magnet.v1.schema.json",
   "title": "MagnetManifestV1",
+  "description": "magnet.toml, the manifest of a magnet project (magnet is the package manager of SuperCollider)",
   "type": "object",
   "properties": {
     "magnet-version": {
@@ -52,11 +54,13 @@
             "type": "object",
             "properties": {
               "name": {
-                "type": "string"
+                "type": "string",
+                "description": "Name of the author"
               },
               "email": {
                 "type": "string",
-                "format": "email"
+                "format": "email",
+                "description": "Email address of the author"
               }
             },
             "required": ["name"],

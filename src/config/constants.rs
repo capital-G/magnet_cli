@@ -14,6 +14,11 @@ pub const GIT_DIR: &str = "git";
 pub const CACHE_DIR: &str = "cache";
 
 pub const MAGNET_PROJECT_FILE: &str = "magnet.toml";
+/// URL of the JSON schema of `magnet.toml` (`schemes/magnet.v1.schema.json`, its `$id`), served
+/// by the magnet server. New manifests reference it via `#:schema`, which the TOML extensions
+/// of editors (taplo/Even Better TOML, Tombi) use for completion, hints and validation.
+pub const MANIFEST_SCHEMA_URL: &str =
+    "https://magnet.supercollider.online/schemas/magnet.v1.schema.json";
 pub const MAGNET_LOCK_FILE: &str = "magnet.lock";
 
 // client config

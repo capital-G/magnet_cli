@@ -13,6 +13,7 @@ use std::{
 use toml_edit::DocumentMut;
 use tracing::{error, instrument, trace, warn};
 
+use crate::config::constants::MANIFEST_SCHEMA_URL;
 use crate::models::package::ArtifactKind;
 use crate::target::current_platform;
 
@@ -180,7 +181,11 @@ impl ProjectManifest {
         manifest: &MagnetManifestV1,
         layout: ProjectLayout,
     ) -> anyhow::Result<Self> {
-        let mut content = Self::serialize_manifest(manifest)?;
+        // first in the file, as editors (taplo, Tombi) expect it
+        let mut content = format!(
+            "#:schema {MANIFEST_SCHEMA_URL}\n{}",
+            Self::serialize_manifest(manifest)?
+        );
         if manifest.artifact.is_none() {
             let platform = match current_platform() {
                 Ok(platform) => Some(platform),
@@ -557,6 +562,36 @@ baz = {}
                 assert_eq!(legacy_quark.unwrap(), true);
             }
         }
+    }
+
+    #[test]
+    fn test_new_manifest_references_the_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magnet.toml");
+        let manifest = MagnetManifestV1::new(
+            "foo".to_string(),
+            SemanticVersion::new(0, 1, 0),
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        ProjectManifest::write_new(path.clone(), &manifest, ProjectLayout::Magnet).unwrap();
+        let directive = format!("#:schema {MANIFEST_SCHEMA_URL}\n");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with(&directive), "{content}");
+
+        // editing the dependencies keeps it on top
+        let added = ProjectManifest::add_dependency_preserving(
+            &content,
+            NamedDependency {
+                name: "bar".to_string(),
+                dependency: MagnetManifestV1DependenciesValue::String("^1.0".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(added.starts_with(&directive), "{added}");
+        let removed = ProjectManifest::remove_dependency_preserving(&added, "bar").unwrap();
+        assert!(removed.starts_with(&directive), "{removed}");
     }
 
     #[test]
