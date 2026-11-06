@@ -1,5 +1,6 @@
 mod commands;
 mod logging;
+mod update_notice;
 
 use crate::cli::commands::auth::{LoginArgs, LogoutArgs};
 use crate::cli::commands::check::CheckArgs;
@@ -160,11 +161,15 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
 
     logging::init_tracing(cli.global.verbosity)?;
 
+    // `self update` looks for a new release itself
+    let update_notice =
+        update_notice::UpdateNotice::start(matches!(cli.command, Commands::SelfCommand(_)));
+
     let cli_context = CliContext {
         global_args: cli.global,
     };
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Init(init_args) => init_args.run(&cli_context).await,
         Commands::ImportLegacyQuark(import_args) => import_args.run(&cli_context).await,
         Commands::Add(project_add_dependency_args) => {
@@ -185,7 +190,13 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Logout(logout_args) => logout_args.run(&cli_context).await,
         Commands::ServerInfo(server_info_args) => server_info_args.run(&cli_context).await,
         Commands::SelfCommand(self_args) => self_args.run(&cli_context).await,
+    };
+
+    // only after a successful command, an error stays the last thing printed
+    if result.is_ok() {
+        update_notice.finish().await;
     }
+    result
 }
 
 #[cfg(test)]

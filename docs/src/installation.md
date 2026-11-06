@@ -28,3 +28,4 @@ magnet self update
 ```
 
 Magnet also checks once a day if there has been a new release and will notify you about it.
+Set `MAGNET_NO_UPDATE_CHECK=1` to disable this check.
