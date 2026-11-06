@@ -30,6 +30,10 @@ jobs:
     - name: Test
       run: cargo test --all --verbose
 
+    - name: Build without self-update (as distro packages may)
+      if: runner.os == 'Linux'
+      run: cargo build --no-default-features
+
     - name: Build release binary
       run: cargo build --release --verbose
 

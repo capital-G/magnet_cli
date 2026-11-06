@@ -10,6 +10,7 @@ use crate::cli::commands::project::{
 };
 use crate::cli::commands::publish::PublishArgs;
 use crate::cli::commands::search::SearchArgs;
+use crate::cli::commands::self_manage::SelfArgs;
 use crate::cli::commands::server_info::ServerInfoArgs;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -106,6 +107,9 @@ enum Commands {
     Logout(LogoutArgs),
     /// Shows the magnet server of the index and its version
     ServerInfo(ServerInfoArgs),
+    /// Manages the magnet executable itself, e.g. `magnet self update`
+    #[command(name = "self")]
+    SelfCommand(SelfArgs),
 }
 
 pub struct CliContext {
@@ -180,6 +184,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Login(login_args) => login_args.run(&cli_context).await,
         Commands::Logout(logout_args) => logout_args.run(&cli_context).await,
         Commands::ServerInfo(server_info_args) => server_info_args.run(&cli_context).await,
+        Commands::SelfCommand(self_args) => self_args.run(&cli_context).await,
     }
 }
 

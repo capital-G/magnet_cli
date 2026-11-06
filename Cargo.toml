@@ -3,6 +3,9 @@ name = "magnet"
 version = "0.1.0"
 edition = "2021"
 description = "Package manager for SuperCollider"
+repository = "https://github.com/capital-G/magnet_cli"
+# not on crates.io (the name is taken there); releases are the GitHub releases built by dist
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -38,6 +41,13 @@ toml_edit = "0.25.12"
 globset = "0.4.20"
 anstream = "0.6.21"
 anstyle = "1.0.13"
+axoupdater = { version = "0.10.3", optional = true }
+
+[features]
+default = ["self-update"]
+# `magnet self update` via the install receipt of the dist installers; distro packages can build
+# without it
+self-update = ["dep:axoupdater"]
 
 [build-dependencies]
 typify = "0.5.0"
@@ -48,3 +58,12 @@ syn = "2.0"
 
 [dev-dependencies]
 wiremock = "0.6.5"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# dist leaves out packages with `publish = false` unless asked
+[package.metadata.dist]
+dist = true

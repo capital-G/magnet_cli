@@ -13,3 +13,4 @@ The magnet client mainly is used to
 
 `magnet add`, `remove` and `update` change the manifest and the lock file and install the resulting dependencies into `magnet_packages/` right away, which can be skipped via `--no-install` such that only the files get written.
 `magnet install` sets up an existing project, e.g. after cloning it, by installing the dependencies of its lock file.
+`magnet self update` replaces magnet with its newest release on [GitHub](https://github.com/capital-G/magnet_cli/releases), if it was installed by its install script (see [Installation](../installation.md)).
