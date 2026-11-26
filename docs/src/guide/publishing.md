@@ -32,9 +32,12 @@ An entry of `paths` can also be a table `{ from, as }`, which packages a file or
 [artifact.quark]
 paths = [
     { from = "src/sc", as = "." },
-    { from = "external/faust/libraries", as = "externals/faustlibs" },
+    { from = "external/faust/libraries", as = "externals/faustlibs", include = ["**.lib", "licenses/**"] },
 ]
 ```
+
+`include` packages only those files of the folder which its globs select, relative to `from`, e.g. the Faust libraries without their documentation and tests.
+Like any glob, each of them needs to select a file.
 
 The project itself keeps its layout during development, so a path relative to a class file only finds the moved files once the package is installed.
 This is meant for the transition of existing projects, in the long run the project should mirror the package.
@@ -58,7 +61,8 @@ The supported SuperCollider versions are not a tag but the `sclang` range of the
 
 The archive is a gzip compressed tar file in the plain *ustar* format without GNU or pax extensions, such that a small reader is enough to unpack it, e.g. within a browser.
 Long paths use the `prefix` field of ustar (155 characters for the directory in addition to the 100 characters of the name), and packaging fails for longer paths.
-It only contains regular files and directories, and its entries are sorted and written with a fixed modification time, uid/gid 0 and mode 0644 (0755 for directories and executables), such that packaging the same files always results in the same archive.
+It only contains regular files and directories, and its entries are sorted and written with a fixed modification time, uid/gid 0 and mode 0644 (0755 for directories and the executables of a lepton), such that packaging the same files always results in the same archive.
+The source and the quark artifact store text files (without a NUL byte in their first 8000 bytes) with LF line endings, so they are the same on every machine, e.g. on each runner of a CI matrix, also on Windows with CRLF checkouts.
 
 Before uploading the asset to the index a user is expected to inspect its content since the package index only allows to add, never to delete.
 

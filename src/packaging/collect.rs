@@ -141,8 +141,10 @@ fn select_all(
 
 /// The files of the `{ from, as }` entries of `[artifact.quark]` by their `/`-separated path
 /// within the package, with their path relative to `root`: the file or folder `from` is
-/// packaged as `as`. Like a glob, every entry needs to select a file, and the files
-/// which are never packaged as well as `exclude` (matched against the project path) are skipped.
+/// packaged as `as`, of a folder only the files its `include` globs select (relative to
+/// `from`, all without them). Like a glob, every entry and every `include` glob needs to select
+/// a file, and the files which are never packaged as well as `exclude` (matched against the
+/// project path) are skipped.
 fn select_mapped(
     root: &Path,
     mappings: &[&PathMapping],
@@ -167,17 +169,43 @@ fn select_mapped(
             (false, true) => target.clone(),
             (false, false) => format!("{target}/{rest}"),
         };
+        let include = mapping
+            .include
+            .iter()
+            .map(|glob| compile(glob))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut included = vec![false; include.len()];
         let mut matched = false;
         for path in &candidates {
             let rest = match from.is_empty() {
                 true => path.as_str(),
-                false if *path == from => "",
+                false if *path == from => {
+                    ensure!(
+                        include.is_empty(),
+                        "`from = \"{}\"` of [artifact.quark] paths is a file, so it can't have `include`, which selects files of a folder",
+                        mapping.from
+                    );
+                    ""
+                }
                 false => match path.strip_prefix(&format!("{from}/")) {
                     Some(rest) => rest,
                     None => continue,
                 },
             };
             matched = true;
+            if !include.is_empty() {
+                let mut selected = false;
+                for (glob, included) in include.iter().zip(&mut included) {
+                    if glob.is_match(rest) {
+                        *included = true;
+                        selected = true;
+                    }
+                }
+                if !selected {
+                    trace!(path, "Not included");
+                    continue;
+                }
+            }
             if exclude.is_match(path) {
                 trace!(path, "Excluded");
                 continue;
@@ -198,6 +226,14 @@ fn select_mapped(
         }
         if !matched {
             unmatched.push(format!("`from = \"{}\"`", mapping.from));
+        }
+        for (glob, included) in mapping.include.iter().zip(included) {
+            if matched && !included {
+                unmatched.push(format!(
+                    "`include = [\"{glob}\"]` of `from = \"{}\"`",
+                    mapping.from
+                ));
+            }
         }
     }
     ensure!(
@@ -638,6 +674,85 @@ mod tests {
                 ("src/sc/externals/libs/sub/b.lib", "external/libs/sub/b.lib"),
             ])
         );
+    }
+
+    const FAUST_FILES: &[&str] = &[
+        "external/faust/libraries/stdfaust.lib",
+        "external/faust/libraries/embedded/more.lib",
+        "external/faust/libraries/licenses/LICENSE",
+        "external/faust/libraries/doc/manual.pdf",
+        "external/faust/libraries/Makefile",
+        "external/faust/libraries/private.lib",
+        "external/faust/libraries/.hidden.lib",
+        "LICENSE.txt",
+    ];
+
+    #[test]
+    fn test_quark_mappings_with_include() {
+        let (dir, manifest) = project(
+            "[artifact]\nexclude = [\"external/faust/libraries/private.lib\"]\n\
+             [artifact.quark]\npaths = [\
+             { from = \"external/faust/libraries\", as = \"externals/faustlibs\", \
+             include = [\"**.lib\", \"licenses/**\"] }, \
+             { from = \"LICENSE.txt\", as = \"LICENSE.txt\", include = [] }]\n",
+            FAUST_FILES,
+        );
+        let files = quark(&dir, &manifest).unwrap();
+        assert_eq!(
+            files.mapped,
+            mapped(&[
+                ("LICENSE.txt", "LICENSE.txt"),
+                (
+                    "externals/faustlibs/embedded/more.lib",
+                    "external/faust/libraries/embedded/more.lib"
+                ),
+                (
+                    "externals/faustlibs/licenses/LICENSE",
+                    "external/faust/libraries/licenses/LICENSE"
+                ),
+                (
+                    "externals/faustlibs/stdfaust.lib",
+                    "external/faust/libraries/stdfaust.lib"
+                ),
+            ])
+        );
+
+        // an empty `include` is the same as none (the generated type can't tell them apart)
+        let (dir, manifest) = project(
+            "[artifact.quark]\npaths = [{ from = \"external/faust/libraries\", as = \"x\", include = [] }]\n",
+            FAUST_FILES,
+        );
+        assert_eq!(quark(&dir, &manifest).unwrap().mapped.len(), 6);
+    }
+
+    #[test]
+    fn test_refused_includes() {
+        for (mapping, error) in [
+            (
+                "{ from = \"external/faust/libraries\", as = \"x\", include = [\"**.lib\", \"*.dsp\"] }",
+                "`include = [\"*.dsp\"]` of `from = \"external/faust/libraries\"` of [artifact.quark] paths don't select any file",
+            ),
+            (
+                // relative to `from`, not to the project
+                "{ from = \"external/faust\", as = \"x\", include = [\"external/**\"] }",
+                "`include = [\"external/**\"]` of `from = \"external/faust\"`",
+            ),
+            (
+                "{ from = \"LICENSE.txt\", as = \"LICENSE\", include = [\"*.txt\"] }",
+                "`from = \"LICENSE.txt\"` of [artifact.quark] paths is a file, so it can't have `include`",
+            ),
+            (
+                "{ from = \"external\", as = \"x\", include = [\"[a-\"] }",
+                "`[a-` is not a valid glob",
+            ),
+        ] {
+            let (dir, manifest) = project(
+                &format!("[artifact.quark]\npaths = [{mapping}]\n"),
+                FAUST_FILES,
+            );
+            let err = quark(&dir, &manifest).unwrap_err().to_string();
+            assert!(err.contains(error), "{mapping}: {err}");
+        }
     }
 
     #[test]

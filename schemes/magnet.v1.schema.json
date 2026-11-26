@@ -296,6 +296,13 @@
         "as": {
           "type": "string",
           "description": "Its path within the package"
+        },
+        "include": {
+          "type": "array",
+          "description": "Only the files of the folder `from` which these globs select, relative to `from` - supports glob wildcards",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": ["from", "as"],
