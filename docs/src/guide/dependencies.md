@@ -54,11 +54,18 @@ Only authors and maintainers of those existing packages can take the name in the
 
 Since the versioning of Quarks is not really existing, Quarks will be pinned by their commit hash in order to provide reproducible environments.
 A legacy dependency uses the `tag`, `ref` or `branch` of the manifest, otherwise the refspec of its entry in `directory.txt`, otherwise the default branch, and the resulting commit is stored in the lock file until `magnet update` moves it.
+`directory.txt` is read from the repository of `Quarks.directoryUrl`, which can be replaced via `MAGNET_QUARKS_DIRECTORY_URL`, and a locked legacy quark is only looked up there again by `magnet update`.
+A legacy quark can also be pinned by its name, e.g. `cruciallib = { legacy-quark = true, git = { tag = "4.1.4" } }`, since only legacy quarks can leave out the `url` of `git`.
 
 Transitive dependencies of quarks will also be added as restrictions to the magnet dependency graph.
 Since the legacy Quark system ignores their versions, a dependency of a `.quark` file becomes `*` if a magnet package with this name exists (also if it names a version or a refspec), and otherwise falls back to the legacy quark from `directory.txt`.
 If a `.quark` file is not a plain literal (e.g. it contains code), magnet warns and treats it as having no dependencies.
 In this case the dependencies can be listed by hand in the manifest together with `ignore-quark-deps = true`.
 A package which is required from two different sources (e.g. as a legacy quark and as a magnet package) is an error, which can be resolved via `[overrides]`.
+Legacy quarks found in `.quark` files are the exception: the first one wins with a warning, like in the legacy Quark system.
 
-In order to provide a smooth transition, published magnet packages can depend on those legacy quarks, though only via a pinned commit hash or tag, not via a branch.
+In order to provide a smooth transition, published magnet packages can depend on those legacy quarks, though only via a full commit SHA (`ref`) and the `url` of the repository, not via a tag (which can move) or a branch.
+The index line copies the URL and the commit.
+
+`magnet import-legacy-quark` turns a legacy quark into a magnet project, taking the defaults of `magnet init` from its `.quark` file.
+It asks for each dependency whether to use a magnet package (with a version) or the legacy quark pinned to a commit, so the imported project can be published right away.

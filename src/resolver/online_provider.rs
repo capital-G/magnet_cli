@@ -80,8 +80,9 @@ fn comparator_to_ranges(comparator: &semver::Comparator) -> Ranges<SemanticVersi
 }
 
 /// The versions of SuperCollider a dependency's `sclang` range allows while resolving: its upper
-/// bounds are ignored, since defensive caps would block the resolution (DESIGN.md
-/// "SuperCollider version"), e.g. `>=3.13, <3.14` and `^3.13` both become `>=3.13.0`.
+/// bounds are ignored, since defensive caps would block the resolution
+/// (`docs/src/guide/dependencies.md#supercollider-version`), e.g. `>=3.13, <3.14` and `^3.13` both
+/// become `>=3.13.0`.
 pub fn sclang_lower_bound(requirement: &VersionReq) -> Ranges<SemanticVersion> {
     match requirement.to_ranges().bounding_range() {
         Some((Bound::Included(lower), _)) => Ranges::higher_than(*lower),
@@ -207,7 +208,7 @@ pub struct RootProvider<'a> {
     /// file, so a resolve only changes what it must. Keyed by the normalized name.
     pub preferred: HashMap<String, SemanticVersion>,
     /// the `sclang` range of the project. Without one, the `sclang` ranges of the
-    /// dependencies are ignored (DESIGN.md "SuperCollider version").
+    /// dependencies are ignored (`docs/src/guide/dependencies.md#supercollider-version`).
     pub sclang: Option<VersionReq>,
     /// this machine, whose binaries are preferred when choosing a version of a lepton
     pub target: &'a LazyTarget,
@@ -308,8 +309,9 @@ impl DependencyProvider for RootProvider<'_> {
                         dependencies.remove(&name);
                     }
                     (Some(git), Some(source)) if source.source.is_commit(&git.url, &git.ref_) => {}
-                    // a name only comes from one source (DESIGN.md "Backwards compatibility /
-                    // Legacy Quarks"), so this version can't be used, which pubgrub reports
+                    // a name only comes from one source
+                    // (`docs/src/guide/dependencies.md#installing-legacy-quark-dependencies`), so
+                    // this version can't be used, which pubgrub reports
                     (required, Some(source)) => {
                         let from = match required {
                             Some(git) => format!("{}#{}", git.url, git.ref_),
@@ -341,10 +343,11 @@ impl DependencyProvider for RootProvider<'_> {
 }
 
 impl RootProvider<'_> {
-    /// For a lepton, the newest version within `range` with a binary this machine loads, so
-    /// a version without one only gets chosen if no other fits (DESIGN.md "Missing binary").
-    /// This is a preference, not a constraint, so the lock file still holds on every machine.
-    /// Without a known target (e.g. no sclang), versions are chosen as for quarks.
+    /// For a lepton, the newest version within `range` with a binary this machine loads, so a
+    /// version without one only gets chosen if no other fits
+    /// (`docs/src/guide/leptons.md#missing-binary`). This is a preference, not a constraint, so the
+    /// lock file still holds on every machine. Without a known target (e.g. no sclang), versions
+    /// are chosen as for quarks.
     fn newest_with_binary(
         &self,
         package: &str,

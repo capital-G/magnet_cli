@@ -1,5 +1,5 @@
 //! The platform and abi tags of this machine, which select the binary artifacts of leptons,
-//! see DESIGN.md "Packaging"
+//! see `docs/src/guide/leptons.md`
 
 use std::{cell::OnceCell, fmt, str::FromStr};
 
@@ -20,7 +20,7 @@ pub const MAGNET_ABI_ENV: &str = "MAGNET_ABI";
 pub const MAGNET_NO_BINARIES_ENV: &str = "MAGNET_NO_BINARIES";
 
 /// The plugin API version of scsynth/supernova, which is the abi tag of a lepton artifact,
-/// written as `api<major>_<minor>`, e.g. `api3_0`, see DESIGN.md "Packaging".
+/// written as `api<major>_<minor>`, e.g. `api3_0`, see `docs/src/guide/leptons.md#abi-tag`.
 /// A plugin is built against one version and works with servers of the same major version
 /// and the same or a newer minor version (the patch version never changes the interface).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -242,12 +242,13 @@ fn detect_platform(os: &str, arch: &str) -> anyhow::Result<Platform> {
     })
 }
 
-/// The plugin API of a released SuperCollider version, see the table in DESIGN.md "Packaging".
+/// The plugin API of a released SuperCollider version, see the table in
+/// `docs/src/guide/leptons.md#abi-tag`.
 /// Releases before the plugin API was versioned semantically count as minor version 0.
 /// Other versions (e.g. development builds) can't be derived.
 /// The plugin API of the released SuperCollider versions: `(major, first minor, last minor,
-/// plugin API)`, see DESIGN.md "Packaging". The generated `MagnetServerOptions` class uses the
-/// same table (`src/models/server_options.rs`).
+/// plugin API)`, see `docs/src/guide/leptons.md#abi-tag`. The generated `MagnetServerOptions`
+/// class uses the same table (`src/models/server_options.rs`).
 pub const PLUGIN_APIS: [(u32, u32, u32, PluginApi); 2] = [
     (3, 6, 8, PluginApi::new(2, 0)),
     (3, 9, 14, PluginApi::new(3, 0)),

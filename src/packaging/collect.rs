@@ -37,12 +37,11 @@ pub struct PackageFiles {
     pub binaries: Vec<PathBuf>,
 }
 
-/// Selects the files of the artifact of `kind` via the manifest's `[artifact]` tables,
-/// see DESIGN.md "Packaging": the files of the source (tracked by git, or its `paths`), of the
-/// quark, or the binaries of the lepton for the platform of `tags`.
-/// Hidden files (except the ones of a source from git), `dist/`, `magnet_packages/` and
-/// `sclang_conf.yaml` are never selected, while `magnet.toml` and the readme are always part of
-/// the artifact.
+/// Selects the files of the artifact of `kind` via the manifest's `[artifact]` tables, see
+/// `docs/src/guide/publishing.md#packaging`: the files of the source (tracked by git, or its
+/// `paths`), of the quark, or the binaries of the lepton for the platform of `tags`. Hidden files
+/// (except the ones of a source from git), `dist/`, `magnet_packages/` and `sclang_conf.yaml` are
+/// never selected, while `magnet.toml` and the readme are always part of the artifact.
 #[instrument(skip(manifest))]
 pub fn collect_files(
     root: &Path,
@@ -465,7 +464,7 @@ fn select(
     Ok(selected)
 }
 
-/// `magnet.toml` and the readme, see DESIGN.md "Packaging"
+/// `magnet.toml` and the readme, see `docs/src/guide/publishing.md#packaging`
 fn always_packaged(root: &Path, manifest: &MagnetManifestV1) -> anyhow::Result<Vec<String>> {
     ensure!(
         root.join(MAGNET_PROJECT_FILE).is_file(),

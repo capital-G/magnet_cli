@@ -45,6 +45,8 @@ kind = "sclang"
 jitlib-extensions = "0.5.*"
 # allows to rely on old quarks
 ddwCommon = { legacy-quark = true }
+# a legacy quark pinned to a tag of its repository
+cruciallib = { legacy-quark = true, git = { tag = "4.1.4" } }
 # the dependencies of its .quark file are not used, so they need to be listed here
 someQuark = { legacy-quark = true, ignore-quark-deps = true }
 # we can also reference packages which are not part of the index via git
@@ -58,7 +60,7 @@ paths = ["Classes/**.sc", "examples/*"]
 
 # uncomment this once the project builds server plugins
 # [artifact.lepton]
-# platform-paths = { macos_arm64 = ["build/*.{scx,dylib}"] }
+# paths = ["build/*.{scx,so,dylib,dll}"]
 
 [metadata]
 license = "GPL-3.0"
@@ -98,7 +100,10 @@ The source is not a kind, since every version has one.
 
 ## Valid package names
 
-Package names are
+Package names
 
-* case-insensitive
-* `_`/`-` insensitive
+* consist of letters, digits, `_` and `-`, start with a letter or a digit and contain no dots
+* are case-insensitive
+* are `_`/`-` insensitive
+
+The normalized name (lowercase, `_` replaced by `-`) is used for the path within the index, the `dl` URLs, the keys of dependencies, the lock file and `magnet_packages/`.

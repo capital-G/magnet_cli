@@ -53,8 +53,8 @@ impl GitArtifact {
 }
 
 impl GitRelease {
-    /// The kinds of artifacts this version contains which this client knows (DESIGN.md
-    /// "Artifact kinds"), see [Self::unknown_kinds]
+    /// The kinds of artifacts this version contains which this client knows
+    /// (`docs/src/reference/manifest.md#artifact-kinds`), see [Self::unknown_kinds]
     pub fn kinds(&self) -> Vec<ArtifactKind> {
         self.kinds
             .iter()
@@ -101,8 +101,8 @@ impl GitRelease {
 #[serde(untagged)]
 pub enum GitIndexDependency {
     Version(VersionReq),
-    /// a git dependency (a magnet project or, with `legacy-quark`, a legacy quark), which
-    /// published packages can only pin by its commit (DESIGN.md "Publishing a package")
+    /// a git dependency (a magnet project or, with `legacy-quark`, a legacy quark), which published
+    /// packages can only pin by its commit (`docs/src/guide/publishing.md#publishing-a-package`)
     Git {
         #[serde(
             rename = "legacy-quark",
@@ -166,7 +166,7 @@ pub struct GitRelease {
     pub version: SemanticVersion,
     /// the kinds of artifacts of this version, as plain strings like the artifacts' kinds
     pub kinds: Vec<String>,
-    /// supported SuperCollider versions, see DESIGN.md "SuperCollider version"
+    /// supported SuperCollider versions, see `docs/src/guide/dependencies.md#supercollider-version`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sclang: Option<VersionReq>,
     #[serde(default)]

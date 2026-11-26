@@ -1,5 +1,5 @@
 //! `magnet publish`: which archives get published, and the draft → upload → finalise flow,
-//! see DESIGN.md "Publishing a package"
+//! see `docs/src/guide/publishing.md#publishing-a-package`
 
 use std::{
     fs,
@@ -43,7 +43,8 @@ impl PublishArchive {
 
 /// Refuses manifests which others couldn't reproduce: `path` dependencies, `[overrides]`,
 /// dependencies of another index, and git or legacy quark dependencies which aren't pinned via
-/// a full commit SHA as `ref`, which the index line copies (DESIGN.md "Publishing a package")
+/// a full commit SHA as `ref`, which the index line copies
+/// (`docs/src/guide/publishing.md#publishing-a-package`)
 /// `true` for a full (40 hex digits) git commit SHA
 fn is_full_sha(rev: &str) -> bool {
     rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
@@ -189,9 +190,10 @@ fn file_name_artifact(path: &Path, prefix: &str) -> Option<(ArtifactKind, Artifa
     Some((kind.parse().ok()?, ArtifactTags::new(abi, platform).ok()?))
 }
 
-/// What a version with `kinds` lacks before it can be finalised (DESIGN.md "Publishing a
-/// package"): its source, its quark if it contains one, and at least one binary of a lepton
-/// if it contains one, which other platforms can be added to later
+/// What a version with `kinds` lacks before it can be finalised
+/// (`docs/src/guide/publishing.md#publishing-a-package`): its source, its quark if it contains one,
+/// and at least one binary of a lepton if it contains one, which other platforms can be added to
+/// later
 fn missing_for_finalise(kinds: &[ArtifactKind], artifacts: &[GitArtifact]) -> Vec<String> {
     let keys: Vec<ArtifactKey> = artifacts
         .iter()

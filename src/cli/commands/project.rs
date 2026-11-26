@@ -360,8 +360,8 @@ fn git_author() -> Option<String> {
     })
 }
 
-/// `>=<major>.<minor>` of the found sclang, or `None` without one (DESIGN.md
-/// "SuperCollider version")
+/// `>=<major>.<minor>` of the found sclang, or `None` without one
+/// (`docs/src/guide/dependencies.md#supercollider-version`)
 fn default_sclang_requirement() -> Option<String> {
     let version = match Sclang::find().and_then(|sclang| match sclang {
         Some(sclang) => sclang.version().map(Some),

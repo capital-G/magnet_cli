@@ -115,12 +115,12 @@ pub enum ProjectLayout {
     LegacyQuark,
 }
 
-/// The `[artifact]` tables of a new project, as a commented starting point for the author,
-/// see DESIGN.md "Packaging". The quark matches the folders of a new project (`classes/`,
-/// `HelpSource/`), or selects everything for a legacy quark, like the legacy Quark system
-/// installs it. A new project also gets a commented `[artifact.lepton]` with the binaries of
-/// `platform` (if known), where `build/` is a guess for the build folder, so it only needs to
-/// be uncommented once the project builds server plugins.
+/// The `[artifact]` tables of a new project, as a commented starting point for the author, see
+/// `docs/src/guide/publishing.md#packaging`. The quark matches the folders of a new project
+/// (`classes/`, `HelpSource/`), or selects everything for a legacy quark, like the legacy Quark
+/// system installs it. A new project also gets a commented `[artifact.lepton]` with the binaries of
+/// `platform` (if known), where `build/` is a guess for the build folder, so it only needs to be
+/// uncommented once the project builds server plugins.
 fn artifact_template(platform: Option<Platform>, layout: ProjectLayout) -> String {
     let mut template = String::from("\n[artifact.quark]\n");
     template.push_str(match layout {
@@ -494,7 +494,8 @@ impl MagnetManifestV1 {
     }
 }
 
-/// The artifact kinds this version of magnet knows, see DESIGN.md "Package kinds"
+/// The artifact kinds this version of magnet knows, see
+/// `docs/src/reference/manifest.md#artifact-kinds`
 const ARTIFACT_KINDS: [&str; 3] = ["source", "quark", "lepton"];
 
 /// Explains why a manifest which doesn't parse was probably written for another version of
@@ -1059,17 +1060,17 @@ baz = {}
         assert!(!error("[artifact.quark]\n").contains("magnet"));
     }
 
-    /// The manifest example in DESIGN.md must always be valid against the schema.
+    /// The manifest example of the book must always be valid against the schema.
     #[test]
-    fn test_design_doc_example() {
-        // fix: git may check out DESIGN.md with CRLF line endings on Windows
-        let design = include_str!("../../DESIGN.md").replace("\r\n", "\n");
-        let example = design
-            .split("\n### Example\n")
+    fn test_manifest_doc_example() {
+        // fix: git may check out the book with CRLF line endings on Windows
+        let page = include_str!("../../docs/src/reference/manifest.md").replace("\r\n", "\n");
+        let example = page
+            .split("\n## Example\n")
             .nth(1)
             .and_then(|section| section.split("```toml\n").nth(1))
             .and_then(|block| block.split("\n```").next())
-            .expect("Could not find manifest example in DESIGN.md");
+            .expect("Could not find the manifest example in docs/src/reference/manifest.md");
 
         let manifest = MagnetManifestV1::from_string(example).unwrap();
         assert_eq!(manifest.package.name, "magnet-test");

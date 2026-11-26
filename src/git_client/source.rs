@@ -13,8 +13,9 @@ use url::Url;
 use crate::git_client::client::GitClient;
 use crate::models::project_manifest::MagnetManifestV1DependenciesValueObjectGit;
 
-/// What a git dependency checks out (DESIGN.md "Lock file"), written into the lock file's
-/// source as `?branch=`, `?tag=` or `?ref=`, so a changed manifest is noticed without a fetch
+/// What a git dependency checks out (`docs/src/reference/lock-file.md`), written into the lock
+/// file's source as `?branch=`, `?tag=` or `?ref=`, so a changed manifest is noticed without a
+/// fetch
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitReference {
     DefaultBranch,

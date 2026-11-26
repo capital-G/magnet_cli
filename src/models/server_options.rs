@@ -1,4 +1,4 @@
-//! The class which isolates the server's plugins, see DESIGN.md "Server plugins"
+//! The class which isolates the server's plugins, see `docs/src/guide/leptons.md#server-plugins`
 
 use std::path::Path;
 
@@ -18,7 +18,7 @@ pub const DEV_DIR: &str = ".dev";
 /// matches the server: this platform and the newest plugin API the server loads (the same
 /// major, a minor up to its own), since scsynth loads every sub folder of a path. So globally
 /// installed plugins are not loaded, and a project can hold the binaries of several platforms
-/// and plugin APIs (DESIGN.md "Server plugins").
+/// and plugin APIs (`docs/src/guide/leptons.md#server-plugins`).
 /// The paths are determined when sclang compiles the class, so the file holds no absolute
 /// paths and fits the SuperCollider it runs in. The plugin API is `api` if given (`--abi`, e.g.
 /// for an older scsynth or a development build), otherwise the one of the running

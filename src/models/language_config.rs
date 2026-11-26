@@ -12,7 +12,8 @@ use crate::{
     sclang::{Sclang, MAGNET_SCLANG_ENV},
 };
 
-/// sclang language config in the root of the project, see DESIGN.md
+/// sclang language config in the root of the project, see
+/// `docs/src/guide/projects.md#sclang_confyaml`
 pub const SCLANG_CONF_FILE: &str = "sclang_conf.yaml";
 
 /// characters which start a wildcard within a glob

@@ -1,6 +1,6 @@
 # Magnet CLI
 
-See [`DESIGN.md`](DESIGN.md) for the full design specification of the package manager.
+See the docs at <https://docs.magnet.supercollider.online/> for the full design specification of the package manager.
 
 ## License
 

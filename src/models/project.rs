@@ -315,7 +315,8 @@ impl Project {
     }
 
     /// Writes `sclang_conf.yaml` and the class which isolates the server's plugins
-    /// (DESIGN.md "Server plugins"), which is compiled via the include paths of the former
+    /// (`docs/src/guide/leptons.md#server-plugins`), which is compiled via the include paths of the
+    /// former
     fn write_language_config_for(&self, sclang: Option<Sclang>) -> anyhow::Result<()> {
         LanguageConfig::for_project(&self.path, self.project_manifest.get_manifest(), sclang)?
             .write(&self.path)?;
@@ -326,10 +327,10 @@ impl Project {
         )
     }
 
-    /// If the project is a lepton, copies its binaries for this platform (`platform-paths`, else `paths`)
-    /// into `magnet_packages/.dev/<name>/plugins/<platform>/<abi>`, so the server loads the
-    /// local build (DESIGN.md "Server plugins"). A missing build only warns, since it may not
-    /// exist yet, and so does an unknown abi of this machine.
+    /// If the project is a lepton, copies its binaries for this platform (`platform-paths`, else
+    /// `paths`) into `magnet_packages/.dev/<name>/plugins/<platform>/<abi>`, so the server loads
+    /// the local build (`docs/src/guide/leptons.md#server-plugins`). A missing build only warns,
+    /// since it may not exist yet, and so does an unknown abi of this machine.
     fn copy_dev_plugins(&self) -> anyhow::Result<()> {
         if !self.has_lepton() {
             return Ok(());
@@ -680,8 +681,9 @@ impl Project {
             .transpose()
     }
 
-    /// Warns if the found sclang is outside of the project's `sclang` range, or, if the project
-    /// has none, if a resolved version requires a newer sclang (DESIGN.md "SuperCollider version")
+    /// Warns if the found sclang is outside of the project's `sclang` range, or, if the project has
+    /// none, if a resolved version requires a newer sclang
+    /// (`docs/src/guide/dependencies.md#supercollider-version`)
     fn warn_about_sclang(
         &self,
         provider: &GitClient,
@@ -784,7 +786,7 @@ impl Project {
     }
 
     /// Warns about yanked locked versions, which still get installed, and fails for locked
-    /// versions which are not in the index anymore (DESIGN.md "Deletion")
+    /// versions which are not in the index anymore (`docs/src/guide/publishing.md#deletion`)
     fn check_locked_versions(
         &self,
         provider: &GitClient,
@@ -937,10 +939,11 @@ impl Project {
         self.install_locked(provider, downloader, locked).await
     }
 
-    /// Installs exactly what the lock file holds into `magnet_packages/` and removes what it doesn't,
-    /// without resolving. `add`, `remove` and `update` call this after writing the lock.
-    /// The lock file only changes if it lacks the checksum of a binary for this machine, which
-    /// got published later (DESIGN.md "Missing binary"); with `locked`, this fails instead.
+    /// Installs exactly what the lock file holds into `magnet_packages/` and removes what it
+    /// doesn't, without resolving. `add`, `remove` and `update` call this after writing the lock.
+    /// The lock file only changes if it lacks the checksum of a binary for this machine, which got
+    /// published later (`docs/src/guide/leptons.md#missing-binary`); with `locked`, this fails
+    /// instead.
     pub async fn install_locked(
         &mut self,
         provider: &GitClient,
@@ -1041,11 +1044,11 @@ impl Project {
     }
 
     /// The artifacts of a locked package which get installed: one for each of its kinds
-    /// (DESIGN.md "Artifact kinds"), i.e. the quark and the binary of a lepton which this
-    /// machine loads. If the lock file has no binary for this machine, it may have been
+    /// (`docs/src/reference/manifest.md#artifact-kinds`), i.e. the quark and the binary of a lepton
+    /// which this machine loads. If the lock file has no binary for this machine, it may have been
     /// published later, so its checksum gets taken from the index and added to `dependency`.
-    /// Without any, the error message which suggests a version with a binary (DESIGN.md
-    /// "Missing binary").
+    /// Without any, the error message which suggests a version with a binary
+    /// (`docs/src/guide/leptons.md#missing-binary`).
     fn select_artifacts(
         &self,
         provider: &GitClient,
@@ -1350,10 +1353,11 @@ impl Project {
         Ok(())
     }
 
-    /// Packages every artifact of the project's version which can be built on this machine
-    /// into `dist/`: the source, the quark and the lepton for the target of this machine, as
-    /// far as the manifest has their `[artifact]` tables (see DESIGN.md "Artifact kinds").
-    /// `allow_dirty` packages the source from git despite uncommitted changes.
+    /// Packages every artifact of the project's version which can be built on this machine into
+    /// `dist/`: the source, the quark and the lepton for the target of this machine, as far as the
+    /// manifest has their `[artifact]` tables (see
+    /// `docs/src/reference/manifest.md#artifact-kinds`). `allow_dirty` packages the source from git
+    /// despite uncommitted changes.
     pub fn create_packages(&self, allow_dirty: bool) -> anyhow::Result<Vec<PackageArchive>> {
         self.artifacts(|| Ok(self.target.get()?.tags()))?
             .iter()
@@ -1430,9 +1434,9 @@ impl Project {
             .collect()
     }
 
-    /// Packages the artifact of `kind` with the given tags into `dist/`, see DESIGN.md
-    /// "Packaging". The selected files keep their path relative to the project root, only the
-    /// binaries of a lepton go into `plugins/<platform>/<abi>/`.
+    /// Packages the artifact of `kind` with the given tags into `dist/`, see
+    /// `docs/src/guide/publishing.md#packaging`. The selected files keep their path relative to the
+    /// project root, only the binaries of a lepton go into `plugins/<platform>/<abi>/`.
     #[instrument(skip(self))]
     pub fn create_package(
         &self,

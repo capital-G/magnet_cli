@@ -9,8 +9,8 @@ use anyhow::{bail, ensure, Context};
 use tracing::{debug, instrument, trace};
 
 /// Limits of [extract] against archive bombs, the same as the server's upload checks
-/// (DESIGN.md "Checks of the server"). The lock checksum only proves that it's the uploaded
-/// file, not that it's harmless.
+/// (`docs/src/guide/publishing.md#checks-of-the-server`). The lock checksum only proves that it's
+/// the uploaded file, not that it's harmless.
 #[derive(Debug, Clone)]
 pub struct ExtractLimits {
     /// sum of the sizes of all files
@@ -63,10 +63,10 @@ fn crlf_to_lf(content: Vec<u8>) -> Vec<u8> {
     normalized
 }
 
-/// Creates a reproducible `.tar.gz` archive (DESIGN.md "Packaging"): plain ustar headers,
-/// entries sorted by their path, a fixed mtime, uid/gid 0 and mode 0644 (0755 for
-/// executables if `contents` is [Contents::AsIs]). `entries` maps the path within the archive
-/// to the file on disk. Only files get stored, the directories are implied by their paths.
+/// Creates a reproducible `.tar.gz` archive (`docs/src/guide/publishing.md#packaging`): plain ustar
+/// headers, entries sorted by their path, a fixed mtime, uid/gid 0 and mode 0644 (0755 for
+/// executables if `contents` is [Contents::AsIs]). `entries` maps the path within the archive to
+/// the file on disk. Only files get stored, the directories are implied by their paths.
 #[instrument(skip(entries))]
 pub fn compress(
     entries: &BTreeMap<String, PathBuf>,

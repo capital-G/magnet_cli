@@ -1,5 +1,6 @@
-//! The publish endpoints of the magnet server: draft → upload → finalise,
-//! see DESIGN.md "Publishing a package" and the endpoint contract in implementation_plan.md
+//! The publish endpoints of the magnet server: draft → upload → finalise, see
+//! `docs/src/guide/publishing.md#publishing-a-package` and the endpoint contract in
+//! implementation_plan.md
 
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;

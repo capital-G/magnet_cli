@@ -8,6 +8,7 @@ This file is part of a git repository, called `magnet-index`, which acts as a di
 Only the `magnet-server` can write into this repository.
 
 The magnet CLI will clone this repository which contains the list of available packages and update it occasionally.
+By default this is the official index at `https://git.magnet.supercollider.online/magnet_index.git`, which `MAGNET_GIT_INDEX_URL` / `--git-index-url` replace, e.g. for a local test server.
 Since this repository stores all available packages, versions and assets, is can be used to resolve the requested dependencies locally, which improves performance and reduces load on the server dramatically.
 
 This index will be split, i.e. instead of a flat namespace with all its files, we will use an approach which organizes the packages by its first letter into a sub-folder, i.e. `foobar` would be placed in `f/foobar.jsonl`.
@@ -26,8 +27,12 @@ Each file while then have a one-lined JSON for each release, which covers
 Legacy quarks can also be used as dependencies by providing
 
 ```json
-{"baz": {"legacy-quark": true, "git": {"ref": "<git sha>", "url":  "<link-to-repo>"}}}
+{"baz": {"legacy-quark": true, "ignore-quark-deps": true, "git": {"ref": "<git sha>", "url":  "<link-to-repo>"}}}
 ```
+
+A git magnet project uses the same `git` entry, `"legacy-quark": true` only marks legacy quarks.
+The optional `"ignore-quark-deps": true` carries the `ignore-quark-deps` of the manifest of the publishing package.
+The resolver adds these dependencies in rounds, once the index packages which need them are chosen.
 
 The source of a version is represented via
 

@@ -5,8 +5,8 @@ use crate::models::{
     project_manifest::MagnetManifestV1,
 };
 
-/// `{name}-{version}-{kind}-{abi}-{platform}.tar.gz` with the normalised name, see DESIGN.md
-/// "Packaging". The filename is only ever built, never parsed.
+/// `{name}-{version}-{kind}-{abi}-{platform}.tar.gz` with the normalised name, see
+/// `docs/src/guide/publishing.md#packaging`. The filename is only ever built, never parsed.
 pub fn artifact_file_name(
     name: &str,
     version: &SemanticVersion,

@@ -45,8 +45,9 @@ pub struct LockDependency {
         serialize_with = "serialize_semantic_version"
     )]
     pub version: SemanticVersion,
-    /// the kinds of artifacts of this version (DESIGN.md "Artifact kinds"), so installing
-    /// knows which artifacts it needs without an index lookup, also when a binary is missing
+    /// the kinds of artifacts of this version (`docs/src/reference/manifest.md#artifact-kinds`), so
+    /// installing knows which artifacts it needs without an index lookup, also when a binary is
+    /// missing
     pub kinds: Vec<ArtifactKind>,
     pub source: LockSource,
     /// the normalized names of its own dependencies, so `magnet tree` needs no index.

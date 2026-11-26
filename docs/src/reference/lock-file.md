@@ -18,12 +18,13 @@ index-http = "https://static.magnet.example/index"
 version = "0.1.0"
 kinds = ["quark"]
 source = "index"
+dependencies = ["bar"]
 checksums = { source-any-any = "987", quark-any-any = "abc" }
 
 [dependencies.bar]
 version = "0.0.0"
 kinds = ["quark"]
-source = "git+https://git.com/favUser/someLegacyQuark.git#4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+source = "git+https://git.com/favUser/someLegacyQuark.git?tag=v1.0#4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 [dependencies.baz]
 version = "0.3.0"
@@ -39,8 +40,13 @@ checksums = { lepton-api3_0-linux_x86_64 = "abc", lepton-api3_0-macos_arm64 = "d
 
 The kinds of artifacts are stored in the lock file such that magnet knows which artifacts of each dependency it needs without having to consult the index, also if one is missing for the machine.
 
+Each entry lists the normalized names of its own dependencies in `dependencies`, which is left out if it has none, so the tree of dependencies is known without the index (`magnet tree`).
+
 Git dependencies and legacy quarks store their commit SHA in `source`.
+Its query holds the `branch`, `tag` or `ref` of the manifest (none for the default branch), so a changed manifest is noticed without fetching, and `magnet update` moves the commit.
 Legacy quarks have no semantic version, so their version is `0.0.0`.
+Path dependencies are locked with the version of the `magnet.toml` of their folder (`0.0.0` without one) and their path relative to the project.
+Leptons can not be git dependencies, since their binaries need a build, only path dependencies to a local build.
 
 `index-http` is copied from the `http` field of the index's `config.json` (if present), such that clients without git (e.g. a browser) can install from the lock file (see [`magnet-index`](index-format.md)).
 

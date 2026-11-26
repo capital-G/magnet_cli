@@ -17,6 +17,7 @@ Since MinIO has become unusable, I settled for [Garage](https://garagehq.deuxfle
 Social logins will likely not be made available.
 OAuth2 will be used to authenticate CLI clients.
 `magnet login` opens the authorization flow (with PKCE, since the CLI can not keep a client secret), stores the token in the magnet home folder for each server and refreshes it when it expires, and `magnet logout` revokes it.
+The browser hands the code back via a redirect to a local port of the CLI, or with `--no-browser` the code gets pasted.
 It will be possible to generate longer lasting tokens for a CI environment on the website, which are limited to publishing and will be passed via the `MAGNET_TOKEN` environment variable.
 Such a token is sent like any other OAuth2 token and is never written to disk by the client.
 

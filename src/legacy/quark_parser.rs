@@ -1,5 +1,5 @@
 //! A best guess at the dependencies of a legacy `.quark` file without running sclang
-//! (DESIGN.md "Backwards compatibility / Legacy Quarks"). Only the value of the
+//! (`docs/src/guide/dependencies.md#installing-legacy-quark-dependencies`). Only the value of the
 //! `dependencies` key is read, and only if it is a plain array literal; anything else (e.g.
 //! code like `[] ++ if(…)`) is reported, so the caller can warn and assume no dependencies.
 //! [parse_fields] reads the other keys the same way, e.g. for `magnet import-legacy-quark`.

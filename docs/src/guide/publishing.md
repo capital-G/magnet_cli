@@ -92,13 +92,19 @@ Publishing a version consists of three steps, such that the index never contains
 
 Only finalised versions are written into the index.
 A draft which never gets finalised (e.g. because a CI run failed) is only visible to the owners of the package and stays until they delete it, after which its version can be drafted again.
-All steps can be repeated, such that e.g. each job of a CI matrix can publish its own binaries: an existing draft or finalised version is re-used, and uploading an identical artifact again is not an error.
+All steps can be repeated, such that e.g. each job of a CI matrix can publish its own binaries: an existing draft or finalised version is re-used, and an artifact which was already uploaded gets skipped.
+A changed artifact stops publishing before anything is uploaded, since it needs a new version.
 
 Artifacts can be added to a finalised version later on, e.g. binaries for an additional platform, but they can never be replaced.
 The kinds of a version may differ from the ones of earlier versions.
 
-Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, packages from a different index, or git or legacy quark dependencies which are not pinned via a tag or ref, since others could not reproduce them.
+Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, packages from a different index, or git or legacy quark dependencies which are not pinned to a full commit SHA via `ref`, since others could not reproduce them.
 The client checks this before uploading, and the server checks it again.
+
+Since sclang has a single namespace, a class defined by two packages can not be compiled, and of two class extensions which add the same method one silently replaces the other.
+Before uploading, the client therefore asks the server for naming conflicts of the classes within the quark artifact with the newest versions of the other packages and warns about them.
+These conflicts never block publishing.
+`magnet check` runs the same check without publishing, and `--deny-conflicts` turns the conflicts into an error, e.g. for CI.
 
 ### Checks of the server
 

@@ -4,7 +4,7 @@ use anyhow::{ensure, Context};
 use serde::{Deserialize, Serialize};
 
 /// The tags of an artifact, which are part of its filename and its `dl` URL,
-/// see DESIGN.md "Packaging".
+/// see `docs/src/guide/publishing.md#packaging`.
 /// Binary artifacts use a platform of the schema's list (`Platform`) and the plugin API as abi
 /// (`PluginApi`, `src/target.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,8 +57,9 @@ impl FromStr for ArtifactTags {
     }
 }
 
-/// The kind of an artifact, which is part of its filename and its `dl` URL, see DESIGN.md
-/// "Artifact kinds". The source is no kind a version contains, but every version has one.
+/// The kind of an artifact, which is part of its filename and its `dl` URL, see
+/// `docs/src/reference/manifest.md#artifact-kinds`. The source is no kind a version contains, but
+/// every version has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
@@ -91,7 +92,7 @@ impl FromStr for ArtifactKind {
 }
 
 /// Identifies an artifact within a version: `{kind}-{abi}-{platform}`, the keys of the lock
-/// file's checksums (DESIGN.md "Checksums")
+/// file's checksums (`docs/src/reference/lock-file.md#checksums`)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactKey {
     pub kind: ArtifactKind,

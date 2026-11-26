@@ -175,7 +175,8 @@ impl PackageDownloader {
             }
         } else {
             let response = self.client.get(url.clone()).send().await?;
-            // the server answers deleted artifacts with 410 (DESIGN.md "Deletion")
+            // the server answers deleted artifacts with 410
+            // (`docs/src/guide/publishing.md#deletion`)
             if response.status() == reqwest::StatusCode::GONE {
                 return Err(Deleted.into());
             }

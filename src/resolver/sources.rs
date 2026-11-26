@@ -29,7 +29,7 @@ const PROJECT: &str = "the project";
 
 /// A dependency which doesn't come from the index, but from a git repository or a local
 /// folder. It has a single version, given by its `magnet.toml`, or `0.0.0` for a legacy quark
-/// without one (DESIGN.md "Lock file").
+/// without one (`docs/src/reference/lock-file.md`).
 #[derive(Debug, Clone)]
 pub struct SourcePackage {
     pub version: SemanticVersion,
@@ -143,17 +143,16 @@ impl Pending {
     }
 }
 
-/// Collects the git and path dependencies of `dependencies` (a manifest's) and, recursively,
-/// those of their `magnet.toml`s, or of the `.quark` file of a legacy quark (DESIGN.md
-/// "Backwards compatibility / Legacy Quarks"): a dependency named there is a `*` requirement
-/// against the index if `in_index` knows it, otherwise a legacy quark.
+/// Collects the git and path dependencies of `dependencies` (a manifest's) and, recursively, those
+/// of their `magnet.toml`s, or of the `.quark` file of a legacy quark
+/// (`docs/src/guide/dependencies.md#installing-legacy-quark-dependencies`): a dependency named
+/// there is a `*` requirement against the index if `in_index` knows it, otherwise a legacy quark.
 /// `locked` returns the locked source of a package if its commit should be kept, so a git
-/// dependency whose URL and reference didn't change isn't fetched again. A legacy quark
-/// without URL is looked up in `directory` (its repository and refspec), unless it's locked.
-/// `from_index` are the git dependencies of the resolved index packages, which get collected
-/// after the project's own (see `Project::resolve`).
-/// A package which is required from two sources, or from the index as well, is an error,
-/// unless the second one comes from a `.quark` file.
+/// dependency whose URL and reference didn't change isn't fetched again. A legacy quark without URL
+/// is looked up in `directory` (its repository and refspec), unless it's locked. `from_index` are
+/// the git dependencies of the resolved index packages, which get collected after the project's own
+/// (see `Project::resolve`). A package which is required from two sources, or from the index as
+/// well, is an error, unless the second one comes from a `.quark` file.
 pub fn collect_sources(
     root: &Path,
     dependencies: &HashMap<String, MagnetManifestV1DependenciesValue>,

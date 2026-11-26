@@ -7,7 +7,7 @@ pub struct MagnetServerVersion {
     pub version: String,
 }
 
-/// State of a version on the server, see DESIGN.md "Publishing a package"
+/// State of a version on the server, see `docs/src/guide/publishing.md#publishing-a-package`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VersionState {

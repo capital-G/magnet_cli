@@ -13,7 +13,7 @@ Magnet will do exactly this - instead of a global `Quarks.folder`, every project
 
 ## Project folders
 
-When creating a new magnet project the following folders will be created
+When creating a new magnet project, `magnet init` asks whether to create the following folders (by default it does), and `magnet_packages/` gets created by the first installation anyway
 
 * `classes/` - SC classes of the project
 * `dist/` - stores created packages of the project, `.gitignore` this
