@@ -13,6 +13,7 @@ use crate::cli::commands::publish::PublishArgs;
 use crate::cli::commands::search::SearchArgs;
 use crate::cli::commands::self_manage::SelfArgs;
 use crate::cli::commands::server_info::ServerInfoArgs;
+use crate::cli::commands::version::VersionArgs;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use magnet::{
@@ -100,6 +101,8 @@ enum Commands {
     Check(CheckArgs),
     /// Publishes packages of the current magnet project on the magnet server
     Publish(PublishArgs),
+    /// Prints the version of the current magnet project, or bumps it (major, minor, patch)
+    Version(VersionArgs),
     /// Searches the classes and methods of the packages on the magnet server
     Search(SearchArgs),
     /// Logs in to the magnet server of the index
@@ -185,6 +188,7 @@ pub(crate) async fn cli() -> anyhow::Result<()> {
         Commands::Package(project_package_args) => project_package_args.run(&cli_context).await,
         Commands::Check(check_args) => check_args.run(&cli_context).await,
         Commands::Publish(publish_args) => publish_args.run(&cli_context).await,
+        Commands::Version(version_args) => version_args.run(&cli_context).await,
         Commands::Search(search_args) => search_args.run(&cli_context).await,
         Commands::Login(login_args) => login_args.run(&cli_context).await,
         Commands::Logout(logout_args) => logout_args.run(&cli_context).await,

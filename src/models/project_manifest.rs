@@ -279,6 +279,35 @@ impl ProjectManifest {
         &self.manifest
     }
 
+    /// Sets `[package] version`, preserving the rest of the file (`magnet version`, C11.7)
+    pub fn set_version(&mut self, version: &str) -> anyhow::Result<()> {
+        let updated = Self::set_version_preserving(
+            &std::fs::read_to_string(&self.path).context("Could not read file")?,
+            version,
+        )?;
+        // the schema decides which versions are valid
+        let manifest = MagnetManifestV1::from_string(&updated)?;
+        self.write(&updated)?;
+        self.manifest = manifest;
+        Ok(())
+    }
+
+    /// the counterpart of [Self::add_dependency_preserving] for `[package] version`, which
+    /// keeps the comment after the value
+    fn set_version_preserving(contents: &str, version: &str) -> anyhow::Result<String> {
+        let mut doc: DocumentMut = contents.parse()?;
+        let value = doc
+            .get_mut("package")
+            .and_then(|package| package.as_table_like_mut())
+            .and_then(|package| package.get_mut("version"))
+            .and_then(|version| version.as_value_mut())
+            .context("The manifest has no `version` in [package]")?;
+        let decor = value.decor().clone();
+        *value = version.into();
+        *value.decor_mut() = decor;
+        Ok(doc.to_string())
+    }
+
     /// transforms the manifest in a non-destructive way, i.e.
     /// comments, positioning and formatting are preserved.
     fn add_dependency_preserving(
@@ -844,6 +873,40 @@ baz = {}
             *line = line.strip_prefix("# ").unwrap().to_string();
         }
         lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn test_set_version_preserving() {
+        let contents = "# my package\n[package]\nname = \"foo\"\nversion = \"0.1.2\" # bumped by CI\n\n[dependencies]\nbar = \"^1\"\n";
+        assert_eq!(
+            ProjectManifest::set_version_preserving(contents, "0.2.0").unwrap(),
+            contents.replace("0.1.2", "0.2.0")
+        );
+        assert!(
+            ProjectManifest::set_version_preserving("[package]\nname = \"foo\"\n", "1.0.0")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_set_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magnet.toml");
+        let contents = "magnet-version = 1\n[package]\nname = \"foo\"\nversion = \"0.1.2\"\n";
+        std::fs::write(&path, contents).unwrap();
+        let mut manifest = ProjectManifest::open(path.clone()).unwrap();
+        manifest.set_version("1.0.0").unwrap();
+        assert_eq!(manifest.get_manifest().package.version.to_string(), "1.0.0");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            contents.replace("0.1.2", "1.0.0")
+        );
+        // the schema refuses invalid versions, and the file stays as it was
+        assert!(manifest.set_version("1.0").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            contents.replace("0.1.2", "1.0.0")
+        );
     }
 
     #[test]
