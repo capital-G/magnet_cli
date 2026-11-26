@@ -81,6 +81,9 @@ magnet publish dist/mypackage-0.1.0-quark-any-any.tar.gz
 
 Without a file, all artifacts of the current version within `dist` are published.
 
+If the repository of the project tags its versions (e.g. `v1.2.0` or `1.2.0`), `magnet publish` and `magnet check` warn when the checked out commit has no tag of the version in `magnet.toml`, or when that tag points to another commit.
+Projects without git or without version tags get no warning, and it never stops publishing.
+
 Publishing a version consists of three steps, such that the index never contains a version which was only uploaded halfway:
 
 1. The client creates a *draft* of the version, which also registers the package if it does not exist yet.

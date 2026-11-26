@@ -4,8 +4,12 @@ use clap::Parser;
 use magnet::{
     http_client::models::VersionState,
     models::project::Project,
-    packaging::publish::{check_publishable, publish, publish_archives},
+    packaging::{
+        publish::{check_publishable, publish, publish_archives},
+        version_tag::version_tag_warning,
+    },
 };
+use tracing::warn;
 
 use crate::cli::{CliContext, MagnetSubCommand};
 
@@ -30,6 +34,12 @@ impl MagnetSubCommand for PublishArgs {
         let manifest = project.manifest();
         check_publishable(manifest)?;
         let archives = publish_archives(project.root(), manifest, &self.files)?;
+        // only a warning: CI may publish from a branch, and some don't tag at all (C11.6)
+        if let Some(warning) =
+            version_tag_warning(project.root(), &manifest.package.version.to_string())
+        {
+            warn!("{warning}");
+        }
 
         let client = cli_context.authenticated_client().await?;
         let published = publish(&client, manifest, &archives).await?;

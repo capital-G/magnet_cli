@@ -9,8 +9,12 @@ use clap::Parser;
 use magnet::{
     http_client::basic::{AuthToken, MagnetClient},
     models::{package::ArtifactKind, project::Project, project_manifest::MagnetManifestV1},
-    packaging::class_check::{class_summary, conflict_warnings},
+    packaging::{
+        class_check::{class_summary, conflict_warnings},
+        version_tag::version_tag_warning,
+    },
 };
+use tracing::warn;
 
 use crate::cli::{commands::project::TargetArgs, CliContext, MagnetSubCommand};
 
@@ -47,6 +51,11 @@ impl MagnetSubCommand for CheckArgs {
         };
         let mut project = Project::open(&project_path)?;
         project.set_target(self.target.lazy());
+        // the same warning as `magnet publish` (C11.6)
+        let version = project.manifest().package.version.to_string();
+        if let Some(warning) = version_tag_warning(project.root(), &version) {
+            warn!("{warning}");
+        }
         let mut out = io::stdout();
         let Some(quark) = package(&project, self.allow_dirty, &mut out)? else {
             return Ok(());

@@ -3,3 +3,4 @@ pub mod collect;
 pub mod compression;
 pub mod naming;
 pub mod publish;
+pub mod version_tag;
