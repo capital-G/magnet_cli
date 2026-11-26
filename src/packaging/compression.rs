@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File},
+    io::{Read, Seek},
     path::{Component, Path, PathBuf},
 };
 
@@ -26,12 +27,52 @@ impl Default for ExtractLimits {
     }
 }
 
+/// How [compress] stores the files of an archive
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Contents {
+    /// as they are, with 0755 for executables (the binaries of a lepton)
+    AsIs,
+    /// every file with 0644 and text files with LF line endings (source and quark), so these
+    /// archives come out the same on every machine and checkout, e.g. a Windows runner with
+    /// CRLF checkouts and without executable bits
+    Portable,
+}
+
+/// Bytes at the start of a file which [is_text] looks at, the same as git's heuristic
+const TEXT_CHECK_LEN: usize = 8000;
+
+/// A file counts as text if its first [TEXT_CHECK_LEN] bytes contain no NUL byte, like git
+/// decides for `text=auto`; binary formats such as wav, png or shared libraries contain one.
+fn is_text(start: &[u8]) -> bool {
+    !start[..start.len().min(TEXT_CHECK_LEN)].contains(&0)
+}
+
+/// Replaces every `\r\n` by `\n`, a lone `\r` stays
+fn crlf_to_lf(content: Vec<u8>) -> Vec<u8> {
+    if !content.windows(2).any(|pair| pair == b"\r\n") {
+        return content;
+    }
+    let mut normalized = Vec::with_capacity(content.len());
+    let mut bytes = content.iter().peekable();
+    while let Some(&byte) = bytes.next() {
+        if byte == b'\r' && bytes.peek() == Some(&&b'\n') {
+            continue;
+        }
+        normalized.push(byte);
+    }
+    normalized
+}
+
 /// Creates a reproducible `.tar.gz` archive (DESIGN.md "Packaging"): plain ustar headers,
 /// entries sorted by their path, a fixed mtime, uid/gid 0 and mode 0644 (0755 for
-/// executables). `entries` maps the path within the archive to the file on disk.
-/// Only files get stored, the directories are implied by their paths.
+/// executables if `contents` is [Contents::AsIs]). `entries` maps the path within the archive
+/// to the file on disk. Only files get stored, the directories are implied by their paths.
 #[instrument(skip(entries))]
-pub fn compress(entries: &BTreeMap<String, PathBuf>, target: &Path) -> anyhow::Result<()> {
+pub fn compress(
+    entries: &BTreeMap<String, PathBuf>,
+    target: &Path,
+    contents: Contents,
+) -> anyhow::Result<()> {
     trace!("Create archive");
     let tar_file = File::create(target).with_context(|| format!("Could not create {target:?}"))?;
     // the gzip header of flate2 has no timestamp and no file name, so it's reproducible too
@@ -39,9 +80,32 @@ pub fn compress(entries: &BTreeMap<String, PathBuf>, target: &Path) -> anyhow::R
     let mut tar = tar::Builder::new(encoder);
 
     for (path, source) in entries {
-        let file = File::open(source).with_context(|| format!("Could not open {source:?}"))?;
+        let mut file = File::open(source).with_context(|| format!("Could not open {source:?}"))?;
         let metadata = file.metadata()?;
         ensure!(metadata.is_file(), "{source:?} is not a file");
+
+        // only text files are read into memory, other files get streamed
+        let text = match contents {
+            Contents::AsIs => None,
+            Contents::Portable => {
+                let mut start = vec![];
+                (&mut file)
+                    .take(TEXT_CHECK_LEN as u64)
+                    .read_to_end(&mut start)
+                    .with_context(|| format!("Could not read {source:?}"))?;
+                match is_text(&start) {
+                    true => {
+                        file.read_to_end(&mut start)
+                            .with_context(|| format!("Could not read {source:?}"))?;
+                        Some(crlf_to_lf(start))
+                    }
+                    false => {
+                        file.rewind()?;
+                        None
+                    }
+                }
+            }
+        };
 
         let mut header = tar::Header::new_ustar();
         // splits long paths into the prefix and name fields, and fails if that's not possible
@@ -49,18 +113,23 @@ pub fn compress(entries: &BTreeMap<String, PathBuf>, target: &Path) -> anyhow::R
             .set_path(path)
             .with_context(|| format!("The path {path} is too long for the archive"))?;
         header.set_entry_type(tar::EntryType::Regular);
-        header.set_size(metadata.len());
-        header.set_mode(if is_executable(&metadata) {
-            0o755
-        } else {
-            0o644
+        header.set_size(match &text {
+            Some(text) => text.len() as u64,
+            None => metadata.len(),
+        });
+        header.set_mode(match contents {
+            Contents::AsIs if is_executable(&metadata) => 0o755,
+            _ => 0o644,
         });
         header.set_mtime(0);
         header.set_uid(0);
         header.set_gid(0);
         header.set_cksum();
-        tar.append(&header, file)
-            .with_context(|| format!("Could not add {source:?} to the archive"))?;
+        match text {
+            Some(text) => tar.append(&header, text.as_slice()),
+            None => tar.append(&header, file),
+        }
+        .with_context(|| format!("Could not add {source:?} to the archive"))?;
     }
 
     tar.into_inner()?.finish()?;
@@ -253,7 +322,7 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let archive_dir = tempfile::tempdir().unwrap();
         let archive = archive_dir.path().join("foo.tar.gz");
-        compress(&entries(source.path(), FILES), &archive).unwrap();
+        compress(&entries(source.path(), FILES), &archive, Contents::AsIs).unwrap();
 
         let target = tempfile::tempdir().unwrap();
         extract(&archive, target.path()).unwrap();
@@ -272,7 +341,12 @@ mod tests {
     fn test_archive_is_reproducible_ustar() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first.tar.gz");
-        compress(&entries(&dir.path().join("a"), FILES), &first).unwrap();
+        compress(
+            &entries(&dir.path().join("a"), FILES),
+            &first,
+            Contents::AsIs,
+        )
+        .unwrap();
         // other source files with other mtimes and permissions
         let other = entries(&dir.path().join("b"), FILES);
         #[cfg(unix)]
@@ -285,7 +359,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         write(&other["Classes/Foo.sc"], b"Foo {}");
         let second = dir.path().join("second.tar.gz");
-        compress(&other, &second).unwrap();
+        compress(&other, &second, Contents::AsIs).unwrap();
         assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
 
         let mut archive =
@@ -313,12 +387,104 @@ mod tests {
         let files = entries(dir.path(), &[("plugins/run.sh", b"#!/bin/sh")]);
         fs::set_permissions(&files["plugins/run.sh"], fs::Permissions::from_mode(0o700)).unwrap();
         let archive = dir.path().join("x.tar.gz");
-        compress(&files, &archive).unwrap();
+        compress(&files, &archive, Contents::AsIs).unwrap();
 
         let mut archive =
             tar::Archive::new(flate2::read::GzDecoder::new(File::open(&archive).unwrap()));
         let entry = archive.entries().unwrap().next().unwrap().unwrap();
         assert_eq!(entry.header().mode().unwrap(), 0o755);
+    }
+
+    /// the bytes and modes of the entries of `archive`, by path
+    fn read_archive(archive: &Path) -> BTreeMap<String, (Vec<u8>, u32)> {
+        let mut archive =
+            tar::Archive::new(flate2::read::GzDecoder::new(File::open(archive).unwrap()));
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().to_string();
+                let mode = entry.header().mode().unwrap();
+                let mut content = vec![];
+                entry.read_to_end(&mut content).unwrap();
+                (path, (content, mode))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_portable_archives_ignore_line_endings_and_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lf: &[(&str, &[u8])] = &[
+            ("Classes/Foo.sc", b"Foo {\n\tbar { ^1 }\n}\n"),
+            ("HelpSource/Classes/Foo.schelp", b"title:: Foo\n"),
+            ("magnet.toml", b"magnet-version = 1\n"),
+        ];
+        let crlf: &[(&str, &[u8])] = &[
+            ("Classes/Foo.sc", b"Foo {\r\n\tbar { ^1 }\r\n}\r\n"),
+            ("HelpSource/Classes/Foo.schelp", b"title:: Foo\r\n"),
+            ("magnet.toml", b"magnet-version = 1\r\n"),
+        ];
+        let lf_archive = dir.path().join("lf.tar.gz");
+        compress(
+            &entries(&dir.path().join("lf"), lf),
+            &lf_archive,
+            Contents::Portable,
+        )
+        .unwrap();
+        let crlf_entries = entries(&dir.path().join("crlf"), crlf);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&crlf_entries["Classes/Foo.sc"], executable).unwrap();
+        }
+        let crlf_archive = dir.path().join("crlf.tar.gz");
+        compress(&crlf_entries, &crlf_archive, Contents::Portable).unwrap();
+
+        assert_eq!(
+            fs::read(&lf_archive).unwrap(),
+            fs::read(&crlf_archive).unwrap()
+        );
+        for (_, (_, mode)) in read_archive(&crlf_archive) {
+            assert_eq!(mode, 0o644);
+        }
+    }
+
+    #[test]
+    fn test_portable_archives_keep_binaries_and_lone_cr() {
+        let dir = tempfile::tempdir().unwrap();
+        // a NUL byte within the first 8000 bytes makes it binary, like a wav header
+        let mut binary = b"RIFF\0\0\0\0WAVE\r\n".to_vec();
+        binary.extend(std::iter::repeat(b'\r').take(10_000));
+        binary.extend(b"\r\n");
+        let mut late_nul = vec![b'a'; TEXT_CHECK_LEN];
+        late_nul.extend(b"\0\r\n");
+        let files: &[(&str, &[u8])] = &[
+            ("sounds/a.wav", &binary),
+            ("old_mac.txt", b"a\rb\r\nc\r"),
+            ("late_nul.txt", &late_nul),
+        ];
+        let archive = dir.path().join("x.tar.gz");
+        compress(&entries(dir.path(), files), &archive, Contents::Portable).unwrap();
+
+        let packaged = read_archive(&archive);
+        assert_eq!(packaged["sounds/a.wav"].0, binary);
+        assert_eq!(packaged["old_mac.txt"].0, b"a\rb\nc\r");
+        // only the first bytes count, like for git
+        let mut expected = vec![b'a'; TEXT_CHECK_LEN];
+        expected.extend(b"\0\n");
+        assert_eq!(packaged["late_nul.txt"].0, expected);
+    }
+
+    #[test]
+    fn test_as_is_archives_keep_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = entries(dir.path(), &[("plugins/notes.txt", b"a\r\nb")]);
+        let archive = dir.path().join("x.tar.gz");
+        compress(&files, &archive, Contents::AsIs).unwrap();
+        assert_eq!(read_archive(&archive)["plugins/notes.txt"].0, b"a\r\nb");
     }
 
     #[test]
@@ -328,14 +494,15 @@ mod tests {
         let long = format!("{}/{}.sc", "d".repeat(150), "f".repeat(87));
         let files = entries(dir.path(), &[(long.as_str(), b"x")]);
         let archive = dir.path().join("long.tar.gz");
-        compress(&files, &archive).unwrap();
+        compress(&files, &archive, Contents::AsIs).unwrap();
         let target = dir.path().join("target");
         extract(&archive, &target).unwrap();
         assert!(target.join(&long).is_file());
 
         let too_long = format!("{}/{}.sc", "d".repeat(150), "f".repeat(120));
         let files = entries(&dir.path().join("too-long"), &[(too_long.as_str(), b"x")]);
-        let err = compress(&files, &dir.path().join("too-long.tar.gz")).unwrap_err();
+        let err =
+            compress(&files, &dir.path().join("too-long.tar.gz"), Contents::AsIs).unwrap_err();
         assert!(err.to_string().contains("too long"), "{err:#}");
     }
 
@@ -347,7 +514,7 @@ mod tests {
             &[("Classes/Foo.sc", b"a"), ("classes/foo.sc", b"b")],
         );
         let archive = dir.path().join("case.tar.gz");
-        compress(&files, &archive).unwrap();
+        compress(&files, &archive, Contents::AsIs).unwrap();
         let err = extract(&archive, &dir.path().join("target")).unwrap_err();
         assert!(err.to_string().contains("ignoring the case"), "{err:#}");
     }
@@ -365,7 +532,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let files = entries(dir.path(), &[(name, b"x")]);
             let archive = dir.path().join("windows.tar.gz");
-            compress(&files, &archive).unwrap();
+            compress(&files, &archive, Contents::AsIs).unwrap();
             assert!(
                 extract(&archive, &dir.path().join("target")).is_err(),
                 "{name}"
@@ -380,7 +547,7 @@ mod tests {
     fn test_limits() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("foo.tar.gz");
-        compress(&entries(dir.path(), FILES), &archive).unwrap();
+        compress(&entries(dir.path(), FILES), &archive, Contents::AsIs).unwrap();
 
         let size: u64 = FILES.iter().map(|(_, content)| content.len() as u64).sum();
         let fits = ExtractLimits {

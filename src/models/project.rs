@@ -1402,9 +1402,15 @@ impl Project {
             &kind,
             tags,
         ));
+        // source and quark are packaged on every machine which publishes a binary, so their
+        // archives must not depend on its line endings or file modes (C11.1)
+        let contents = match kind {
+            ArtifactKind::Lepton => compression::Contents::AsIs,
+            ArtifactKind::Source | ArtifactKind::Quark => compression::Contents::Portable,
+        };
         // written next to the target and renamed, so a failure leaves no half-written package
         let temp = tempfile::NamedTempFile::new_in(&dist)?;
-        compression::compress(&entries, temp.path())?;
+        compression::compress(&entries, temp.path(), contents)?;
         temp.persist(&package_path)
             .with_context(|| format!("Could not write {package_path:?}"))?;
         debug!("Written package file to {package_path:?}");
@@ -3056,6 +3062,56 @@ beta = "^1"
         project.create_packages(false).unwrap();
         let again: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
         assert_eq!(first, again);
+    }
+
+    /// C11.1: source and quark don't depend on the line endings and modes of the checkout
+    #[cfg(unix)]
+    #[test]
+    fn test_only_leptons_keep_line_endings_and_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, project) = project(LEPTON_MANIFEST);
+        fs::create_dir_all(dir.path().join("Classes")).unwrap();
+        fs::create_dir_all(dir.path().join("build")).unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/Foo.cpp"), "int x;\n").unwrap();
+        fs::write(dir.path().join("Classes/Foo.sc"), "Foo {\r\n}\r\n").unwrap();
+        fs::write(dir.path().join("build/Foo.scx"), "binary\r\n").unwrap();
+        for file in ["Classes/Foo.sc", "build/Foo.scx"] {
+            let executable = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(dir.path().join(file), executable).unwrap();
+        }
+
+        let entry = |kind, tags: &ArtifactTags, path: &str| {
+            let archive = project.create_package(kind, tags, false).unwrap().path;
+            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+                fs::File::open(archive).unwrap(),
+            ));
+            let mut entry = archive
+                .entries()
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .find(|entry| entry.path().unwrap().to_str() == Some(path))
+                .unwrap();
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut content).unwrap();
+            (content, entry.header().mode().unwrap())
+        };
+        let any = ArtifactTags::any();
+        let expected = ("Foo {\n}\n".to_string(), 0o644);
+        assert_eq!(entry(ArtifactKind::Quark, &any, "Classes/Foo.sc"), expected);
+        assert_eq!(
+            entry(ArtifactKind::Source, &any, "Classes/Foo.sc"),
+            expected
+        );
+        let tags = ArtifactTags::new("api3_0", "macos_arm64").unwrap();
+        assert_eq!(
+            entry(
+                ArtifactKind::Lepton,
+                &tags,
+                "plugins/macos_arm64/api3_0/Foo.scx"
+            ),
+            ("binary\r\n".to_string(), 0o755)
+        );
     }
 
     #[test]
