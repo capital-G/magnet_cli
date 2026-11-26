@@ -2,6 +2,7 @@ use std::{
     env,
     error::Error,
     fs,
+    io::{self, IsTerminal},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -440,9 +441,8 @@ fn default_sclang_requirement() -> Option<String> {
 /// Adds a dependency to the current magnet project
 #[derive(Debug, Parser)]
 pub struct ProjectAddDependencyArgs {
-    /// Path of the project.
-    /// If not provided, a new folder with the name of the project
-    /// will be created in the current working directory.
+    /// Path of the project, the current directory by default. Without a magnet.toml there,
+    /// magnet offers to create a project (in a terminal)
     #[arg(
         long,
         default_value = None,
@@ -468,6 +468,36 @@ pub struct ProjectAddDependencyArgs {
     dependency: String,
 }
 
+/// Makes sure `project_path` holds a magnet project for `magnet add` (C12.4): without a
+/// magnet.toml, it offers to create a project which is never published there, like
+/// `magnet init` does for a project (name = the folder's if it is a valid package name).
+/// Without a terminal (`interactive`), or if declined, it fails with a hint to `magnet init`.
+fn ensure_project(project_path: &Path, interactive: bool) -> anyhow::Result<()> {
+    if project_path.join(MAGNET_PROJECT_FILE).exists() {
+        return Ok(());
+    }
+    let hint = format!(
+        "There is no {MAGNET_PROJECT_FILE} in {project_path:?}, create a project there via `magnet init`"
+    );
+    ensure!(interactive, hint);
+    let create = Confirm::new(&format!(
+        "There is no {MAGNET_PROJECT_FILE} in {project_path:?}. Create a project there?"
+    ))
+    .with_default(true)
+    .with_help_message("A project which is never published, like `magnet init` creates one")
+    .prompt()?;
+    ensure!(create, hint);
+
+    let absolute = std::path::absolute(project_path).unwrap_or(project_path.to_path_buf());
+    let name = match default_project_name(&absolute) {
+        Some(name) => name,
+        None => ask_project_name(None)?,
+    };
+    let sclang = ask_sclang()?;
+    let gitignore = ask_gitignore(project_path)?;
+    create_plain_project(project_path, name, sclang, gitignore)
+}
+
 /// Parses `foo`, `foo@1.2` or `foo@^1.2` into a name and an optional version requirement
 fn parse_dependency(input: &str) -> anyhow::Result<(String, Option<VersionReq>)> {
     match input.split_once('@') {
@@ -489,9 +519,10 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
             Some(path) => path,
             None => env::current_dir()?,
         };
+        let (name, constraint) = parse_dependency(&self.dependency)?;
+        ensure_project(&project_path, io::stdin().is_terminal())?;
         let mut project = Project::open(&project_path)?;
         project.set_target(self.target.lazy());
-        let (name, constraint) = parse_dependency(&self.dependency)?;
 
         let index = cli_context.git_client()?;
         let cache = GitCache::new(magnet_home()?.join(GIT_DIR));
@@ -523,6 +554,23 @@ mod tests {
     use magnet::models::{package::ArtifactKind, project::ListedFile};
 
     use super::*;
+
+    #[test]
+    fn test_ensure_project_without_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        // an existing project is fine
+        fs::write(dir.path().join(MAGNET_PROJECT_FILE), "").unwrap();
+        ensure_project(dir.path(), false).unwrap();
+
+        // without one, it can't ask, so it names `magnet init` and creates nothing
+        let empty = tempfile::tempdir().unwrap();
+        let err = ensure_project(empty.path(), false).unwrap_err().to_string();
+        assert!(
+            err.contains("There is no magnet.toml") && err.contains("`magnet init`"),
+            "{err}"
+        );
+        assert_eq!(fs::read_dir(empty.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn test_format_listing() {

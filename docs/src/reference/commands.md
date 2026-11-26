@@ -16,6 +16,7 @@ The magnet client mainly is used to
 * search the classes and methods of published packages (`magnet search --class` / `--method`)
 
 `magnet add`, `remove` and `update` change the manifest and the lock file and install the resulting dependencies into `magnet_packages/` right away, which can be skipped via `--no-install` such that only the files get written.
+Without a `magnet.toml`, `magnet add` offers to create a project first (only in a terminal).
 `magnet install` sets up an existing project, e.g. after cloning it, by installing the dependencies of its lock file.
 `magnet install --no-binaries` (or `MAGNET_NO_BINARIES=1`) installs only the artifacts which don't depend on the machine, i.e. no binaries of leptons, so it needs neither sclang nor the platform and abi, e.g. to build the documentation on a server.
 The lock file stays the same.
