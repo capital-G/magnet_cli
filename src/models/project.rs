@@ -12,7 +12,7 @@ use tracing::{debug, info, instrument, trace, warn};
 use url::Url;
 
 use crate::models::project_manifest::{
-    MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest,
+    MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest, MAIN_SCRIPT,
 };
 use crate::{
     config::constants::{magnet_home, GIT_DIR, MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
@@ -124,7 +124,10 @@ impl Project {
             git_cache: GitCache::new(magnet_home()?.join(GIT_DIR)),
             quarks_directory: quarks_directory_url()?,
         };
-        project.generate_project_directories(options.directories)?;
+        project.generate_project_directories(options.directories, options.layout)?;
+        if options.layout == ProjectLayout::Project {
+            project.write_main_script()?;
+        }
         if options.gitignore {
             write_gitignore(&project.path)?;
         }
@@ -168,10 +171,17 @@ impl Project {
 
     #[instrument(skip(self))]
     /// `magnet_packages/`, plus the [ProjectDirectory::SCAFFOLD] folders if `scaffold`
-    fn generate_project_directories(&self, scaffold: bool) -> anyhow::Result<()> {
-        let scaffold = match scaffold {
-            true => ProjectDirectory::SCAFFOLD.as_slice(),
-            false => &[],
+    /// The folders of a new project: [ProjectDirectory::SCAFFOLD] if `scaffold` is set, of
+    /// which a [ProjectLayout::Project] only gets `classes/`, since it has no help files
+    fn generate_project_directories(
+        &self,
+        scaffold: bool,
+        layout: ProjectLayout,
+    ) -> anyhow::Result<()> {
+        let scaffold = match (scaffold, layout) {
+            (false, _) => &[],
+            (true, ProjectLayout::Project) => [ProjectDirectory::Classes].as_slice(),
+            (true, _) => ProjectDirectory::SCAFFOLD.as_slice(),
         };
         for directory in scaffold.iter().cloned().chain([ProjectDirectory::Packages]) {
             trace!(?directory, "Create project folder");
@@ -180,6 +190,17 @@ impl Project {
                 .with_context(|| format!("Could not create folder {path:?}"))?;
         }
         Ok(())
+    }
+
+    /// The script of the entrypoint `main` of a new [ProjectLayout::Project], unless the folder
+    /// already has one
+    fn write_main_script(&self) -> anyhow::Result<()> {
+        let path = self.path.join(MAIN_SCRIPT);
+        if path.exists() {
+            debug!(?path, "Keep the existing main script");
+            return Ok(());
+        }
+        fs::write(&path, MAIN_SCRIPT_CONTENT).with_context(|| format!("Could not write {path:?}"))
     }
 
     fn project_dir(&self, directory: ProjectDirectory) -> PathBuf {
@@ -1527,6 +1548,12 @@ const UNKNOWN_ABI: &str = "<abi>";
 /// binaries of `[artifact.lepton]` within a package
 const PLUGINS_DIR: &str = "plugins";
 
+/// [MAIN_SCRIPT] of a new project, which `magnet run main` starts
+const MAIN_SCRIPT_CONTENT: &str = "// started via `magnet run main`\n\
+s.waitForBoot {\n\
+\t\"The server is running\".postln;\n\
+};\n";
+
 /// e.g. `quark and lepton`, or `no kind`
 fn kind_list(kinds: &[ArtifactKind]) -> String {
     match kinds.is_empty() {
@@ -2860,6 +2887,51 @@ beta = "^1"
         for folder in ["classes", "HelpSource", "tests", ".gitignore"] {
             assert!(!dir.path().join(folder).exists(), "{folder}");
         }
+    }
+
+    /// C12.2: a project which is never published
+    #[test]
+    fn test_create_plain_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest =
+            MagnetManifestV1::project("my-piece".to_string(), Some(">=3.14".into())).unwrap();
+        let options = CreateOptions {
+            directories: true,
+            gitignore: false,
+            layout: ProjectLayout::Project,
+        };
+        let project = Project::create(dir.path(), manifest.clone(), options).unwrap();
+
+        // only classes/ (on the include path without [artifact] tables) and main.scd
+        assert!(dir.path().join("classes").is_dir());
+        for folder in ["HelpSource", "tests", "dist"] {
+            assert!(!dir.path().join(folder).exists(), "{folder}");
+        }
+        let main = fs::read_to_string(dir.path().join(MAIN_SCRIPT)).unwrap();
+        assert!(main.contains("s.waitForBoot"), "{main}");
+        assert_eq!(project.entrypoints().len(), 1);
+        assert_eq!(project.entrypoints()[0].name, "main");
+        assert_eq!(project.entrypoints()[0].command, MAIN_SCRIPT);
+        let written = project.manifest();
+        assert!(!written.package.publish);
+        assert_eq!(written.package.version.to_string(), "0.1.0");
+        assert_eq!(written.package.sclang.as_deref(), Some(">=3.14"));
+        assert!(written.metadata.is_none() && written.artifact_kinds().is_empty());
+        assert_eq!(
+            LanguageConfig::for_project(dir.path(), written, None)
+                .unwrap()
+                .include_paths[0],
+            dir.path().join("classes")
+        );
+
+        // an existing main.scd stays, e.g. a folder of sketches
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(MAIN_SCRIPT), "// mine\n").unwrap();
+        Project::create(dir.path(), manifest, options).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(MAIN_SCRIPT)).unwrap(),
+            "// mine\n"
+        );
     }
 
     /// An imported legacy quark packages all its files, wherever they are

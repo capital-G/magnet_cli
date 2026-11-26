@@ -51,6 +51,26 @@ pub struct ProjectInitArgs {
     // so we don't have to maintain/implement two paths.
 }
 
+/// What `magnet init` creates: a project which is never published (e.g. a piece), or a
+/// package (C12.2)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InitKind {
+    Project,
+    Package,
+}
+
+impl std::fmt::Display for InitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InitKind::Project => write!(
+                f,
+                "A project, e.g. a piece or sketches (nothing to publish)"
+            ),
+            InitKind::Package => write!(f, "A package to publish (a quark or a lepton)"),
+        }
+    }
+}
+
 /// Where `magnet init` creates the project if no `--path` is given
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum InitLocation {
@@ -96,6 +116,11 @@ impl MagnetSubCommand for ProjectInitArgs {
     async fn run(self, _ctx: &CliContext) -> anyhow::Result<()> {
         let current_dir =
             env::current_dir().context("Could not obtain current working directory")?;
+        let kind = Select::new(
+            "What do you want to create?",
+            vec![InitKind::Project, InitKind::Package],
+        )
+        .prompt()?;
         // `None` means a new folder within the current directory, named after the project
         let fixed_path = match self.path {
             Some(path) => Some(path),
@@ -129,10 +154,33 @@ impl MagnetSubCommand for ProjectInitArgs {
         };
         trace!(?project_path, "Use path");
 
+        if kind == InitKind::Project {
+            let sclang = ask_sclang()?;
+            let gitignore = ask_gitignore(&project_path)?;
+            return create_plain_project(&project_path, project_name, sclang, gitignore);
+        }
         let project_manifest = ask_manifest(project_name, &InitDefaults::default())?;
         let options = ask_create_options(&project_path, ProjectLayout::Magnet)?;
         create_project(&project_path, project_manifest, options)
     }
+}
+
+/// Creates a project which is never published in `project_path` (C12.2): its manifest
+/// (`publish = false`, the entrypoint `main`, no metadata or `[artifact]` tables), `classes/`
+/// and `main.scd`, keeping files which already exist
+pub(super) fn create_plain_project(
+    project_path: &Path,
+    name: String,
+    sclang: Option<String>,
+    gitignore: bool,
+) -> anyhow::Result<()> {
+    let manifest = MagnetManifestV1::project(name, sclang)?;
+    let options = CreateOptions {
+        directories: true,
+        gitignore,
+        layout: ProjectLayout::Project,
+    };
+    create_project(project_path, manifest, options)
 }
 
 /// Suggested answers of the init dialog, e.g. from a legacy `.quark` file
@@ -188,20 +236,7 @@ pub(super) fn ask_manifest(
     let version = SemanticVersion::from_str(&version)
         .map_err(|err| anyhow::anyhow!("Invalid version {version}: {err}"))?;
 
-    // prefilled instead of defaults, so the author can remove them
-    let default_sclang = default_sclang_requirement().unwrap_or_default();
-    let sclang = Text::new("Supported SuperCollider versions:")
-        .with_initial_value(&default_sclang)
-        .with_help_message("A version range, e.g. >=3.10, empty for any version. Try find a lower boundary here such that it can be installed by a variety of people when publishing.")
-        .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
-            Ok(
-                match optional(input).map(|range| VersionReq::parse(&range)) {
-                    Some(Err(err)) => Validation::Invalid(format!("{err}").into()),
-                    _ => Validation::Valid,
-                },
-            )
-        })
-        .prompt()?;
+    let sclang = ask_sclang()?;
 
     let summary = Text::new("Summary:")
         .with_initial_value(defaults.summary.as_deref().unwrap_or_default())
@@ -252,7 +287,26 @@ pub(super) fn ask_manifest(
         summary: optional(&summary),
         tags: split_list(&tags),
     };
-    MagnetManifestV1::new(project_name, version, optional(&sclang), metadata)
+    MagnetManifestV1::new(project_name, version, sclang, metadata)
+}
+
+/// Asks for the supported SuperCollider versions, prefilled with the found sclang's
+pub(super) fn ask_sclang() -> anyhow::Result<Option<String>> {
+    // prefilled instead of defaults, so the author can remove them
+    let default_sclang = default_sclang_requirement().unwrap_or_default();
+    let sclang = Text::new("Supported SuperCollider versions:")
+        .with_initial_value(&default_sclang)
+        .with_help_message("A version range, e.g. >=3.10, empty for any version. Try find a lower boundary here such that it can be installed by a variety of people when publishing.")
+        .with_validator(|input: &str| -> Result<Validation, CustomUserError> {
+            Ok(
+                match optional(input).map(|range| VersionReq::parse(&range)) {
+                    Some(Err(err)) => Validation::Invalid(format!("{err}").into()),
+                    _ => Validation::Valid,
+                },
+            )
+        })
+        .prompt()?;
+    Ok(optional(&sclang))
 }
 
 /// Asks which files besides the manifest get created. The folders are suggested for a new
@@ -268,26 +322,28 @@ pub(super) fn ask_create_options(
         .with_default(layout == ProjectLayout::Magnet)
         .prompt()?;
 
-    // only asked if magnet would change the .gitignore, e.g. not in an existing project
-    let ignored = missing_gitignore_entries(project_path)?;
-    let gitignore = match ignored.is_empty() {
-        true => false,
-        false => {
-            let question = match project_path.join(GITIGNORE_FILE).exists() {
-                true => format!(
-                    "Add {} to the existing {GITIGNORE_FILE}?",
-                    ignored.join(", ")
-                ),
-                false => format!("Create a {GITIGNORE_FILE} ignoring {}?", ignored.join(", ")),
-            };
-            Confirm::new(&question).with_default(true).prompt()?
-        }
-    };
     Ok(CreateOptions {
         directories,
-        gitignore,
+        gitignore: ask_gitignore(project_path)?,
         layout,
     })
+}
+
+/// Whether to write the `.gitignore`, only asked if magnet would change it, e.g. not in an
+/// existing project
+pub(super) fn ask_gitignore(project_path: &Path) -> anyhow::Result<bool> {
+    let ignored = missing_gitignore_entries(project_path)?;
+    if ignored.is_empty() {
+        return Ok(false);
+    }
+    let question = match project_path.join(GITIGNORE_FILE).exists() {
+        true => format!(
+            "Add {} to the existing {GITIGNORE_FILE}?",
+            ignored.join(", ")
+        ),
+        false => format!("Create a {GITIGNORE_FILE} ignoring {}?", ignored.join(", ")),
+    };
+    Ok(Confirm::new(&question).with_default(true).prompt()?)
 }
 
 pub(super) fn create_project(

@@ -113,7 +113,13 @@ pub enum ProjectLayout {
     Magnet,
     /// an imported legacy quark, whose files can be anywhere (always a quark)
     LegacyQuark,
+    /// a project which is never published, e.g. a piece: only `classes/` and `main.scd`, no
+    /// `[artifact]` tables (C12.2)
+    Project,
 }
+
+/// The script of the entrypoint `main` of a new [ProjectLayout::Project]
+pub const MAIN_SCRIPT: &str = "main.scd";
 
 /// The `[artifact]` tables of a new project, as a commented starting point for the author, see
 /// `docs/src/guide/publishing.md#packaging`. The quark matches the folders of a new project
@@ -122,6 +128,11 @@ pub enum ProjectLayout {
 /// `platform` (if known), where `build/` is a guess for the build folder, so it only needs to be
 /// uncommented once the project builds server plugins.
 fn artifact_template(platform: Option<Platform>, layout: ProjectLayout) -> String {
+    if layout == ProjectLayout::Project {
+        return "\n# To publish this as a package, remove `publish = false` and add [artifact.quark]\n\
+                # (see `magnet init` for a package)\n"
+            .to_string();
+    }
     let mut template = String::from("\n[artifact.quark]\n");
     template.push_str(match layout {
         ProjectLayout::Magnet => {
@@ -129,6 +140,7 @@ fn artifact_template(platform: Option<Platform>, layout: ProjectLayout) -> Strin
              # so add every other file it needs, e.g. \"sounds/*.wav\" or \"examples/*.scd\"\n\
              paths = [\n    \"classes/**/*.sc\",\n    \"HelpSource/**\",\n]\n"
         }
+        ProjectLayout::Project => unreachable!("returned above"),
         ProjectLayout::LegacyQuark => {
             "# Every file gets packaged, like the legacy Quark system installs it (hidden files,\n\
              # dist/ and magnet_packages/ never are). Narrow it down, e.g. to \"Classes/**\",\n\
@@ -227,12 +239,11 @@ impl ProjectManifest {
         package.decor_mut().set_prefix("\n");
         doc["package"] = toml_edit::Item::Table(package);
 
-        let mut metadata = match &manifest.metadata {
-            Some(meta) => serialize_metadata(meta),
-            None => toml_edit::Table::new(),
-        };
-        metadata.decor_mut().set_prefix("\n");
-        doc["metadata"] = toml_edit::Item::Table(metadata);
+        if let Some(meta) = &manifest.metadata {
+            let mut metadata = serialize_metadata(meta);
+            metadata.decor_mut().set_prefix("\n");
+            doc["metadata"] = toml_edit::Item::Table(metadata);
+        }
 
         let mut deps = toml_edit::Table::new();
         // sorted, since the order of the map is random
@@ -243,6 +254,22 @@ impl ProjectManifest {
         }
         deps.decor_mut().set_prefix("\n");
         doc["dependencies"] = toml_edit::Item::Table(deps);
+
+        if !manifest.entrypoint.is_empty() {
+            let mut entrypoints = toml_edit::ArrayOfTables::new();
+            for entrypoint in &manifest.entrypoint {
+                let mut table = toml_edit::Table::new();
+                table["name"] = toml_edit::value(entrypoint.name.as_str());
+                table["command"] = toml_edit::value(entrypoint.command.as_str());
+                // `sclang` is the default
+                if entrypoint.kind != MagnetManifestV1EntrypointItemKind::Sclang {
+                    table["kind"] = toml_edit::value(entrypoint.kind.to_string());
+                }
+                table.decor_mut().set_prefix("\n");
+                entrypoints.push(table);
+            }
+            doc["entrypoint"] = toml_edit::Item::ArrayOfTables(entrypoints);
+        }
 
         if let Some(artifact) = &manifest.artifact {
             let mut table = serialize_toml_via_serde(artifact)?;
@@ -351,6 +378,26 @@ impl ProjectManifest {
 }
 
 impl MagnetManifestV1 {
+    /// The manifest of a project which is never published (C12.2): version `0.1.0` (it only
+    /// matters once it becomes a package), `publish = false`, no metadata and the entrypoint
+    /// `main`, which runs [MAIN_SCRIPT]
+    pub fn project(name: String, sclang: Option<String>) -> anyhow::Result<Self> {
+        let mut manifest = Self::new(
+            name,
+            SemanticVersion::new(0, 1, 0),
+            sclang,
+            Default::default(),
+        )?;
+        manifest.metadata = None;
+        manifest.package.publish = false;
+        manifest.entrypoint = vec![MagnetManifestV1EntrypointItem {
+            command: MAIN_SCRIPT.to_string(),
+            kind: MagnetManifestV1EntrypointItemKind::Sclang,
+            name: "main".to_string(),
+        }];
+        Ok(manifest)
+    }
+
     pub fn new(
         name: String,
         version: SemanticVersion,
@@ -580,6 +627,40 @@ baz = {}
             sample_manifest(),
             "{ version = \"1.2.0\", legacy-quark = true }",
         )
+    }
+
+    /// C12.2: the manifest of a project which is never published
+    #[test]
+    fn test_project_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magnet.toml");
+        let manifest = MagnetManifestV1::project("my-piece".to_string(), None).unwrap();
+        ProjectManifest::write_new(path.clone(), &manifest, ProjectLayout::Project).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content,
+            format!(
+                "#:schema {MANIFEST_SCHEMA_URL}\n\
+                 magnet-version = 1\n\
+                 \n\
+                 [package]\n\
+                 name = \"my-piece\"\n\
+                 version = \"0.1.0\"\n\
+                 publish = false\n\
+                 \n\
+                 [dependencies]\n\
+                 \n\
+                 [[entrypoint]]\n\
+                 name = \"main\"\n\
+                 command = \"main.scd\"\n\
+                 \n\
+                 # To publish this as a package, remove `publish = false` and add [artifact.quark]\n\
+                 # (see `magnet init` for a package)\n"
+            )
+        );
+        let parsed = MagnetManifestV1::from_string(&content).unwrap();
+        assert!(!parsed.package.publish && parsed.metadata.is_none());
+        assert_eq!(parsed.entrypoint.len(), 1);
     }
 
     #[test]
