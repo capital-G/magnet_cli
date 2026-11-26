@@ -26,6 +26,11 @@
         "sclang": {
           "type": "string",
           "description": "Supported SuperCollider versions as a version range, e.g. \">=3.13\""
+        },
+        "publish": {
+          "type": "boolean",
+          "default": true,
+          "description": "false for a project which is never published, e.g. a piece - `magnet publish` refuses it"
         }
       },
       "required": ["name", "version"],

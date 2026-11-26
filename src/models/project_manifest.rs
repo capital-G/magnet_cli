@@ -220,6 +220,10 @@ impl ProjectManifest {
         if let Some(sclang) = &manifest.package.sclang {
             package["sclang"] = toml_edit::value(sclang.as_str());
         }
+        // only written for projects which are never published (C12.1)
+        if !manifest.package.publish {
+            package["publish"] = toml_edit::value(false);
+        }
         package.decor_mut().set_prefix("\n");
         doc["package"] = toml_edit::Item::Table(package);
 
@@ -369,6 +373,7 @@ impl MagnetManifestV1 {
             overrides: HashMap::new(),
             package: MagnetManifestV1Package {
                 name,
+                publish: true,
                 sclang,
                 version,
             },
@@ -760,6 +765,7 @@ baz = {}
             overrides: HashMap::new(),
             package: MagnetManifestV1Package {
                 name: "bar".to_string(),
+                publish: true,
                 version: MagnetManifestV1PackageVersion::from_str("0.1.0").unwrap(),
                 sclang: None,
             },
@@ -886,6 +892,29 @@ baz = {}
         assert!(
             ProjectManifest::set_version_preserving("[package]\nname = \"foo\"\n", "1.0.0")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn test_serialize_publish_false() {
+        let mut manifest = MagnetManifestV1::new(
+            "my-piece".to_string(),
+            SemanticVersion::new(0, 1, 0),
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        let content = ProjectManifest::serialize_manifest(&manifest).unwrap();
+        // the default isn't written
+        assert!(!content.contains("publish"), "{content}");
+        manifest.package.publish = false;
+        let content = ProjectManifest::serialize_manifest(&manifest).unwrap();
+        assert!(content.contains("publish = false"), "{content}");
+        assert!(
+            !MagnetManifestV1::from_string(&content)
+                .unwrap()
+                .package
+                .publish
         );
     }
 

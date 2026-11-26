@@ -99,6 +99,7 @@ Artifacts can be added to a finalised version later on, e.g. binaries for an add
 The kinds of a version may differ from the ones of earlier versions.
 
 Publishing is refused if the manifest contains `path` dependencies, `[overrides]`, packages from a different index, or git or legacy quark dependencies which are not pinned to a full commit SHA via `ref`, since others could not reproduce them.
+A project with `publish = false` in `[package]` is never published.
 The client checks this before uploading, and the server checks it again.
 
 Since sclang has a single namespace, a class defined by two packages can not be compiled, and of two class extensions which add the same method one silently replaces the other.

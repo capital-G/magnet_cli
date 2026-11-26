@@ -51,6 +51,12 @@ fn is_full_sha(rev: &str) -> bool {
 }
 
 pub fn check_publishable(manifest: &MagnetManifestV1) -> anyhow::Result<()> {
+    // first, since such a project usually has no [artifact] tables either (C12.1)
+    ensure!(
+        manifest.package.publish,
+        "{} is a project with `publish = false` in [package] of {MAGNET_PROJECT_FILE}, which is never published. Remove it to publish this as a package",
+        manifest.package.name
+    );
     ensure!(
         !manifest.artifact_kinds().is_empty(),
         "{MAGNET_PROJECT_FILE} has neither [artifact.quark] nor [artifact.lepton], so the version would contain no kind of artifact"
@@ -356,6 +362,26 @@ mod tests {
             "magnet-version = 1\n[package]\nname = \"Foo_Bar\"\nversion = \"1.2.0\"\n{artifact}[dependencies]\n{dependencies}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn test_projects_with_publish_false_are_refused() {
+        let project = MagnetManifestV1::from_string(
+            "magnet-version = 1\n[package]\nname = \"my-piece\"\nversion = \"0.1.0\"\npublish = false\n",
+        )
+        .unwrap();
+        let err = check_publishable(&project).unwrap_err().to_string();
+        assert!(
+            err.contains("my-piece is a project with `publish = false`")
+                && err.contains("Remove it to publish this as a package"),
+            "{err}"
+        );
+        // also with artifact tables, and `publish = true` is the default
+        let mut quark = manifest("quark", "");
+        assert!(quark.package.publish);
+        check_publishable(&quark).unwrap();
+        quark.package.publish = false;
+        assert!(check_publishable(&quark).is_err());
     }
 
     #[test]
