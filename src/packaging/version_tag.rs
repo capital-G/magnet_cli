@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use anyhow::{bail, Context};
 use git2::{Oid, Repository};
 use tracing::debug;
 
@@ -12,11 +13,63 @@ use tracing::debug;
 /// Problems reading the repository only get logged, since this check must never stop
 /// publishing.
 pub fn version_tag_warning(root: &Path, version: &str) -> Option<String> {
-    match check(root, version) {
-        Ok(warning) => warning,
+    match tag_state(root, version) {
+        // only for repositories which tag their versions, so it's no noise for others
+        Ok(
+            state @ (TagState::Untagged {
+                tags_versions: true,
+                ..
+            }
+            | TagState::Elsewhere { .. }),
+        ) => Some(state.message(version, "although the repository tags its versions")),
+        Ok(_) => None,
         Err(err) => {
             debug!("Could not check the version tag: {err:#}");
             None
+        }
+    }
+}
+
+/// Fails unless HEAD carries the tag of `version` (`v1.2.0` or `1.2.0`), for
+/// `magnet publish --require-tag` (C12.5), e.g. in a CI which publishes on a pushed tag
+pub fn require_version_tag(root: &Path, version: &str) -> anyhow::Result<()> {
+    let state = tag_state(root, version).context("Could not check the version tag")?;
+    match state {
+        TagState::Tagged => Ok(()),
+        TagState::NoRepository => bail!(
+            "--require-tag needs a git repository whose HEAD is tagged with v{version}, but {root:?} isn't in one"
+        ),
+        state => bail!(state.message(version, "which --require-tag requires")),
+    }
+}
+
+/// How HEAD relates to the tags of a version
+enum TagState {
+    /// not in a git repository, or one without commits
+    NoRepository,
+    /// HEAD has the tag of the version
+    Tagged,
+    /// no tag of the version, `tags_versions` if the repository has other version tags
+    Untagged { head: String, tags_versions: bool },
+    /// the tag of the version is on another commit
+    Elsewhere {
+        tag: String,
+        commit: String,
+        head: String,
+    },
+}
+
+impl TagState {
+    /// The problem, with `why` it matters after the missing tag
+    fn message(&self, version: &str, why: &str) -> String {
+        match self {
+            TagState::Untagged { head, .. } => format!(
+                "HEAD ({head}) has no tag of version {version}, {why}, e.g. via `git tag v{version}`"
+            ),
+            TagState::Elsewhere { tag, commit, head } => format!(
+                "The tag {tag} of version {version} points to the commit {commit}, but HEAD is {head}: is this the checkout to publish?"
+            ),
+            TagState::NoRepository | TagState::Tagged => String::new(),
         }
     }
 }
@@ -52,35 +105,33 @@ fn version_tags(repo: &Repository) -> anyhow::Result<Vec<(String, Oid)>> {
     Ok(version_tags)
 }
 
-fn check(root: &Path, version: &str) -> anyhow::Result<Option<String>> {
+fn tag_state(root: &Path, version: &str) -> anyhow::Result<TagState> {
     let Ok(repo) = Repository::discover(root) else {
-        return Ok(None);
+        return Ok(TagState::NoRepository);
     };
     let Ok(head) = repo.head().and_then(|head| head.peel_to_commit()) else {
-        return Ok(None);
+        return Ok(TagState::NoRepository);
     };
     let version_tags = version_tags(&repo)?;
-    if version_tags.is_empty() {
-        return Ok(None);
-    }
-
     let own: Vec<&(String, Oid)> = version_tags
         .iter()
         .filter(|(name, _)| name.strip_prefix('v').unwrap_or(name) == version)
         .collect();
     if own.iter().any(|(_, commit)| *commit == head.id()) {
-        return Ok(None);
+        return Ok(TagState::Tagged);
     }
     let head_id = short(&repo, head.id());
-    Ok(Some(match own.first() {
-        Some((name, commit)) => format!(
-            "The tag {name} of version {version} points to the commit {}, but HEAD is {head_id}: is this the checkout to publish?",
-            short(&repo, *commit)
-        ),
-        None => format!(
-            "HEAD ({head_id}) has no tag of version {version}, although the repository tags its versions, e.g. via `git tag v{version}`"
-        ),
-    }))
+    Ok(match own.first() {
+        Some((tag, commit)) => TagState::Elsewhere {
+            tag: tag.clone(),
+            commit: short(&repo, *commit),
+            head: head_id,
+        },
+        None => TagState::Untagged {
+            head: head_id,
+            tags_versions: !version_tags.is_empty(),
+        },
+    })
 }
 
 /// `v1.2.0` or `1.2.0`
@@ -198,6 +249,35 @@ mod tests {
             "{warning}"
         );
         assert!(warning.contains("`git tag v1.0.0`"), "{warning}");
+    }
+
+    #[test]
+    fn test_require_version_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = require_version_tag(dir.path(), "1.0.0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a git repository"), "{err}");
+
+        // also without any version tags, unlike the warning
+        let (repo, ids) = repo(dir.path(), 2);
+        assert_eq!(version_tag_warning(dir.path(), "1.0.0"), None);
+        let err = require_version_tag(dir.path(), "1.0.0")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("has no tag of version 1.0.0, which --require-tag requires"),
+            "{err}"
+        );
+
+        lightweight_tag(&repo, "v1.0.0", ids[0]);
+        let err = require_version_tag(dir.path(), "1.0.0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("points to the commit"), "{err}");
+
+        lightweight_tag(&repo, "1.0.0", ids[1]);
+        require_version_tag(dir.path(), "1.0.0").unwrap();
     }
 
     #[test]

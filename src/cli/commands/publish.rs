@@ -1,12 +1,12 @@
 use std::{env, path::PathBuf};
 
-use clap::Parser;
+use clap::{builder::BoolishValueParser, Parser};
 use magnet::{
     http_client::models::VersionState,
     models::project::Project,
     packaging::{
         publish::{check_publishable, publish, publish_archives},
-        version_tag::version_tag_warning,
+        version_tag::{require_version_tag, version_tag_warning},
     },
 };
 use tracing::warn;
@@ -19,6 +19,11 @@ pub struct PublishArgs {
     /// Path of the project, the current directory by default
     #[arg(long)]
     path: Option<PathBuf>,
+
+    /// Stop before uploading unless HEAD is tagged with the version of magnet.toml
+    /// (`v1.2.0` or `1.2.0`), e.g. in a CI which publishes on a pushed tag
+    #[arg(long, env = "MAGNET_REQUIRE_TAG", value_parser = BoolishValueParser::new())]
+    require_tag: bool,
 
     /// Packages to publish, by default all of the current version in `dist/`
     files: Vec<PathBuf>,
@@ -34,10 +39,11 @@ impl MagnetSubCommand for PublishArgs {
         let manifest = project.manifest();
         check_publishable(manifest)?;
         let archives = publish_archives(project.root(), manifest, &self.files)?;
-        // only a warning: CI may publish from a branch, and some don't tag at all (C11.6)
-        if let Some(warning) =
-            version_tag_warning(project.root(), &manifest.package.version.to_string())
-        {
+        let version = manifest.package.version.to_string();
+        if self.require_tag {
+            require_version_tag(project.root(), &version)?;
+        // otherwise only a warning: CI may publish from a branch, and some don't tag (C11.6)
+        } else if let Some(warning) = version_tag_warning(project.root(), &version) {
             warn!("{warning}");
         }
 

@@ -83,6 +83,7 @@ Without a file, all artifacts of the current version within `dist` are published
 
 If the repository of the project tags its versions (e.g. `v1.2.0` or `1.2.0`), `magnet publish` and `magnet check` warn when the checked out commit has no tag of the version in `magnet.toml`, or when that tag points to another commit.
 Projects without git or without version tags get no warning, and it never stops publishing.
+`magnet publish --require-tag` (or `MAGNET_REQUIRE_TAG=1`) turns it into an error before anything is uploaded, e.g. for a CI which publishes on a pushed tag.
 
 Publishing a version consists of three steps, such that the index never contains a version which was only uploaded halfway:
 
