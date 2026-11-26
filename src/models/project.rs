@@ -1355,6 +1355,18 @@ impl Project {
     /// far as the manifest has their `[artifact]` tables (see DESIGN.md "Artifact kinds").
     /// `allow_dirty` packages the source from git despite uncommitted changes.
     pub fn create_packages(&self, allow_dirty: bool) -> anyhow::Result<Vec<PackageArchive>> {
+        self.artifacts(|| Ok(self.target.get()?.tags()))?
+            .iter()
+            .map(|(kind, tags)| self.create_package(*kind, tags, allow_dirty))
+            .collect()
+    }
+
+    /// The artifacts of the project's version which can be built on this machine, see
+    /// [Self::create_packages], with `lepton_tags` for the lepton
+    fn artifacts(
+        &self,
+        lepton_tags: impl Fn() -> anyhow::Result<ArtifactTags>,
+    ) -> anyhow::Result<Vec<(ArtifactKind, ArtifactTags)>> {
         let kinds = self.project_manifest.get_manifest().artifact_kinds();
         ensure!(
             !kinds.is_empty(),
@@ -1363,14 +1375,58 @@ impl Project {
         let mut artifacts = vec![(ArtifactKind::Source, ArtifactTags::any())];
         for kind in kinds {
             let tags = match kind {
-                ArtifactKind::Lepton => self.target.get()?.tags(),
+                ArtifactKind::Lepton => lepton_tags()?,
                 _ => ArtifactTags::any(),
             };
             artifacts.push((kind, tags));
         }
-        artifacts
-            .iter()
-            .map(|(kind, tags)| self.create_package(*kind, tags, allow_dirty))
+        Ok(artifacts)
+    }
+
+    /// What [Self::create_packages] would package, without writing anything (`magnet package
+    /// --list`, C11.4). Uncommitted changes of a source from git only warn, and without a
+    /// known abi the lepton is listed with the abi `<abi>`.
+    pub fn list_packages(&self) -> anyhow::Result<Vec<ArtifactListing>> {
+        let manifest = self.project_manifest.get_manifest();
+        let version = SemanticVersion::try_from(manifest.package.version.clone())?;
+        let lepton_tags = || match self.target.get() {
+            Ok(target) => Ok(target.tags()),
+            Err(err) => {
+                let platform = self.target.platform()?;
+                warn!(
+                    "{err:#}, so the lepton is listed with `{UNKNOWN_ABI}`, choose it with --abi"
+                );
+                // only the platform selects the binaries
+                Ok(ArtifactTags {
+                    abi: UNKNOWN_ABI.to_string(),
+                    platform: platform.to_string(),
+                })
+            }
+        };
+        self.artifacts(lepton_tags)?
+            .into_iter()
+            .map(|(kind, tags)| {
+                let files = self
+                    .artifact_entries(kind, &tags, true)?
+                    .into_iter()
+                    .map(|(path, source)| {
+                        let size = fs::metadata(&source)
+                            .with_context(|| format!("Could not read {source:?}"))?
+                            .len();
+                        let source = source.strip_prefix(&self.path).unwrap_or(&source);
+                        Ok(ListedFile {
+                            path,
+                            source: source.to_path_buf(),
+                            size,
+                        })
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+                Ok(ArtifactListing {
+                    file_name: artifact_file_name(&manifest.package.name, &version, &kind, &tags),
+                    kind,
+                    files,
+                })
+            })
             .collect()
     }
 
@@ -1385,14 +1441,7 @@ impl Project {
         allow_dirty: bool,
     ) -> anyhow::Result<PackageArchive> {
         let manifest = self.project_manifest.get_manifest();
-        ensure!(
-            kind == ArtifactKind::Lepton || *tags == ArtifactTags::any(),
-            "A {kind} artifact has the tags {}, not {tags}",
-            ArtifactTags::any()
-        );
-        let files = collect_files(&self.path, manifest, kind, tags, allow_dirty)?;
-        let plugins = format!("{PLUGINS_DIR}/{}/{}", tags.platform, tags.abi);
-        let entries = package_entries(&self.path, &files, &plugins)?;
+        let entries = self.artifact_entries(kind, tags, allow_dirty)?;
 
         let dist = self.project_dir(ProjectDirectory::Dist);
         fs::create_dir_all(&dist).with_context(|| format!("Could not create {dist:?}"))?;
@@ -1422,7 +1471,54 @@ impl Project {
             files: entries.into_keys().collect(),
         })
     }
+
+    /// The files of the artifact of `kind` by their path within it, see [Self::create_package]
+    fn artifact_entries(
+        &self,
+        kind: ArtifactKind,
+        tags: &ArtifactTags,
+        allow_dirty: bool,
+    ) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+        ensure!(
+            kind == ArtifactKind::Lepton || *tags == ArtifactTags::any(),
+            "A {kind} artifact has the tags {}, not {tags}",
+            ArtifactTags::any()
+        );
+        let files = collect_files(
+            &self.path,
+            self.project_manifest.get_manifest(),
+            kind,
+            tags,
+            allow_dirty,
+        )?;
+        let plugins = format!("{PLUGINS_DIR}/{}/{}", tags.platform, tags.abi);
+        package_entries(&self.path, &files, &plugins)
+    }
 }
+
+/// An artifact as `magnet package --list` shows it, see [Project::list_packages]
+#[derive(Debug)]
+pub struct ArtifactListing {
+    /// the name of its archive in `dist/`
+    pub file_name: String,
+    pub kind: ArtifactKind,
+    /// sorted by their path within the artifact
+    pub files: Vec<ListedFile>,
+}
+
+/// A file of an [ArtifactListing]
+#[derive(Debug, PartialEq, Eq)]
+pub struct ListedFile {
+    /// `/`-separated path within the artifact
+    pub path: String,
+    /// path relative to the project root
+    pub source: PathBuf,
+    /// bytes in the project (text files of source and quark may get smaller, C11.1)
+    pub size: u64,
+}
+
+/// The abi of a listed lepton if this machine's isn't known
+const UNKNOWN_ABI: &str = "<abi>";
 
 /// binaries of `[artifact.lepton]` within a package
 const PLUGINS_DIR: &str = "plugins";
@@ -3111,6 +3207,78 @@ beta = "^1"
                 "plugins/macos_arm64/api3_0/Foo.scx"
             ),
             ("binary\r\n".to_string(), 0o755)
+        );
+    }
+
+    /// C11.4: `magnet package --list` shows what each artifact gets, from where
+    #[test]
+    fn test_list_packages() {
+        let manifest = LEPTON_MANIFEST.replace(
+            "[artifact.quark]\npaths = [\"Classes/**.sc\"]",
+            "[artifact.quark]\npaths = [\"Classes/**.sc\", { from = \"libs\", as = \"externals\" }]",
+        );
+        let (dir, mut project) = project(&manifest);
+        write_files(
+            &dir,
+            &[
+                "Classes/Foo.sc",
+                "src/Foo.cpp",
+                "libs/a.lib",
+                "build/Foo.scx",
+            ],
+        );
+        fs::write(dir.path().join("Classes/Foo.sc"), "Foo {}\n").unwrap();
+
+        // without a known abi, the lepton gets `<abi>`
+        let no_abi = LazyTarget::with_sclang(Some("macos_arm64".into()), None, no_sclang);
+        project.set_target(no_abi);
+        let listings = project.list_packages().unwrap();
+        let names: Vec<_> = listings
+            .iter()
+            .map(|listing| listing.file_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "foo-1.0.0-source-any-any.tar.gz",
+                "foo-1.0.0-quark-any-any.tar.gz",
+                "foo-1.0.0-lepton-<abi>-macos_arm64.tar.gz",
+            ]
+        );
+        let file = |path: &str, source: &str, size: u64| ListedFile {
+            path: path.to_string(),
+            source: PathBuf::from(source),
+            size,
+        };
+        let manifest_size = manifest.len() as u64;
+        let size = |path: &str| fs::metadata(dir.path().join(path)).unwrap().len();
+        assert_eq!(
+            listings[1].files,
+            [
+                file("Classes/Foo.sc", "Classes/Foo.sc", 7),
+                file("externals/a.lib", "libs/a.lib", size("libs/a.lib")),
+                file("magnet.toml", "magnet.toml", manifest_size),
+            ]
+        );
+        assert_eq!(
+            listings[2].files,
+            [
+                file("magnet.toml", "magnet.toml", manifest_size),
+                file(
+                    "plugins/macos_arm64/<abi>/Foo.scx",
+                    "build/Foo.scx",
+                    size("build/Foo.scx")
+                ),
+            ]
+        );
+        // nothing is written
+        assert!(!dir.path().join("dist").exists());
+
+        project.set_target(target("macos_arm64", "api3_0"));
+        let listings = project.list_packages().unwrap();
+        assert_eq!(
+            listings[2].file_name,
+            "foo-1.0.0-lepton-api3_0-macos_arm64.tar.gz"
         );
     }
 

@@ -21,7 +21,7 @@ use magnet::{
         directories::ProjectDirectory,
         gitignore::{missing_gitignore_entries, GITIGNORE_FILE},
         lock_file::LockDependency,
-        project::{CreateOptions, Project},
+        project::{ArtifactListing, CreateOptions, Project},
         project_manifest::{
             MagnetManifestV1, MagnetManifestV1Metadata, MagnetManifestV1MetadataAuthorsItem,
             ProjectLayout,
@@ -464,7 +464,39 @@ impl MagnetSubCommand for ProjectAddDependencyArgs {
 
 #[cfg(test)]
 mod tests {
+    use magnet::models::{package::ArtifactKind, project::ListedFile};
+
     use super::*;
+
+    #[test]
+    fn test_format_listing() {
+        let listing = ArtifactListing {
+            file_name: "foo-1.0.0-quark-any-any.tar.gz".to_string(),
+            kind: ArtifactKind::Quark,
+            files: vec![
+                ListedFile {
+                    path: "Classes/Foo.sc".to_string(),
+                    source: PathBuf::from("Classes").join("Foo.sc"),
+                    size: 512,
+                },
+                ListedFile {
+                    path: "externals/libs/a.lib".to_string(),
+                    source: PathBuf::from("external").join("a.lib"),
+                    size: 3 * 1024 * 1024 / 2,
+                },
+            ],
+        };
+        assert_eq!(
+            format_listing(&listing),
+            "foo-1.0.0-quark-any-any.tar.gz (2 files, 1.5 MiB)\n\
+             \x20      512 B  Classes/Foo.sc\n\
+             \x20    1.5 MiB  externals/libs/a.lib ← external/a.lib\n"
+        );
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(70 * 1024 * 1024 + 300 * 1024), "70.3 MiB");
+    }
 
     #[test]
     fn test_parse_dependency() {
@@ -782,8 +814,53 @@ pub struct ProjectPackageArgs {
     #[arg(long)]
     allow_dirty: bool,
 
+    /// Only list which files each artifact would get and from where, without writing anything
+    #[arg(long)]
+    list: bool,
+
     #[command(flatten)]
     target: TargetArgs,
+}
+
+/// An artifact of `magnet package --list`: its archive with the number and size of its files,
+/// then each file with its size and, if it comes from another place, `← <project path>`
+fn format_listing(listing: &ArtifactListing) -> String {
+    let total: u64 = listing.files.iter().map(|file| file.size).sum();
+    let mut text = format!(
+        "{} ({} files, {})\n",
+        listing.file_name,
+        listing.files.len(),
+        human_size(total)
+    );
+    for file in &listing.files {
+        let source = file
+            .source
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        text.push_str(&format!("  {:>10}  {}", human_size(file.size), file.path));
+        if source != file.path {
+            text.push_str(&format!(" ← {source}"));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+/// e.g. `512 B`, `1.5 KiB` or `70.2 MiB`
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
 }
 
 /// The machine whose lepton binaries get packaged or installed, by default detected
@@ -812,6 +889,13 @@ impl MagnetSubCommand for ProjectPackageArgs {
         };
         let mut project = Project::open(&project_path)?;
         project.set_target(self.target.lazy());
+        if self.list {
+            for listing in project.list_packages()? {
+                print!("{}", format_listing(&listing));
+            }
+            println!("Nothing was written, `magnet package` without --list creates these archives in dist/.");
+            return Ok(());
+        }
         let archives = project.create_packages(self.allow_dirty)?;
         for archive in &archives {
             let path = archive

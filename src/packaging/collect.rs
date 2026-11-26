@@ -249,8 +249,9 @@ fn select_mapped(
 
 /// The files below `root` which are committed to git (`HEAD`), relative to `root`, with the
 /// files of its submodules if `submodules` is set. Hidden files are part of it, `.git` never is.
-/// Uncommitted changes of these files are refused unless `allow_dirty`, since the source should
-/// be what the repository holds; the files are read from the working tree.
+/// Uncommitted changes of these files are refused unless `allow_dirty` (then they only warn),
+/// since the source should be what the repository holds; the files are read from the working
+/// tree.
 fn git_files(
     root: &Path,
     submodules: bool,
@@ -269,24 +270,28 @@ fn git_files(
         .with_context(|| format!("Could not resolve {root:?}"))?;
     let prefix = relative_path(root.strip_prefix(&workdir)?)?;
 
-    if !allow_dirty {
-        let mut options = StatusOptions::new();
-        options
-            .include_untracked(false)
-            .include_ignored(false)
-            .exclude_submodules(!submodules);
-        if !prefix.is_empty() {
-            options.pathspec(&prefix);
-        }
-        let dirty: Vec<String> = repo
-            .statuses(Some(&mut options))?
-            .iter()
-            .filter(|entry| entry.status() != Status::CURRENT)
-            .filter_map(|entry| entry.path().map(String::from))
-            .collect();
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(false)
+        .include_ignored(false)
+        .exclude_submodules(!submodules);
+    if !prefix.is_empty() {
+        options.pathspec(&prefix);
+    }
+    let dirty: Vec<String> = repo
+        .statuses(Some(&mut options))?
+        .iter()
+        .filter(|entry| entry.status() != Status::CURRENT)
+        .filter_map(|entry| entry.path().map(String::from))
+        .collect();
+    if !dirty.is_empty() {
         ensure!(
-            dirty.is_empty(),
+            allow_dirty,
             "The source artifact takes the files committed to git, but these have uncommitted changes: {}. Commit them, or package anyway with --allow-dirty",
+            dirty.join(", ")
+        );
+        warn!(
+            "The source artifact takes these files with their uncommitted changes: {}",
             dirty.join(", ")
         );
     }

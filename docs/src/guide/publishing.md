@@ -10,6 +10,9 @@ magnet package
 
 Since magnet knows via the package manifest which files make up the package, it will be put into a `.tar.gz` file and exported into the `dist` folder.
 
+`magnet package --list` only shows which files each artifact would get, with their size and, for files placed elsewhere in the package, where they come from in the project (`externals/faustlibs/all.lib <- external/faust/libraries/all.lib`), without writing anything.
+Uncommitted changes of the source then only warn, and without a known abi of this machine the lepton is shown with `<abi>`.
+
 The files of a package are selected by the globs of the `[artifact]` tables of the manifest, relative to the project root, and not by a `.gitignore` file.
 Each kind of artifact which a version contains has its own table (see [Artifact kinds](../reference/manifest.md#artifact-kinds)):
 
