@@ -87,6 +87,7 @@ One can only run the entrypoints of the root project.
 The `kind` of an entrypoint defaults to `sclang`, whose `command` is the path of a script relative to the project root, which gets started via `sclang -l sclang_conf.yaml`.
 A `system` entrypoint runs its `command` via the shell.
 Both run in the project root, and additional arguments are passed on, e.g. `magnet run test a b`.
+Without a name, `magnet run` starts `main`, or the only entrypoint, otherwise it lists them.
 
 ## Artifact kinds
 

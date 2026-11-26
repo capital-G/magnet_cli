@@ -12,7 +12,8 @@ use tracing::{debug, info, instrument, trace, warn};
 use url::Url;
 
 use crate::models::project_manifest::{
-    MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest, MAIN_SCRIPT,
+    MagnetManifestV1DependenciesValue, NamedDependency, ProjectManifest, DEFAULT_ENTRYPOINT,
+    MAIN_SCRIPT,
 };
 use crate::{
     config::constants::{magnet_home, GIT_DIR, MAGNET_LOCK_FILE, MAGNET_PROJECT_FILE},
@@ -451,6 +452,20 @@ impl Project {
     }
 
     /// The entrypoints of the project, which can be started via `magnet run`
+    /// The entrypoint `magnet run` starts without a name (C12.3): `main` if the manifest has it,
+    /// otherwise its only entrypoint, otherwise none, so they get listed
+    pub fn default_entrypoint(&self) -> Option<&str> {
+        let entrypoints = self.entrypoints();
+        entrypoints
+            .iter()
+            .find(|entrypoint| entrypoint.name == DEFAULT_ENTRYPOINT)
+            .or(match entrypoints {
+                [only] => Some(only),
+                _ => None,
+            })
+            .map(|entrypoint| entrypoint.name.as_str())
+    }
+
     pub fn entrypoints(&self) -> &[MagnetManifestV1EntrypointItem] {
         &self.project_manifest.get_manifest().entrypoint
     }
@@ -2886,6 +2901,31 @@ beta = "^1"
         assert!(dir.path().join(MAGNET_PROJECT_FILE).is_file());
         for folder in ["classes", "HelpSource", "tests", ".gitignore"] {
             assert!(!dir.path().join(folder).exists(), "{folder}");
+        }
+    }
+
+    /// C12.3: `magnet run` without a name
+    #[test]
+    fn test_default_entrypoint() {
+        for (entrypoints, expected) in [
+            ("", None),
+            (
+                "[[entrypoint]]\nname = \"test\"\ncommand = \"test.scd\"\n",
+                Some("test"),
+            ),
+            (
+                "[[entrypoint]]\nname = \"test\"\ncommand = \"test.scd\"\n\
+                 [[entrypoint]]\nname = \"main\"\ncommand = \"main.scd\"\n",
+                Some("main"),
+            ),
+            (
+                "[[entrypoint]]\nname = \"test\"\ncommand = \"test.scd\"\n\
+                 [[entrypoint]]\nname = \"perform\"\ncommand = \"perform.scd\"\n",
+                None,
+            ),
+        ] {
+            let (_dir, project) = project(&manifest_with_entrypoints(entrypoints));
+            assert_eq!(project.default_entrypoint(), expected, "{entrypoints}");
         }
     }
 

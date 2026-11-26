@@ -121,6 +121,9 @@ pub enum ProjectLayout {
 /// The script of the entrypoint `main` of a new [ProjectLayout::Project]
 pub const MAIN_SCRIPT: &str = "main.scd";
 
+/// The entrypoint `magnet run` prefers without a name, which a new project gets (C12.2/C12.3)
+pub const DEFAULT_ENTRYPOINT: &str = "main";
+
 /// The `[artifact]` tables of a new project, as a commented starting point for the author, see
 /// `docs/src/guide/publishing.md#packaging`. The quark matches the folders of a new project
 /// (`classes/`, `HelpSource/`), or selects everything for a legacy quark, like the legacy Quark
@@ -393,7 +396,7 @@ impl MagnetManifestV1 {
         manifest.entrypoint = vec![MagnetManifestV1EntrypointItem {
             command: MAIN_SCRIPT.to_string(),
             kind: MagnetManifestV1EntrypointItemKind::Sclang,
-            name: "main".to_string(),
+            name: DEFAULT_ENTRYPOINT.to_string(),
         }];
         Ok(manifest)
     }

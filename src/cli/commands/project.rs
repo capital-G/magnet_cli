@@ -820,7 +820,8 @@ pub struct ProjectRunArgs {
     #[command(flatten)]
     target: TargetArgs,
 
-    /// Name of the entrypoint. If not provided, the entrypoints get listed.
+    /// Name of the entrypoint. If not provided, `main` runs, or the only entrypoint, otherwise
+    /// the entrypoints get listed. Arguments for the entrypoint need its name.
     name: Option<String>,
 
     /// Arguments which are passed on to the entrypoint
@@ -837,7 +838,13 @@ impl MagnetSubCommand for ProjectRunArgs {
         let mut project = Project::open(&project_path)?;
         // the binaries of a lepton project get copied for this machine
         project.set_target(self.target.lazy());
-        let Some(name) = self.name else {
+        let name = self
+            .name
+            .or_else(|| project.default_entrypoint().map(String::from));
+        let Some(name) = name else {
+            if project.entrypoints().is_empty() {
+                println!("{MAGNET_PROJECT_FILE} has no [[entrypoint]]");
+            }
             for entrypoint in project.entrypoints() {
                 println!(
                     "{} ({}): {}",
