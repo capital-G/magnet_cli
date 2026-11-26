@@ -203,9 +203,16 @@
           "type": "object",
           "description": "The server plugins, one artifact per plugin API and platform",
           "properties": {
+            "paths": {
+              "type": "array",
+              "description": "The binaries of the plugins and the shared libraries they need, for every platform without an entry in `platform-paths` - supports glob wildcards",
+              "items": {
+                "type": "string"
+              }
+            },
             "platform-paths": {
               "type": "object",
-              "description": "The binaries of the plugins and the shared libraries they need, keyed by platform tag - supports glob wildcards",
+              "description": "The binaries of the plugins and the shared libraries they need, keyed by platform tag, instead of `paths` for these platforms - supports glob wildcards",
               "propertyNames": {
                 "$ref": "#/definitions/platform"
               },
@@ -218,7 +225,6 @@
               }
             }
           },
-          "required": ["platform-paths"],
           "additionalProperties": false
         }
       },

@@ -14,7 +14,7 @@ The files of a package are selected by the globs of the `[artifact]` tables of t
 Each kind of artifact which a version contains has its own table (see [Artifact kinds](../reference/manifest.md#artifact-kinds)):
 
 * `[artifact.quark]` - its `paths` select the `.sc` classes, `HelpSource` and every other file sclang needs
-* `[artifact.lepton]` - its `platform-paths` select the binaries of the server plugins, keyed by platform tag, e.g. `platform-paths = { macos_arm64 = ["build/*.{scx,dylib}"], linux_x86_64 = ["build/*.{scx,so}"] }`, which also selects the shared libraries a plugin needs next to it
+* `[artifact.lepton]` - its `paths` select the binaries of the server plugins for every platform, e.g. `paths = ["build/*.{scx,so,dylib,dll}"]`, which also selects the shared libraries a plugin needs next to it. `platform-paths` replaces them for single platforms, keyed by platform tag, e.g. `platform-paths = { windows_x86_64 = ["build/Release/*.{scx,dll}"] }`. Only the binaries of the platform being packaged are selected, so a glob may name the extensions of all platforms.
 * `[artifact.source]` - the source artifact, which every version has. By default (`from = "git"`) it contains the files tracked by git at HEAD, without submodules unless `submodules = true`, and packaging refuses uncommitted changes. With `from = "paths"` its `paths` select the files instead, e.g. for a project without git.
 * `exclude` of `[artifact]` - files which are never packaged, even if a glob above selects them
 

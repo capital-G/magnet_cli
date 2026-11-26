@@ -392,12 +392,32 @@ impl MagnetManifestV1 {
             .collect()
     }
 
-    /// The `platform-paths` of `[artifact.lepton]`, if the manifest has it
-    pub fn lepton_platform_paths(&self) -> Option<&HashMap<Platform, Vec<String>>> {
-        self.artifact
+    /// `[artifact.lepton]`, if the manifest has it. It needs `paths` or `platform-paths`,
+    /// which the schema can't require, since typify can't express "one of both" (C11.3).
+    pub fn lepton(&self) -> anyhow::Result<Option<&MagnetManifestV1ArtifactLepton>> {
+        let lepton = self
+            .artifact
             .as_ref()
-            .and_then(|artifact| artifact.lepton.as_ref())
-            .map(|lepton| &lepton.platform_paths)
+            .and_then(|artifact| artifact.lepton.as_ref());
+        if let Some(lepton) = lepton {
+            anyhow::ensure!(
+                !lepton.paths.is_empty() || !lepton.platform_paths.is_empty(),
+                "[artifact.lepton] needs `paths` or `platform-paths`, which select the binaries of the package"
+            );
+        }
+        Ok(lepton)
+    }
+
+    /// The globs of `[artifact.lepton]` which select the binaries for `platform`: its entry
+    /// of `platform-paths`, otherwise the shared `paths` (an empty list if neither has one).
+    /// `None` without `[artifact.lepton]`.
+    pub fn lepton_globs(&self, platform: &Platform) -> anyhow::Result<Option<&[String]>> {
+        Ok(self
+            .lepton()?
+            .map(|lepton| match lepton.platform_paths.get(platform) {
+                Some(globs) if !globs.is_empty() => globs.as_slice(),
+                _ => lepton.paths.as_slice(),
+            }))
     }
 
     /// `[artifact.source]`, whose defaults take the files tracked by git
@@ -831,7 +851,7 @@ baz = {}
         let manifest =
             MagnetManifestV1::from_string(&template_content(None, ProjectLayout::Magnet)).unwrap();
         assert_eq!(manifest.quark_globs(), ["classes/**/*.sc", "HelpSource/**"]);
-        assert!(manifest.lepton_platform_paths().is_none());
+        assert!(manifest.lepton().unwrap().is_none());
         assert!(manifest.artifact.unwrap().source.is_none());
     }
 
@@ -885,8 +905,8 @@ baz = {}
             );
             assert_eq!(manifest.quark_globs(), ["classes/**/*.sc", "HelpSource/**"]);
             assert_eq!(
-                manifest.lepton_platform_paths().unwrap(),
-                &HashMap::from([(
+                manifest.lepton().unwrap().unwrap().platform_paths,
+                HashMap::from([(
                     platform.unwrap_or(Platform::LinuxX8664),
                     vec![binaries.to_string()]
                 )])

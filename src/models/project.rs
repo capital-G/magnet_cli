@@ -326,7 +326,7 @@ impl Project {
         )
     }
 
-    /// If the project is a lepton, copies its binaries of `platform-paths` for this platform
+    /// If the project is a lepton, copies its binaries for this platform (`platform-paths`, else `paths`)
     /// into `magnet_packages/.dev/<name>/plugins/<platform>/<abi>`, so the server loads the
     /// local build (DESIGN.md "Server plugins"). A missing build only warns, since it may not
     /// exist yet, and so does an unknown abi of this machine.
@@ -357,11 +357,11 @@ impl Project {
         let platform = target.platform;
         let (binaries, unmatched) = collect_binaries(&self.path, manifest, &platform)?;
         if binaries.is_empty() && unmatched.is_empty() {
-            warn!("{MAGNET_PROJECT_FILE} has no `platform-paths` for {platform}, so the server doesn't load the binaries of {name}");
+            warn!("{MAGNET_PROJECT_FILE} has no `platform-paths` for {platform} and no `paths` in [artifact.lepton], so the server doesn't load the binaries of {name}");
         }
         for glob in unmatched {
             warn!(
-                "{glob} of `platform-paths` doesn't select any file, maybe {name} isn't built yet"
+                "{glob} of [artifact.lepton] doesn't select any file, maybe {name} isn't built yet"
             );
         }
         let entries = package_entries(

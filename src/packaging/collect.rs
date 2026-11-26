@@ -52,6 +52,8 @@ pub fn collect_files(
     allow_dirty: bool,
 ) -> anyhow::Result<PackageFiles> {
     let exclude = glob_set(manifest.exclude())?;
+    // for every kind, like the server, since all of them carry the manifest
+    manifest.lepton()?;
     let mut mapped = BTreeMap::new();
     let (mut files, binaries) = match kind {
         ArtifactKind::Source => {
@@ -82,19 +84,20 @@ pub fn collect_files(
             )
         }
         ArtifactKind::Lepton => {
-            let platform_paths = manifest.lepton_platform_paths().with_context(|| {
-                format!("There is no [artifact.lepton] in {MAGNET_PROJECT_FILE}, so the package has no lepton artifact")
-            })?;
-            let globs = Platform::from_str(&tags.platform)
-                .ok()
-                .and_then(|platform| platform_paths.get(&platform).cloned())
-                .with_context(|| {
-                    format!(
-                        "There are no `platform-paths` for {} in [artifact.lepton], which select the binaries of the package",
-                        tags.platform
-                    )
-                })?;
-            (BTreeSet::new(), select_all(root, &globs, &exclude)?)
+            ensure!(
+                manifest.lepton()?.is_some(),
+                "There is no [artifact.lepton] in {MAGNET_PROJECT_FILE}, so the package has no lepton artifact"
+            );
+            let globs = match Platform::from_str(&tags.platform) {
+                Ok(platform) => manifest.lepton_globs(&platform)?.unwrap_or_default(),
+                Err(_) => &[],
+            };
+            ensure!(
+                !globs.is_empty(),
+                "There are no `platform-paths` for {} and no `paths` in [artifact.lepton], which select the binaries of the package",
+                tags.platform
+            );
+            (BTreeSet::new(), select_all(root, globs, &exclude)?)
         }
     };
     for path in files.iter().chain(&binaries).chain(mapped.values()) {
@@ -374,21 +377,18 @@ fn tracked_files(
     Ok(())
 }
 
-/// The binaries of `platform-paths` for `platform`, as for an artifact, and the globs which
-/// select no file (e.g. if the plugin isn't built yet)
+/// The binaries of `[artifact.lepton]` for `platform` (its `platform-paths`, else `paths`),
+/// as for an artifact, and the globs which select no file (e.g. if the plugin isn't built yet)
 pub fn collect_binaries(
     root: &Path,
     manifest: &MagnetManifestV1,
     platform: &Platform,
 ) -> anyhow::Result<(Vec<PathBuf>, Vec<String>)> {
-    let globs = manifest
-        .lepton_platform_paths()
-        .and_then(|platform_paths| platform_paths.get(platform).cloned())
-        .unwrap_or_default();
+    let globs = manifest.lepton_globs(platform)?.unwrap_or_default();
     let mut unmatched = vec![];
     let binaries = select(
         &project_files(root)?,
-        &globs,
+        globs,
         &glob_set(manifest.exclude())?,
         &mut unmatched,
     )?;
@@ -959,10 +959,71 @@ mod tests {
             let tags = ArtifactTags::new("api3_0", platform).unwrap();
             let err = lepton(&dir, &manifest, &tags).unwrap_err();
             assert!(
-                err.to_string()
-                    .contains(&format!("no `platform-paths` for {platform}")),
+                err.to_string().contains(&format!(
+                    "no `platform-paths` for {platform} and no `paths`"
+                )),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn test_shared_lepton_paths() {
+        let (dir, manifest) = project(
+            "[artifact.quark]\npaths = [\"Classes/**.sc\"]\n[artifact.lepton]\n\
+             paths = [\"build/*.{scx,so}\"]\n\
+             platform-paths = { windows_x86_64 = [\"out/*.{scx,dll}\"], linux_arm64 = [] }\n",
+            &[
+                "Classes/Foo.sc",
+                "build/Foo.scx",
+                "build/libdep.so",
+                "out/Foo.scx",
+                "out/dep.dll",
+            ],
+        );
+        // `paths` for every platform without its own entry, an empty one included
+        for platform in ["macos_arm64", "linux_x86_64", "linux_arm64"] {
+            let tags = ArtifactTags::new("api3_0", platform).unwrap();
+            let files = lepton(&dir, &manifest, &tags).unwrap();
+            assert_eq!(
+                files.binaries,
+                paths(&["build/Foo.scx", "build/libdep.so"]),
+                "{platform}"
+            );
+        }
+        let windows = ArtifactTags::new("api3_0", "windows_x86_64").unwrap();
+        let files = lepton(&dir, &manifest, &windows).unwrap();
+        assert_eq!(files.binaries, paths(&["out/Foo.scx", "out/dep.dll"]));
+        // the `.dev` copy and overrides take the same globs
+        let (binaries, unmatched) =
+            collect_binaries(dir.path(), &manifest, &Platform::WindowsX8664).unwrap();
+        assert_eq!(binaries, paths(&["out/Foo.scx", "out/dep.dll"]));
+        assert!(unmatched.is_empty());
+    }
+
+    #[test]
+    fn test_lepton_needs_paths_or_platform_paths() {
+        for lepton in [
+            "[artifact.lepton]\n",
+            "[artifact.lepton]\npaths = []\nplatform-paths = {}\n",
+        ] {
+            let (dir, manifest) = project(
+                &format!("[artifact.quark]\npaths = [\"Classes/**.sc\"]\n{lepton}"),
+                &["Classes/Foo.sc"],
+            );
+            // for every kind, like the server
+            for kind in [ArtifactKind::Quark, ArtifactKind::Lepton] {
+                let tags = match kind {
+                    ArtifactKind::Lepton => macos_arm64(),
+                    _ => ArtifactTags::any(),
+                };
+                let err = collect_files(dir.path(), &manifest, kind, &tags, false).unwrap_err();
+                assert!(
+                    err.to_string()
+                        .contains("[artifact.lepton] needs `paths` or `platform-paths`"),
+                    "{lepton}: {err}"
+                );
+            }
         }
     }
 
